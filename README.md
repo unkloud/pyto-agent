@@ -6,7 +6,7 @@ week's notes", "put the thing I just copied into a note" — and the agent write
 file into a workspace on the device, runs it, and tells you what happened.
 
 * **Standard library only.** No `pip install`, no `requests`, no `pydantic`. Every claim
-  in this README is checked by `stdlib_audit.py` and 458 tests.
+  in this README is checked by `stdlib_audit.py` and 528 tests.
 * **Python 3.10**, the version Pyto ships. Verified on real CPython 3.10.22 and 3.12.
 * **OpenAI-compatible API** — DeepSeek by default (`deepseek-chat`), anything
   chat-completions-shaped otherwise.
@@ -15,44 +15,109 @@ file into a workspace on the device, runs it, and tells you what happened.
 
 ---
 
-## 1. Getting it into Pyto
+## 1. Installing on the device, from GitHub
 
-Pyto runs Python from its own container. Pick whichever route you have:
+Source: **https://github.com/unkloud/pyto-agent**
 
-**Files app / iCloud Drive (easiest)**
+Pyto has **no `git`, no `unzip` and no `pip`** — but it has Python, so the installer uses
+nothing but the standard library: it downloads the repository archive over HTTPS and unpacks
+it. You do not need a computer, a cable or a Mac.
 
-1. Put the whole `pyto-harness` folder in iCloud Drive (or On My iPhone → Pyto).
-2. In Pyto, open the file browser, navigate into the folder, and run `run.py`.
-   Pyto's file browser is the "Files" provider, so the folder shows up there directly.
+### Option A — paste two lines into the Pyto console (recommended)
 
-**From a Mac/PC with a cable or Wi-Fi sync**
+Open Pyto, tap the console, and paste:
 
-Copy the folder into Pyto's documents directory, then in Pyto:
+```python
+import urllib.request, runpy
+open("install.py", "wb").write(urllib.request.urlopen("https://raw.githubusercontent.com/unkloud/pyto-agent/main/install.py", timeout=120).read())
+runpy.run_path("install.py", run_name="__main__")
+```
+
+It downloads `pyto-agent` into a folder next to where Pyto starts, checks that every file
+parses as Python 3.10 and that the package imports, then prints the exact commands to run
+next — with the absolute paths for *your* device already filled in.
+
+Choose where it lands by passing an argument:
+
+```python
+import sys; sys.argv = ["install.py", "--into", "pyto-agent"]   # default
+import sys; sys.argv = ["install.py", "--into", "~/Documents/pyto-agent"]
+```
+
+### Option B — the same thing without pasting a URL
+
+If you would rather read the installer before running it (a good habit), fetch it with
+`curl`, which Pyto ships, and run it:
+
+```python
+import os
+os.system("curl -L -o install.py https://raw.githubusercontent.com/unkloud/pyto-agent/main/install.py")
+import runpy
+runpy.run_path("install.py", run_name="__main__")
+```
+
+The file is 290 lines and imports only `argparse`, `ast`, `io`, `os`, `shutil`, `sys`,
+`urllib` and `zipfile`.
+
+### Option C — download the zip on the phone or on a computer
+
+1. Download **https://github.com/unkloud/pyto-agent/archive/refs/heads/main.zip**
+   (in Safari, or on a computer and AirDrop/iCloud it across).
+2. Put `pyto-agent-main.zip` somewhere Pyto can read — On My iPhone → Pyto, or iCloud Drive.
+3. In the Pyto console, install from that file:
+
+```python
+import sys, runpy
+sys.argv = ["install.py", "--zip", "pyto-agent-main.zip"]
+runpy.run_path("install.py", run_name="__main__")
+```
+
+…or unzip it yourself, which is what the installer does anyway:
+
+```python
+import zipfile, os
+zipfile.ZipFile("pyto-agent-main.zip").extractall(".")
+os.rename("pyto-agent-main", "pyto-agent")
+```
+
+### Option D — from a computer, over Files or a cable
+
+Copy the `pyto-agent` folder into Pyto's documents directory (Files → On My iPhone → Pyto),
+then confirm where it landed:
 
 ```python
 import os
 print(os.getcwd())          # where Pyto starts
-os.chdir("pyto-harness")    # or the full path you copied it to
+os.chdir("pyto-agent")      # or the full path you copied it to
 ```
 
-**Straight from a URL** (if you have the folder in a git repo you can reach):
+### Updating later
+
+Re-run the **same** Option A lines, or from inside the folder:
 
 ```python
-import urllib.request, zipfile, io
-url = "https://example.com/pyto-harness.zip"
-data = urllib.request.urlopen(url).read()
-zipfile.ZipFile(io.BytesIO(data)).extractall(".")
+import runpy, sys
+sys.argv = ["install.py", "--into", "."]
+runpy.run_path("install.py", run_name="__main__")
 ```
 
-Then, from the Pyto console or the editor's Run button:
+An update replaces the code and nothing else. Your API key, sessions, memory and backups
+live in `~/.pyto_harness`, and the programs the agent writes live in the workspace
+(`~/pyto_harness_workspace` by default) — neither is inside the code directory, so
+updating cannot lose them. The installer refuses to touch a directory that is not a
+`pyto-agent` checkout unless you pass `--force`.
+
+### Checking it worked
 
 ```python
-import runpy
-runpy.run_path("run.py", run_name="__main__")
+import os, runpy, sys
+os.chdir("pyto-agent")
+sys.argv = ["run.py", "--version"]; runpy.run_path("run.py", run_name="__main__")
+sys.argv = ["run.py", "--tools"];   runpy.run_path("run.py", run_name="__main__")   # 34 tools
 ```
 
 `run.py` adds its own directory to `sys.path`, so it does not matter which directory Pyto
-started in.
+started in — `os.chdir` is only there to keep relative paths (workspace, `install.py`) sane.
 
 > Pyto's `sys.executable` is not a real interpreter you can spawn. That is fine — the
 > harness detects this (`harness/ios.py: has_fake_subprocess()`) and runs programs
@@ -108,6 +173,19 @@ contains `api_key`, `token`, `secret`, `password` or `authorization`.
 
 ## 3. Running it
 
+**On the device there is no shell to type `python run.py` into.** Pyto runs a script, so you
+either open `run.py` in Pyto's editor and press Run, or — for flags and arguments — use the
+one-line form the installer prints:
+
+```python
+import os, runpy, sys
+os.chdir("pyto-agent")                              # where you installed it
+sys.argv = ["run.py", "--doctor", "--fix"]          # the arguments you want
+runpy.run_path("run.py", run_name="__main__")
+```
+
+**In a checkout on a computer** (or if you prefer Pyto's shell) the plain form works:
+
 ```bash
 python run.py "rename my screenshots by date"     # one task, then exit
 python run.py                                     # interactive terminal chat
@@ -126,6 +204,8 @@ python run.py --repair "the api_base keeps 404ing"  # gated edit of the harness'
 python run.py --backups                           # list source snapshots
 python run.py --restore <backup_id>               # put one back (also gated)
 ```
+
+The same arguments work in both forms — only the `sys.argv = [...]` line changes.
 
 Flags: `--model`, `--api-base`, `--api-key`, `--max-turns`, `--no-stream`, `--no-compact`,
 `--verbose`, `--init`, `--version`, `--doctor`, `--fix`, `--deep`, `--deep-tests`,
@@ -321,7 +401,7 @@ applies the repairs a machine can and prints a before/after report. `--repair "<
 lets the model change the harness's own source, subject to a path jail, an AST/stdlib
 pre-check, a snapshot with hashes, and the offline test suite as the gate: a red suite
 reverts the edit byte-for-byte and hands back the failure verbatim. A bounded gate (~3 s,
-227 tests) is the default; `--deep-tests` asks for all 458.
+227 tests) is the default; `--deep-tests` asks for all 528.
 
 **The full story — the three tiers, the guardrail list, what is deliberately not automated,
 and a worked transcript — is in [SELF-REPAIR.md](SELF-REPAIR.md).**
@@ -371,12 +451,13 @@ the agent reads it back with `memory_read` and stops asking.
 ## 9. Layout
 
 ```
+install.py             installs/updates from GitHub with the standard library only (no git, no unzip)
 run.py                 CLI entry point
 harness/
   llm.py               chat-completions client: SSE, retries, cancellation, non-streaming fallback
   schema.py            JSON-Schema-subset validator (bool is not an integer)
   tools.py             tool registry: validation, approval, bounded timeout, concurrent dispatch
-  tools_ios.py         the 33 model-facing tools (7 of them diagnose and repair the harness)
+  tools_ios.py         the 34 model-facing tools (8 of them diagnose, repair or ground the API)
   ios.py               device capability adapters, all degrading gracefully off-device
   loop.py              agent loop, system prompt, approval policy, result truncation
   session.py           append-only JSONL log: append, resume, projection, compaction
@@ -386,8 +467,9 @@ harness/
   ui.py                Pyto UI window, terminal REPL, terminal approval prompt
   doctor.py            self-diagnosis: 19 structured checks + the fixes a machine can apply
   repair.py            self-repair: path-jailed, snapshot-first, test-gated source edits
+  pyto_api.py          Pyto library grounding: 25 modules / 160 members, curated + introspected
   errors.py            error taxonomy with retryability
-tests/                 458 offline tests against a stdlib mock OpenAI server
+tests/                 528 offline tests against a stdlib mock OpenAI server
 examples/              three programs the agent is expected to be able to write
 stdlib_audit.py        proves "stdlib only" and "parses as Python 3.10"
 ```
@@ -395,7 +477,7 @@ stdlib_audit.py        proves "stdlib only" and "parses as Python 3.10"
 ## 10. Verifying it yourself
 
 ```bash
-python3 -m unittest discover -s tests -t .     # 458 tests, offline, no network (~20 s)
+python3 -m unittest discover -s tests -t .     # 528 tests, offline, no network (~20 s)
 python3 stdlib_audit.py                        # third_party_modules: [], 16 files parse at (3,10)
 python3 run.py --dry-run "hello"               # prints the request, sends nothing
 python3 run.py --doctor                        # health report, exit 0 healthy / 1 fixable / 2 human
