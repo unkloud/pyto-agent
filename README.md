@@ -26,12 +26,12 @@ it. You do not need a computer, a cable or a Mac.
 ### Option A — one snippet, the whole setup (recommended)
 
 Open Pyto, tap the console, and paste. This installs the **released, digest-verified
-`v1.0.3`** — the one-stop installer — not "whatever `main` is today":
+`v1.0.4`** — the one-stop installer — not "whatever `main` is today":
 
 ```python
 import sys, urllib.request, runpy
-open("install.py", "wb").write(urllib.request.urlopen("https://raw.githubusercontent.com/unkloud/pyto-agent/v1.0.3/install.py", timeout=120).read())
-sys.argv = ["install.py", "--ref", "v1.0.3", "--sha256", "2e48fe091b0e6a317d8285cb308b60cbb790bb0c4f78ee607cda043ca822eff0"]
+open("install.py", "wb").write(urllib.request.urlopen("https://raw.githubusercontent.com/unkloud/pyto-agent/v1.0.4/install.py", timeout=120).read())
+sys.argv = ["install.py", "--ref", "v1.0.4", "--sha256", "0c50261abe1198dbba5ae971f626e1a2954ff8afefe8c97ccb6b20768f348db1"]
 runpy.run_path("install.py", run_name="__main__")
 ```
 
