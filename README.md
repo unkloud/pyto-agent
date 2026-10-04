@@ -26,20 +26,20 @@ it. You do not need a computer, a cable or a Mac.
 ### Option A — one snippet, the whole setup (recommended)
 
 Open Pyto, tap the console, and paste. This installs the **released, digest-verified
-`v1.0.0`**, not "whatever `main` is today":
+`v1.0.1`** — the one-stop installer — not "whatever `main` is today":
 
 ```python
 import sys, urllib.request, runpy
-open("install.py", "wb").write(urllib.request.urlopen("https://raw.githubusercontent.com/unkloud/pyto-agent/v1.0.0/install.py", timeout=120).read())
-sys.argv = ["install.py", "--ref", "v1.0.0", "--sha256", "723f0878e723875bd152d78cea64527a46c97f7b17ccdd9ba45e76696c2eb464"]
+open("install.py", "wb").write(urllib.request.urlopen("https://raw.githubusercontent.com/unkloud/pyto-agent/v1.0.1/install.py", timeout=120).read())
+sys.argv = ["install.py", "--ref", "v1.0.1", "--sha256", "cbb1c1cb0bb69c7b4e89bfe7c0973d45fa5ce9e1aa2700bf5121f35cc0126518"]
 runpy.run_path("install.py", run_name="__main__")
 ```
 
 If the download does not match that digest, the installer **refuses and writes nothing**.
-Every run prints the **SHA-256 of the archive it downloaded**. (A tag installs exactly that
-tag's bytes, including that tag's installer; the one-stop flow below is what `main` — and
-releases after `v1.0.0` — does. The *Track the latest* snippet a few lines down is how to
-get it today.)
+Every run prints the **SHA-256 of the archive it downloaded**. A tag installs exactly that
+tag's bytes, including that tag's installer — so `v1.0.0` gives you the older, install-only
+installer, and its digest is in that release's notes. The *Track the latest* snippet a few
+lines down installs whatever `main` is today.
 
 **That single run is the whole setup. There is nothing else to paste.** It unpacks
 `pyto-agent` next to where Pyto starts, checks that every file parses as Python 3.10 and
