@@ -23,9 +23,26 @@ Pyto has **no `git`, no `unzip` and no `pip`** — but it has Python, so the ins
 nothing but the standard library: it downloads the repository archive over HTTPS and unpacks
 it. You do not need a computer, a cable or a Mac.
 
-### Option A — paste two lines into the Pyto console (recommended)
+### Option A — paste three lines into the Pyto console (recommended)
 
-Open Pyto, tap the console, and paste:
+Open Pyto, tap the console, and paste. This installs the **released, digest-verified
+`v1.0.0`**, not "whatever `main` is today":
+
+```python
+import sys, urllib.request, runpy
+open("install.py", "wb").write(urllib.request.urlopen("https://raw.githubusercontent.com/unkloud/pyto-agent/v1.0.0/install.py", timeout=120).read())
+sys.argv = ["install.py", "--ref", "v1.0.0", "--sha256", "723f0878e723875bd152d78cea64527a46c97f7b17ccdd9ba45e76696c2eb464"]
+runpy.run_path("install.py", run_name="__main__")
+```
+
+If the download does not match that digest, the installer **refuses and writes nothing**.
+It installs `pyto-agent` into a folder next to where Pyto starts, checks that every file
+parses as Python 3.10 and that the package imports, then prints the exact commands to run
+next — with the absolute paths for *your* device already filled in. Every run prints the
+**SHA-256 of the archive it downloaded**.
+
+**Track the latest instead** (simpler, and you accept that `main` moves). Drop the
+`--sha256` line and the `v1.0.0` refs, and fetch the installer from `main`:
 
 ```python
 import urllib.request, runpy
@@ -33,23 +50,9 @@ open("install.py", "wb").write(urllib.request.urlopen("https://raw.githubusercon
 runpy.run_path("install.py", run_name="__main__")
 ```
 
-It downloads `pyto-agent` into a folder next to where Pyto starts, checks that every file
-parses as Python 3.10 and that the package imports, then prints the exact commands to run
-next — with the absolute paths for *your* device already filled in. Every run also prints
-the **SHA-256 of the archive it downloaded**.
-
-**Pin what you install.** The installer is the one component that runs before the harness
-exists and then holds your API key, so do not take "whatever `main` is today":
-
-```python
-import sys, runpy
-sys.argv = ["install.py", "--ref", "v1.0.0"]              # a tag, not a branch
-runpy.run_path("install.py", run_name="__main__")
-# prints:  sha256 <64 hex chars>  (… bytes, v1.0.0)
-# next update, verify the same bytes:
-sys.argv = ["install.py", "--ref", "v1.0.0", "--sha256", "<that digest>"]
-runpy.run_path("install.py", run_name="__main__")
-```
+**Updating is the same command.** Re-run the snippet above and it replaces the code in
+place. To move to a newer release later, take that release's digest from its GitHub release
+page and pass it as `--sha256` — the installer will refuse anything that does not match.
 
 A digest that does not match **refuses to install and writes nothing**: the tag moved, the
 download was modified in transit, or the pin is for a different ref.
