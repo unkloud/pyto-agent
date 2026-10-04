@@ -18,8 +18,10 @@ One run does what the four "paste this next" one-liners used to do, in order:
    else use ``--api-key``/``--key-file``/``DEEPSEEK_API_KEY``, else ask (hidden input,
    plain ``input()`` where the platform cannot hide it) -- and prove it with one
    minimal chat request through the doctor's own probe before anything is written;
-   a hidden state directory left by an older release is renamed first, so the key
-   that release stored is found again;
+   a hidden state directory left by an older release is moved -- or, when the new
+   directory is already there without a config, merged entry by entry without
+   overwriting anything -- before the home is resolved, so the key that release
+   stored is found again;
 3. write the config through the harness's hardened writer (0600, never a silent
    overwrite, unrelated fields preserved);
 4. run the doctor's checks and apply the safe fixes, printing one compact line;
@@ -542,6 +544,47 @@ def harness_home_module(modules):
 
     package = getattr(getattr(modules, "config", None), "__package__", "") or PRIVATE_PACKAGE
     return importlib.import_module(package + ".home")
+
+
+def migrate_state_directories(modules) -> str:
+    """Ask the loaded harness to move every legacy hidden state directory, and report it.
+
+    The first path-touching step of :func:`setup`: the harness resolver proves a home with
+    a write probe, and that probe **creates** ``<home>/pyto_harness`` -- an empty new
+    directory on disk is what used to turn the one-time move into a silent no-op.  So the
+    move has to happen before anything resolves a home, which is why
+    ``harness.home.candidate_homes`` exists: it guesses the homes without creating
+    anything.  The loaded tree owns that rule; the installer never keeps a copy of it.
+
+    An older installed tree has no candidate-home guess.  It gets no call at all rather
+    than a resolve-first fallback: resolving is exactly the call that creates the new
+    directory and strands the old data.
+    """
+    try:
+        home_module = harness_home_module(modules)
+        migrate = getattr(home_module, "migrate_candidate_homes", None)
+        if migrate is None:
+            return ""
+        return migrate()
+    except Exception:  # noqa: BLE001 - never let housekeeping stop the install
+        return ""
+
+
+def migrate_state_before_setup(target: str) -> str:
+    """The earliest chance: migrate with a harness that is already on disk.
+
+    :func:`setup` runs the same call on the tree it just installed, and the installer does
+    nothing that resolves or writes a state path in between.  This covers the runs where a
+    harness is importable *before* the archive is read: an installer started from a
+    checkout, or an update over an existing install.  A standalone installer with no
+    harness beside it -- and a tree too old to know the candidate homes -- return ``""``;
+    setup then reports the real story with the tree it just installed.
+    """
+    try:
+        modules = load_harness(target)
+    except Exception:  # noqa: BLE001 - setup() raises the actionable InstallError itself
+        return ""
+    return migrate_state_directories(modules)
 
 
 # --------------------------------------------------------------------------------------
@@ -1088,18 +1131,15 @@ def setup(args, target: str) -> int:
     report = Report(modules.security)
     if modules.note:
         report("setup: {}".format(modules.note))
-    # Before anything reads the state directory: move a hidden one from an older release
-    # into the open, so the key that release saved is found again and the folder is
-    # visible in Files.  Nothing is ever deleted; a refusal or failure is reported here
-    # and the install continues against the resolved (new) path.  A tree too old to have
-    # harness/home.py (or one whose home cannot be resolved here) is simply skipped: the
-    # config step below reports that condition in its own words.
-    migration = ""
-    try:
-        home_module = harness_home_module(modules)
-        migration = home_module.migrate_legacy_state(home_module.resolve_home())
-    except Exception:  # noqa: BLE001 - never let housekeeping stop the install
-        migration = ""
+    # Before anything reads or resolves a state path: move a hidden one from an older
+    # release into the open, so the key that release saved is found again and the folder is
+    # visible in Files.  This is the first path-touching step on purpose -- the resolver's
+    # probe creates the new directory, and that empty directory is what used to make the
+    # move a no-op and strand the old data.  Nothing is ever deleted: a refusal, a merge or
+    # a failure is reported here and the install continues against the resolved (new) path.
+    # A tree too old to have harness/home.py (or one whose home cannot be resolved here) is
+    # simply skipped: the config step below reports that condition in its own words.
+    migration = migrate_state_directories(modules)
     if migration:
         report(migration)
     if args.api_key:
@@ -1362,6 +1402,14 @@ def main(argv=None) -> int:
     except InstallError as exc:
         print(str(exc), file=sys.stderr)
         return 2
+
+    # Before the archive is read and before any state path is resolved: move a hidden state
+    # folder from a release before the rename into the open, using a harness that is
+    # already on disk (the installer's own tree, or the install being updated).  Silent and
+    # idempotent when there is nothing to do; setup() repeats it for the tree it installs.
+    migration = migrate_state_before_setup(target)
+    if migration:
+        print(migration)
 
     if os.path.isdir(target) and os.listdir(target) and not args.force:
         if not os.path.isfile(os.path.join(target, "run.py")):

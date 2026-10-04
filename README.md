@@ -90,8 +90,11 @@ arguments, so you never copy a line at all.
 `pyto_harness`** to see `config.json` (your API key, mode 0600), `sessions/` (the
 transcripts), `backups/` (source snapshots) and `health.json`/`capabilities.json` — so you
 can back it up, copy it to another device or delete it from the app UI. (Releases before
-this one kept it hidden as `.pyto_harness`; the first run renames it to the visible name,
-once, and never touches the new folder if it already exists.)
+this one kept it hidden as `.pyto_harness`; the next run moves it out of hiding — before
+anything can create the new folder — and when `pyto_harness` is already there without a
+`config.json`, the old entries are moved in one by one and nothing already in the new
+folder is ever overwritten. If the new folder already has a `config.json`, the old one is
+left exactly where it is and named, with the command that deletes it.)
 
 > **If Pyto has no home directory.** Some Pyto installs cannot resolve `~`: there is no
 > usable `HOME` and `os.path.expanduser("~")` returns the string `"~"`, so `~/pyto_harness`

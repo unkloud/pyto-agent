@@ -444,18 +444,20 @@ class DoctorContext:
         environ: Mapping[str, str] = dict(os.environ) if env is None else env
         fallback_dir = os.path.join(os.getcwd(), CONFIG_DIR_NAME)
         home_error = ""
+        # The state directory moved out of hiding in this release: move a legacy one now,
+        # *before* the resolver below -- its write probe creates ``pyto_harness``, and that
+        # empty directory on disk is what used to turn the move into a silent no-op.  The
+        # candidates are guesses that create nothing (:func:`harness.home.candidate_homes`).
+        # This is the doctor's own startup hook: a normal run does it in run.py instead and
+        # hands the message to the report through ``state_migration``.
+        state_migration = ""
+        try:
+            state_migration = home.migrate_candidate_homes(environ)
+        except Exception:  # noqa: BLE001 - housekeeping must never break a diagnosis
+            state_migration = ""
         home_choice = home.resolve_home_choice(environ=environ)
         if not home_choice.ok:
             home_error = home_choice.error
-        # The state directory moved out of hiding in this release: move a legacy one now,
-        # before any check reads it, and keep the message so the report can name the move.
-        # This is the doctor's own startup hook: a normal run does it in run.py instead.
-        state_migration = ""
-        if home_choice.ok:
-            try:
-                state_migration = home.migrate_legacy_state(home_choice.path)
-            except Exception:  # noqa: BLE001 - housekeeping must never break a diagnosis
-                state_migration = ""
 
         def absolute(value: str, what: str, fallback: str) -> str:
             """Absolutise an explicit path, recording (not raising) an unexpandable ``~``."""
@@ -1794,6 +1796,11 @@ def check_model_accepted(ctx: DoctorContext) -> CheckResult:
 # --------------------------------------------------------------------------------------
 
 
+def _one_line(text: str) -> str:
+    """A multi-line report (a migration notice) squashed onto one line for a check detail."""
+    return "; ".join(line.strip() for line in str(text or "").splitlines() if line.strip())
+
+
 def check_home(ctx: DoctorContext) -> CheckResult:
     """The resolved home directory and the state folder inside it.
 
@@ -1804,7 +1811,8 @@ def check_home(ctx: DoctorContext) -> CheckResult:
 
     It also reports a leftover hidden state directory from before the rename: when both
     the visible and the legacy folder exist, the visible one is in use and the old one is
-    untouched — the user deletes it when they are ready.
+    untouched — the user deletes it when they are ready.  The startup hook's own message is
+    quoted there, so a merge that had to skip files names every file it left behind.
     """
     evidence: Dict[str, Any] = {"state": ctx.state}
     if ctx.home:
@@ -1879,13 +1887,18 @@ def check_home(ctx: DoctorContext) -> CheckResult:
             "`rm -rf {}`.".format(legacy)
         )
         if os.path.isdir(legacy) and not os.path.islink(legacy) and os.path.lexists(home.state_dir_in(ctx.home)):
+            detail = "{} is in use; the old hidden {} is still there, untouched".format(
+                home.state_dir_in(ctx.home), legacy
+            )
+            if ctx.state_migration:
+                # A merge that could not take everything names what it left behind: the
+                # user has to know which files still live only in the old folder.
+                detail += " ({})".format(_one_line(ctx.state_migration))
             return result(
                 "home",
                 "Home folder and state directory",
                 "warn",
-                "{} is in use; the old hidden {} is still there, untouched".format(
-                    home.state_dir_in(ctx.home), legacy
-                ),
+                detail,
                 human_action=human_action,
                 evidence=evidence,
             )
@@ -1894,7 +1907,7 @@ def check_home(ctx: DoctorContext) -> CheckResult:
             "Home folder and state directory",
             "warn",
             "the old hidden state directory {} is still there, untouched ({})".format(
-                legacy, (ctx.state_migration or "the move did not happen").splitlines()[0]
+                legacy, _one_line(ctx.state_migration) or "the move did not happen"
             ),
             human_action=human_action,
             evidence=evidence,

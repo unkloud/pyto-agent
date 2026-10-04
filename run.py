@@ -126,8 +126,14 @@ def resolve_config_lenient(args: argparse.Namespace) -> Tuple[Config, str]:
         return config, str(exc)
 
 
-def run_doctor_command(args: argparse.Namespace) -> int:
-    """``--doctor`` and ``--doctor --fix``.  Returns the exit code the spec asks for."""
+def run_doctor_command(args: argparse.Namespace, migration: str = "") -> int:
+    """``--doctor`` and ``--doctor --fix``.  Returns the exit code the spec asks for.
+
+    ``migration`` is what :func:`migrate_state_directory` already did in :func:`main`
+    *before* the config was resolved (resolving it can create the state directory, so it
+    cannot be left to the doctor).  It is carried into the report header, so a move or a
+    merge is always named; the doctor's own home check still warns about a leftover folder.
+    """
     config, config_error = resolve_config_lenient(args)
     if config_error:
         print("configuration error: {} (diagnosing anyway)".format(config_error), file=sys.stderr)
@@ -140,6 +146,8 @@ def run_doctor_command(args: argparse.Namespace) -> int:
         workspace=args.workspace or None,
     )
     ctx.config_error = config_error
+    if migration:
+        ctx.state_migration = migration
     before = doctor.run_checks(ctx)
     if args.fix:
         after, outcomes = doctor.apply_fixes(ctx, before, safe_only=False)
@@ -401,17 +409,19 @@ def migrate_state_directory() -> str:
     """Move a legacy hidden state directory into the open, once, before anything reads it.
 
     The state directory dropped its leading dot so the iOS Files app can show it.  An
-    install from a previous release still has the hidden one: rename it here, at the top
-    of a run, and hand the message to the caller so the user knows where their config and
+    install from a previous release still has the hidden one: move it here, at the top of a
+    run, and hand the message to the caller so the user knows where their config and
     sessions went.  Returns ``""`` when there was nothing to do (the usual case, and the
-    only case after the first run).  ``--doctor`` does this inside
-    :meth:`harness.doctor.DoctorContext.for_config` instead, so its report can name it.
+    only case after the first run).
+
+    The homes are *guessed* (:func:`harness.home.candidate_homes`), never resolved: the
+    resolver proves a candidate by creating ``<home>/pyto_harness``, and an empty new
+    directory on disk is what used to turn this move into a silent no-op.  Calling this
+    before the config is resolved is therefore the whole point.  ``--doctor`` gets the same
+    treatment in :func:`main`; the message is carried into its report header.
     """
     try:
-        choice = home.resolve_home_choice()
-        if not choice.ok:
-            return ""
-        return home.migrate_legacy_state(choice.path)
+        return home.migrate_candidate_homes()
     except Exception:  # noqa: BLE001 - housekeeping must never stop a run
         return ""
 
@@ -555,13 +565,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     url_task = task_from_environment(raw_argv) or ""
     warn_about_argv_key(args)
 
-    # The state directory is visible now; a hidden one from an older release is renamed
-    # before anything resolves a path (--doctor does it inside DoctorContext.for_config so
-    # its report can name the move).  On stderr: it is a notice, not agent output.
-    if not (args.doctor or args.fix):
-        migration = migrate_state_directory()
-        if migration:
-            print(migration, file=sys.stderr)
+    # The state directory is visible now; a hidden one from an older release is moved
+    # before *anything* resolves a path -- resolving a home probes it, and the probe
+    # creates the new directory, which used to make this move a silent no-op.  Every run
+    # path does it here, ``--doctor`` included; that one carries the message into its
+    # report header instead of printing it twice.  On stderr: a notice, not agent output.
+    migration = migrate_state_directory()
+    if migration and not (args.doctor or args.fix):
+        print(migration, file=sys.stderr)
 
     if args.capabilities:
         print(ios.capability_report())
@@ -589,7 +600,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             return 1
         return 0
     if args.doctor or args.fix:
-        return run_doctor_command(args)
+        return run_doctor_command(args, migration)
     if args.repair:
         return run_repair_command(args)
     if args.backups:

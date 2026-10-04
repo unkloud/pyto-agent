@@ -28,8 +28,17 @@ The state directory is :data:`STATE_DIR_NAME` (``pyto_harness``), deliberately w
 leading dot: the iOS Files app hides dot-folders, so a hidden state directory could not be
 seen, saved into, backed up or deleted from the device.  Installs made before the rename
 kept it under the legacy hidden name, :data:`LEGACY_STATE_DIR_NAME`;
-:func:`migrate_legacy_state` moves that one aside exactly once, at startup, and never
-touches anything else.
+:func:`migrate_legacy_state` moves it out of hiding exactly once, at startup.
+
+The move has to happen *before the resolver probes anything*, because a probe **creates**
+``<home>/pyto_harness`` — and an empty new directory on disk is what used to make the move
+a no-op and strand the old data.  The startup hooks therefore use
+:func:`candidate_homes`, a guess that only reads the environment, ``argv[0]`` and the
+current directory and creates nothing, and call :func:`migrate_legacy_state` for each
+candidate.  When the new directory is already there, :func:`migrate_legacy_state` moves the
+old entries in one by one without overwriting anything, or (when the new directory already
+owns a ``config.json``) leaves the old one alone and says so — it never merges two configs
+and never deletes a non-empty folder.
 
 The winner is cached per process (one probe, not one per call) and keyed by the values
 that can change the answer, so setting ``PYTO_HARNESS_HOME`` in a running interpreter is
@@ -90,6 +99,39 @@ TEMPORARY_WARNING = (
 MIGRATED_MESSAGE = "moved the old ~/{legacy} to ~/{state} so the Files app can see it".format(
     legacy=LEGACY_STATE_DIR_NAME, state=STATE_DIR_NAME
 )
+
+#: The same news for the case where ``<home>/pyto_harness`` already existed when the old
+#: folder was found -- typically because a write probe created it before the move ran.
+#: The entries are moved in one by one (never overwriting), so the message says "merged".
+MERGED_MESSAGE = "merged the old ~/{legacy} into ~/{state} so the Files app can see it".format(
+    legacy=LEGACY_STATE_DIR_NAME, state=STATE_DIR_NAME
+)
+
+#: Nothing could be taken out of the old folder: every entry in it is already in the new
+#: one (and the new one has no ``config.json``, or it would not have been touched at all).
+MERGE_KEPT_MESSAGE = "kept the old ~/{legacy}: every entry in it is already in ~/{state}".format(
+    legacy=LEGACY_STATE_DIR_NAME, state=STATE_DIR_NAME
+)
+
+#: Every single move failed: say so instead of claiming a merge that did not happen.
+MERGE_FAILED_MESSAGE = "could not merge the old ~/{legacy} into ~/{state}".format(
+    legacy=LEGACY_STATE_DIR_NAME, state=STATE_DIR_NAME
+)
+
+
+def legacy_kept_message(legacy_path: str) -> str:
+    """``<home>/pyto_harness/config.json`` exists: two configs are never merged.
+
+    Says where the old folder is and exactly how to remove it, and nothing else: the old
+    folder still holds whatever the user put there.
+    """
+    return (
+        "the old ~/{legacy} is still there and was left untouched: ~/{state} already has a\n"
+        "config.json, and two configs are never merged. When you are sure the old one is not\n"
+        "needed, delete it yourself -- in the Files app it is the hidden folder inside the\n"
+        "Pyto folder (turn on 'Show Hidden Files'), or with:\n"
+        "  rm -rf {path}"
+    ).format(legacy=LEGACY_STATE_DIR_NAME, state=STATE_DIR_NAME, path=legacy_path)
 
 
 @dataclass(frozen=True)
@@ -230,30 +272,43 @@ def legacy_state_dir_in(home_dir: str) -> str:
 def migrate_legacy_state(home_dir: str) -> str:
     """Move a hidden ``<home>/.pyto_harness`` to ``<home>/pyto_harness``, once.
 
-    Called where a run starts (``run.py``, ``install.py``, ``DoctorContext.for_config``),
-    never from a library helper in the middle of a session, so it can only ever happen
-    before anything has opened the state directory.
+    Called where a run starts (``run.py``, ``install.py``, ``DoctorContext.for_config``)
+    through :func:`migrate_candidate_homes`, and never from a library helper in the middle
+    of a session, so it can only ever happen before anything has opened the state
+    directory.  Because the resolver's write probe *creates* the new directory, the call
+    has to come first: that is why the startup hooks guess the home with
+    :func:`candidate_homes` instead of resolving it.
 
     The rules, in order:
 
-    * ``<home>/pyto_harness`` already exists → do **nothing**.  A new directory is never
-      touched and never merged into.
-    * nothing named ``.pyto_harness`` → nothing to do.
-    * ``.pyto_harness`` is a symlink or a regular file → refuse and report it.  A symlink
-      could point anywhere, and moving through it would move somebody else's directory.
-    * otherwise rename it (``os.replace``), falling back to ``shutil.move`` for a
-      cross-device home.  Both failing leaves the old directory exactly where it was.
+    * nothing named ``.pyto_harness`` → nothing to do (the usual case after the first run).
+    * ``.pyto_harness`` is a symlink or a regular file → refuse and report it, whatever
+      else exists.  A symlink could point anywhere, and moving through it would move
+      somebody else's directory.
+    * ``<home>/pyto_harness`` does not exist → rename the old folder (``os.replace``),
+      falling back to ``shutil.move`` for a cross-device home.  Both failing leaves the
+      old directory exactly where it was.  This is the only case that prints
+      :data:`MIGRATED_MESSAGE`.
+    * ``<home>/pyto_harness`` exists and already has a ``config.json`` → leave the old
+      folder alone and report where it is and how to delete it: a configured state
+      directory is never merged into.
+    * ``<home>/pyto_harness`` exists without a ``config.json`` (a write probe got there
+      first) → move the old entries in one by one with ``shutil.move``, **never
+      overwriting** an entry that is already there; skipped entries are named in the
+      report, and the old folder is removed only once it is empty.  Prints
+      :data:`MERGED_MESSAGE`.
+    * ``<home>/pyto_harness`` is a symlink or a regular file → refuse and report it: the
+      harness never writes through a link, and never replaces a file it did not create.
 
-    Returns the message to show the user, or ``""`` when there was nothing to do.  It
-    never deletes anything: a failed move leaves the old directory in place, and a
-    refusal names the path so the user can decide.
+    Returns the message to show the user, or ``""`` when there was nothing to do: no old
+    folder, an old folder with nothing in it, or a move that has already happened.  It
+    never deletes a non-empty directory, and a failed move leaves the old directory in
+    place.
     """
     if not home_dir:
         return ""
     new = state_dir_in(home_dir)
     legacy = legacy_state_dir_in(home_dir)
-    if os.path.lexists(new):
-        return ""
     if not os.path.lexists(legacy):
         return ""
     if os.path.islink(legacy):
@@ -267,20 +322,101 @@ def migrate_legacy_state(home_dir: str) -> str:
             "{} is a file, not a folder, so it was left alone (it may be yours, not the\n"
             "harness's). Move it aside and re-run if it is a leftover.".format(legacy)
         )
-    try:
-        os.replace(legacy, new)
-    except OSError as first:
+    if not os.path.lexists(new):
         try:
-            shutil.move(legacy, new)
-        except OSError as second:
-            return (
-                "could not move the old {} to {} ({}; then {}).\n"
-                "Nothing was deleted: the old folder is still there, untouched. If a "
-                "partial {} was created, delete it and re-run.".format(
-                    legacy, new, _oserror_text(first), _oserror_text(second), new
+            os.replace(legacy, new)
+        except OSError as first:
+            try:
+                shutil.move(legacy, new)
+            except OSError as second:
+                return (
+                    "could not move the old {} to {} ({}; then {}).\n"
+                    "Nothing was deleted: the old folder is still there, untouched. If a "
+                    "partial {} was created, delete it and re-run.".format(
+                        legacy, new, _oserror_text(first), _oserror_text(second), new
+                    )
                 )
+        return MIGRATED_MESSAGE
+    # The new directory is already there: the probe that created it (or an earlier run)
+    # got ahead of the move.  Never rename a folder over it -- merge entry by entry.
+    if os.path.islink(new):
+        return (
+            "{} is a symbolic link, not a folder, so nothing was merged and the old {} was\n"
+            "left alone. Move the link aside yourself (or delete it) and re-run; the harness\n"
+            "will not follow a link out of your home.".format(new, legacy)
+        )
+    if not os.path.isdir(new):
+        return (
+            "{} is a file, not a folder, so nothing was merged and the old {} was left alone\n"
+            "(the file may be yours, not the harness's). Move it aside and re-run if it is a\n"
+            "leftover.".format(new, legacy)
+        )
+    if os.path.isfile(os.path.join(new, "config.json")):
+        return legacy_kept_message(legacy)
+    return _merge_legacy_into(legacy, new)
+
+
+def _merge_legacy_into(legacy: str, new: str) -> str:
+    """Move each entry of ``legacy`` into ``new``, skipping (and naming) collisions.
+
+    A collision is any name that already exists in ``new`` -- including a symlink or a
+    directory -- and it is never overwritten: it is left exactly as it is and reported.  A
+    symlink *inside* the old folder is moved as the link it is, never dereferenced, so the
+    merge cannot copy or delete anything outside the two folders.  The legacy directory is
+    removed only when it is empty *and* this call moved something; an old folder with
+    nothing in it is left alone (silently: no data is at stake), so the doctor can still
+    point at it.
+    """
+    try:
+        names = sorted(os.listdir(legacy))
+    except OSError as exc:
+        return (
+            "could not read the old {} ({}), so nothing was moved and it was left exactly\n"
+            "where it is.".format(legacy, _oserror_text(exc))
+        )
+    if not names:
+        return ""
+    moved: List[str] = []
+    skipped: List[str] = []
+    failed: List[str] = []
+    for name in names:
+        source = os.path.join(legacy, name)
+        target = os.path.join(new, name)
+        if os.path.lexists(target):
+            skipped.append(name)
+            continue
+        try:
+            shutil.move(source, target)
+        except OSError as exc:
+            failed.append("{} ({})".format(name, _oserror_text(exc)))
+        else:
+            moved.append(name)
+    lines = [MERGED_MESSAGE if moved else (MERGE_KEPT_MESSAGE if skipped else MERGE_FAILED_MESSAGE)]
+    if moved:
+        lines.append("moved: {}".format(", ".join(moved)))
+    if skipped:
+        lines.append("left in {} (already there): {}".format(new, ", ".join(skipped)))
+    if failed:
+        lines.append("could not move: {}".format(", ".join(failed)))
+    leftovers = _listdir(legacy)
+    if leftovers:
+        lines.append("the old folder is still there: {} ({} left; nothing was deleted)".format(legacy, len(leftovers)))
+    elif leftovers == [] and moved and not failed:
+        try:
+            os.rmdir(legacy)
+        except OSError as exc:
+            lines.append(
+                "the old folder is empty now but could not be removed: {} ({})".format(legacy, _oserror_text(exc))
             )
-    return MIGRATED_MESSAGE
+    return "\n".join(lines)
+
+
+def _listdir(path: str) -> Optional[List[str]]:
+    """The entries in ``path``, or ``None`` when it cannot be read (never raises)."""
+    try:
+        return os.listdir(path)
+    except OSError:
+        return None
 
 
 # --------------------------------------------------------------------------------------
@@ -319,6 +455,80 @@ def _cwd() -> str:
         return os.getcwd()
     except OSError:  # pragma: no cover - a deleted working directory
         return ""
+
+
+def candidate_homes(environ: Optional[Mapping[str, str]] = None) -> List[str]:
+    """The plausible home directories, in resolver order, guessed **without writing**.
+
+    This is the cheap guess the startup hooks use to find a legacy ``.pyto_harness``
+    *before* anything resolves the home: :func:`resolve_home` proves a candidate with a
+    real write probe, and that probe creates ``<home>/pyto_harness`` -- which is exactly
+    what used to defeat the one-time move.  So this function reads the environment,
+    ``argv[0]`` and the current directory and nothing else: it creates no directory, writes
+    no probe file and never calls :func:`resolve_home` (``os.path.isdir`` on the entry
+    points is the only filesystem question it asks).
+
+    The candidates mirror the resolver's first four sources:
+
+    1. ``PYTO_HARNESS_HOME`` — absolutised like the resolver does, so a relative escape
+       hatch is honoured;
+    2. ``HOME`` — only when it is already an absolute path (never a literal ``~``);
+    3. ``os.path.expanduser("~")`` — only when it genuinely expanded;
+    4. the directories Pyto runs scripts from: the current directory, then the folder that
+       holds ``run.py``.
+
+    Duplicates are removed, order preserved.  A candidate that does not exist is still
+    listed: whether it holds a legacy folder is :func:`migrate_legacy_state`'s question.
+    The temporary fallback is deliberately absent — a home that only came into being
+    because nothing else was writable cannot hold an install from before the rename.
+    """
+    env = environment(environ)
+    candidates: List[str] = []
+
+    def remember(path: str) -> None:
+        text = str(path or "").strip()
+        if not text or has_unexpanded_tilde(text) or not os.path.isabs(text):
+            return
+        absolute = os.path.abspath(text)
+        if absolute not in candidates:
+            candidates.append(absolute)
+
+    escape = str(env.get(ENV_HOME) or "").strip()
+    if escape and not has_unexpanded_tilde(escape):
+        escape = os.path.abspath(escape)
+    remember(escape)
+    remember(str(env.get("HOME") or ""))
+    try:
+        expanded = os.path.expanduser("~")
+    except Exception:  # noqa: BLE001 - a hostile expanduser must not stop the guess
+        expanded = ""
+    if expanded and expanded != "~":
+        remember(expanded)
+    remember(_cwd())
+    for directory, _label in entry_point_dirs():
+        remember(directory)
+    return candidates
+
+
+def migrate_candidate_homes(environ: Optional[Mapping[str, str]] = None) -> str:
+    """Run :func:`migrate_legacy_state` for every :func:`candidate_homes` entry.
+
+    The startup hook: ``run.py``, ``install.py`` and ``DoctorContext.for_config`` call this
+    before they resolve a home or read a config, so the move happens before the probe can
+    create an empty ``pyto_harness``.  It returns the messages for the folders that had
+    something to report (joined), or ``""`` when there was nothing to do -- the usual case,
+    and the only case after the first run.  It never raises: housekeeping must not stop a
+    run, and a home it cannot migrate is reported by the run's own checks.
+    """
+    messages: List[str] = []
+    for candidate in candidate_homes(environ):
+        try:
+            message = migrate_legacy_state(candidate)
+        except Exception:  # noqa: BLE001 - a broken candidate must not stop the others
+            continue
+        if message:
+            messages.append(message)
+    return "\n".join(messages)
 
 
 def _temp_root() -> str:

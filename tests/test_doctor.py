@@ -1017,6 +1017,38 @@ class TestHomeReporting(DoctorTestCase):
         self.assertIn(legacy, item.human_action or "")
         self.assertTrue(os.path.isdir(legacy), "the doctor must never delete it")
 
+    def test_a_merge_that_skipped_files_names_them_in_the_warning(self) -> None:
+        """The startup hook moved what it could; the doctor says exactly what stayed behind."""
+        home_dir = self.path("merged-home")
+        new_state = os.path.join(home_dir, doctor.home.STATE_DIR_NAME)
+        legacy = os.path.join(home_dir, doctor.home.LEGACY_STATE_DIR_NAME)
+        os.makedirs(new_state, exist_ok=True)
+        os.makedirs(legacy, exist_ok=True)
+        # No config.json in the new directory, so the entries are merged -- except the one
+        # that is already there, which must be left alone *and* named.
+        for directory, name, text in (
+            (new_state, "notes.txt", "the new notes\n"),
+            (legacy, "notes.txt", "the old notes\n"),
+            (legacy, "memory.json", "the old memory\n"),
+        ):
+            with open(os.path.join(directory, name), "w", encoding="utf-8") as handle:
+                handle.write(text)
+
+        ctx = self.make_ctx(env={"PYTO_HARNESS_HOME": home_dir}, state=new_state)
+        item = doctor.run_one(ctx, "home")
+
+        self.assertIn("merged", ctx.state_migration)
+        self.assertEqual(item.status, "warn", item.detail)
+        self.assertIn("notes.txt", item.detail, "the skipped file must be named")
+        self.assertEqual(self.read_file(os.path.join(new_state, "memory.json")), "the old memory\n")
+        self.assertEqual(self.read_file(os.path.join(new_state, "notes.txt")), "the new notes\n")
+        self.assertEqual(self.read_file(os.path.join(legacy, "notes.txt")), "the old notes\n")
+        self.assertTrue(os.path.isdir(legacy), "the non-empty old folder must survive")
+
+    def read_file(self, path: str) -> str:
+        with open(path, encoding="utf-8") as handle:
+            return handle.read()
+
 
 class TestSecretsNeverLeak(DoctorTestCase):
     def test_no_check_result_contains_the_key(self) -> None:

@@ -172,8 +172,11 @@ Everything the harness stores is **plaintext**:
 The state folder is named without a leading dot on purpose (`~/pyto_harness`), so the iOS
 Files app shows it and you can back it up or delete it from the device. That also means it
 is browsable, not hidden: the `0600`/`0700` modes above are what keep it private, and an
-install from an earlier release has its old `~/.pyto_harness` renamed to the visible name
-once, at the next run.
+install from an earlier release has its old `~/.pyto_harness` moved into the visible name
+once, at the next run — before anything can create the new folder, entry by entry when it
+already exists and holds no `config.json`, and never overwriting a file that is already
+there. A new folder that already has a `config.json` is never merged into: the old folder
+is left alone and named instead.
 
 **How to wipe it.** There is no `--forget` command yet, so deletion is manual, and it is
 worth doing on a schedule:

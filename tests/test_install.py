@@ -436,6 +436,10 @@ class SetupTestCase(unittest.TestCase):
         with open(self.config_path, "r", encoding="utf-8") as handle:
             return json.load(handle)
 
+    def read_text(self, path):
+        with open(path, "r", encoding="utf-8") as handle:
+            return handle.read()
+
     def assert_private_mode(self, path):
         if os.name != "posix":  # pragma: no cover - the suite runs on POSIX
             return
@@ -463,6 +467,37 @@ class TestSetup(SetupTestCase):
         self.assertTrue(os.path.isfile(os.path.join(moved, "sessions", "old.jsonl")))
         self.assertFalse(os.path.lexists(legacy), "the hidden folder must be gone after the move")
         self.assertNotIn("Traceback", out + err)
+
+    def test_setup_migrates_before_resolving_a_home(self):
+        """The probe that resolves a home *creates* the state directory: the move comes first.
+
+        A probe-created, still empty ``pyto_harness`` must not strand the old folder: the
+        entries are merged in.  This is the setup-time hook (the pre-flight only covers a
+        harness that is already on disk).
+        """
+        import harness
+        from harness import home as home_module
+
+        device = os.path.join(self.tmp, "device")
+        legacy = os.path.join(device, home_module.LEGACY_STATE_DIR_NAME)
+        os.makedirs(os.path.join(legacy, "sessions"))
+        with open(os.path.join(legacy, "config.json"), "w", encoding="utf-8") as handle:
+            handle.write('{"api_key": "sk-old-key"}')
+        os.makedirs(os.path.join(device, home_module.STATE_DIR_NAME))  # what the probe leaves
+
+        with mock.patch.dict(
+            os.environ,
+            {"PYTO_HARNESS_HOME": device, "PYTO_HARNESS_STATE_DIR": "", "PYTO_HARNESS_CONFIG": ""},
+        ):
+            message = install.migrate_state_directories(harness)
+
+        self.assertIn(home_module.MERGED_MESSAGE, message)
+        self.assertEqual(
+            self.read_text(os.path.join(device, home_module.STATE_DIR_NAME, "config.json")),
+            '{"api_key": "sk-old-key"}',
+        )
+        self.assertFalse(os.path.lexists(legacy), "the emptied old folder must be gone")
+        self.assertNotIn("Traceback", message)
 
     def test_no_key_without_a_tty_finishes_with_the_single_command(self):
         code, out, err = self.run_install(*self.base_args(), expect=0)
@@ -729,6 +764,60 @@ class TestSetup(SetupTestCase):
         self.run_install(*self.base_args("--yes"), expect=0)
         self.assertTrue(os.path.isfile(os.path.join(self.target, "run.py")))
         self.assertTrue(os.path.isdir(os.path.join(self.target, "harness")))
+
+
+class TestPytoLikeMigration(SetupTestCase):
+    """The device case from the bug report, end to end.
+
+    No ``HOME``, ``expanduser("~")`` returning ``"~"``, and the previous release's hidden
+    folder sitting in the directory Pyto opened.  The home resolver proves its candidate
+    with a write probe, and that probe creates ``pyto_harness`` — so if the move runs after
+    the probe, the user's key and sessions stay stranded in ``.pyto_harness``.  The move
+    therefore has to happen before anything resolves a home.
+    """
+
+    @staticmethod
+    def broken_expanduser(path, _real=os.path.expanduser):
+        """Pyto's effective ``expanduser``: a leading ``~`` comes back unchanged."""
+        return path if str(path).startswith("~") else _real(path)
+
+    def test_the_old_folder_moves_before_the_probe_can_create_the_new_one(self):
+        from harness import home as home_module
+
+        device = os.path.join(self.tmp, "pyto")
+        legacy = os.path.join(device, home_module.LEGACY_STATE_DIR_NAME)
+        os.makedirs(os.path.join(legacy, "sessions"))
+        with open(os.path.join(legacy, "config.json"), "w", encoding="utf-8") as handle:
+            handle.write('{"api_key": "sk-old-key"}')
+        with open(os.path.join(legacy, "sessions", "old.jsonl"), "w", encoding="utf-8") as handle:
+            handle.write("{}\n")
+        original_cwd = os.getcwd()
+        self.addCleanup(os.chdir, original_cwd)
+        os.chdir(device)
+
+        with mock.patch.dict(
+            os.environ,
+            {
+                "PYTO_HARNESS_HOME": "",
+                "HOME": "",
+                "PYTO_HARNESS_CONFIG": "",
+                "PYTO_HARNESS_STATE_DIR": "",
+                "PYTO_HARNESS_WORKSPACE": "",
+                "PYTO_HARNESS_SESSIONS_DIR": "",
+            },
+        ), mock.patch.object(os.path, "expanduser", side_effect=self.broken_expanduser):
+            code, out, err = self.run_install(
+                "--zip", self.zip_path, "--into", self.target, "--yes", "--no-network", expect=0
+            )
+
+        moved = os.path.join(device, home_module.STATE_DIR_NAME)
+        self.assertIn(home_module.MIGRATED_MESSAGE, out, "the move must be printed")
+        payload = json.loads(self.read_text(os.path.join(moved, "config.json")))
+        self.assertEqual(payload["api_key"], "sk-old-key", "the key the old release saved is found again")
+        self.assertEqual(self.read_text(os.path.join(moved, "sessions", "old.jsonl")), "{}\n")
+        self.assertFalse(os.path.lexists(legacy), "the hidden folder must be gone")
+        self.assertNotIn("Traceback", out + err)
+        self.assertFalse(os.path.exists(os.path.join(device, "~")), "a directory named '~' was created")
 
 
 class TestInstallWithoutAHome(SetupTestCase):

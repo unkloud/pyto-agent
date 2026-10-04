@@ -516,17 +516,113 @@ class TestLegacyStateMigration(HomeTestCase):
         self.assertEqual(home.migrate_legacy_state(home_dir), "")
         self.assertEqual(os.listdir(home_dir), [], "nothing may be created by a no-op")
 
-    def test_the_new_directory_is_never_touched_or_merged_into(self) -> None:
+    def test_a_probe_created_new_directory_still_receives_the_old_data(self) -> None:
+        """The regression: a write probe created an empty ``pyto_harness`` first.
+
+        The old rule ("new directory exists → do nothing") left the user's key and
+        sessions stranded in the hidden folder.  Now the entries are merged in one by one.
+        """
         home_dir = self.make_dir("home")
-        new_marker = self.write(os.path.join(home_dir, home.STATE_DIR_NAME, "mine.txt"), "keep me\n")
-        self.write(os.path.join(home_dir, self.LEGACY, "old.txt"), "old\n")
+        self.write(os.path.join(home_dir, self.LEGACY, "config.json"), '{"api_key": "sk-old-key"}')
+        self.write(os.path.join(home_dir, self.LEGACY, "sessions", "s.jsonl"), '{"kind": "header"}\n')
+        os.makedirs(os.path.join(home_dir, home.STATE_DIR_NAME))  # exactly what the probe leaves
 
         message = home.migrate_legacy_state(home_dir)
 
-        self.assertEqual(message, "", "both present: the new directory wins, silently")
-        self.assertEqual(self.read(new_marker), "keep me\n")
-        self.assertFalse(os.path.exists(os.path.join(home_dir, home.STATE_DIR_NAME, "old.txt")), "never merge")
-        self.assertTrue(os.path.isfile(os.path.join(home_dir, self.LEGACY, "old.txt")), "left alone")
+        self.assertIn(home.MERGED_MESSAGE, message)
+        self.assertIn("moved: config.json, sessions", message)
+        moved = os.path.join(home_dir, home.STATE_DIR_NAME)
+        self.assertEqual(self.read(os.path.join(moved, "config.json")), '{"api_key": "sk-old-key"}')
+        self.assertEqual(self.read(os.path.join(moved, "sessions", "s.jsonl")), '{"kind": "header"}\n')
+        self.assertFalse(os.path.lexists(os.path.join(home_dir, self.LEGACY)), "the emptied folder must go")
+        self.assertEqual(home.migrate_legacy_state(home_dir), "", "the second call must do nothing")
+
+    def test_a_configured_new_directory_is_left_alone_and_reported(self) -> None:
+        """Two configs are never merged: the new one wins, the old one is named, not touched."""
+        home_dir = self.make_dir("home")
+        new_config = self.write(os.path.join(home_dir, home.STATE_DIR_NAME, "config.json"), '{"api_key": "sk-new"}')
+        old_config = self.write(os.path.join(home_dir, self.LEGACY, "config.json"), '{"api_key": "sk-old"}')
+        self.write(os.path.join(home_dir, self.LEGACY, "sessions", "s.jsonl"), "{}\n")
+
+        message = home.migrate_legacy_state(home_dir)
+
+        self.assertIn("left untouched", message)
+        self.assertIn(home.legacy_state_dir_in(home_dir), message, "the report must name the folder")
+        self.assertIn("rm -rf", message, "and say how to remove it")
+        self.assertEqual(self.read(new_config), '{"api_key": "sk-new"}', "the new config wins")
+        self.assertEqual(self.read(old_config), '{"api_key": "sk-old"}', "the old config is untouched")
+        self.assertFalse(os.path.exists(os.path.join(home_dir, home.STATE_DIR_NAME, "sessions")), "never merged")
+        self.assertTrue(os.path.isdir(os.path.join(home_dir, self.LEGACY)), "left where it is")
+        self.assertEqual(home.migrate_legacy_state(home_dir), message, "still reported on the next run")
+
+    def test_a_merge_moves_only_the_missing_entries_and_names_what_it_skipped(self) -> None:
+        home_dir = self.make_dir("home")
+        new = os.path.join(home_dir, home.STATE_DIR_NAME)
+        self.write(os.path.join(new, "health.json"), "the new health\n")
+        collided = self.write(os.path.join(new, "notes.txt"), "the new notes\n")
+        old_only = os.path.join(home_dir, self.LEGACY, "notes.txt")
+        self.write(old_only, "the old notes\n")
+        self.write(os.path.join(home_dir, self.LEGACY, "memory.json"), "the old memory\n")
+
+        message = home.migrate_legacy_state(home_dir)
+
+        self.assertIn(home.MERGED_MESSAGE, message)
+        self.assertIn("moved: memory.json", message)
+        self.assertIn("left in {}".format(new), message)
+        self.assertIn("notes.txt", message.split("left in", 1)[1], "the skipped entry must be named")
+        self.assertEqual(self.read(os.path.join(new, "memory.json")), "the old memory\n")
+        self.assertEqual(self.read(collided), "the new notes\n", "a collision is never overwritten")
+        self.assertEqual(self.read(os.path.join(new, "health.json")), "the new health\n")
+        self.assertTrue(os.path.isdir(os.path.join(home_dir, self.LEGACY)), "non-empty: it must survive")
+        self.assertEqual(self.read(old_only), "the old notes\n", "the file it could not take stays")
+
+    def test_a_symlinked_old_folder_is_refused_even_when_the_new_one_exists(self) -> None:
+        home_dir = self.make_dir("home")
+        os.makedirs(os.path.join(home_dir, home.STATE_DIR_NAME))
+        elsewhere = self.make_dir("elsewhere")
+        self.write(os.path.join(elsewhere, "precious.txt"), "somebody else's data\n")
+        os.symlink(elsewhere, os.path.join(home_dir, self.LEGACY))
+
+        message = home.migrate_legacy_state(home_dir)
+
+        self.assertIn("symbolic link", message)
+        self.assertTrue(os.path.islink(os.path.join(home_dir, self.LEGACY)), "the link must stay")
+        self.assertEqual(os.listdir(os.path.join(home_dir, home.STATE_DIR_NAME)), [], "nothing may be merged")
+        self.assertTrue(os.path.isfile(os.path.join(elsewhere, "precious.txt")), "the target must not be moved")
+
+    def test_a_regular_file_in_the_new_path_is_refused_and_the_old_folder_kept(self) -> None:
+        home_dir = self.make_dir("home")
+        self.write(os.path.join(home_dir, home.STATE_DIR_NAME), "not a directory\n")
+        self.write(os.path.join(home_dir, self.LEGACY, "config.json"), '{"api_key": "sk-old"}')
+
+        message = home.migrate_legacy_state(home_dir)
+
+        self.assertIn("is a file, not a folder", message)
+        self.assertTrue(os.path.isdir(os.path.join(home_dir, self.LEGACY)), "the old folder is left alone")
+        self.assertEqual(self.read(os.path.join(home_dir, self.LEGACY, "config.json")), '{"api_key": "sk-old"}')
+
+    def test_an_empty_old_folder_is_left_for_the_doctor_to_report(self) -> None:
+        """Nothing to take and nothing to refuse: stay silent, keep the folder, create nothing."""
+        home_dir = self.make_dir("home")
+        os.makedirs(os.path.join(home_dir, self.LEGACY))
+        os.makedirs(os.path.join(home_dir, home.STATE_DIR_NAME))
+
+        self.assertEqual(home.migrate_legacy_state(home_dir), "")
+        self.assertTrue(os.path.isdir(os.path.join(home_dir, self.LEGACY)), "must not be deleted")
+        self.assertEqual(os.listdir(os.path.join(home_dir, home.STATE_DIR_NAME)), [])
+
+    def test_nothing_to_take_is_reported_when_every_entry_is_already_there(self) -> None:
+        home_dir = self.make_dir("home")
+        new = os.path.join(home_dir, home.STATE_DIR_NAME)
+        self.write(os.path.join(new, "health.json"), "the new health\n")
+        self.write(os.path.join(home_dir, self.LEGACY, "health.json"), "the old health\n")
+
+        message = home.migrate_legacy_state(home_dir)
+
+        self.assertIn(home.MERGE_KEPT_MESSAGE, message)
+        self.assertIn("health.json", message, "the collision must be named")
+        self.assertEqual(self.read(os.path.join(new, "health.json")), "the new health\n", "never overwritten")
+        self.assertTrue(os.path.isdir(os.path.join(home_dir, self.LEGACY)), "non-empty: it survives")
 
     def test_a_regular_file_is_refused_reported_and_left_alone(self) -> None:
         home_dir = self.make_dir("home")
@@ -570,6 +666,90 @@ class TestLegacyStateMigration(HomeTestCase):
 
     def test_an_empty_home_is_a_no_op(self) -> None:
         self.assertEqual(home.migrate_legacy_state(""), "")
+
+
+class TestCandidateHomes(HomeTestCase):
+    """The guess the startup hooks use *before* anything resolves a home.
+
+    The resolver proves a candidate with a write probe, and that probe creates
+    ``<home>/pyto_harness`` — which is what used to defeat the one-time move.  So the
+    guess must find the plausible homes without creating, writing or probing anything.
+    """
+
+    def write(self, path: str, text: str) -> str:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        return path
+
+    def read(self, path: str) -> str:
+        with open(path, encoding="utf-8") as handle:
+            return handle.read()
+
+    def snapshot(self) -> "list[str]":
+        return sorted(
+            os.path.join(root, name) for root, dirs, files in os.walk(self.tmp) for name in list(dirs) + list(files)
+        )
+
+    def guesses(self, **env: str):
+        """``candidate_homes`` with the cwd and entry points pinned inside the temp tree."""
+        self.entry = self.make_dir("entry")
+        self.cwd = self.make_dir("cwd")
+        return mock.patch.object(home, "_cwd", return_value=self.cwd), mock.patch.object(
+            home, "entry_point_dirs", return_value=[(self.entry, "the folder that holds run.py")]
+        )
+
+    def test_it_lists_the_resolver_candidates_in_order(self) -> None:
+        escape = self.make_dir("escape")
+        home_dir = self.make_dir("home")
+        expanded = self.make_dir("expanded")
+        cwd_patch, entry_patch = self.guesses()
+        with cwd_patch, entry_patch, mock.patch.object(home.os.path, "expanduser", return_value=expanded):
+            candidates = home.candidate_homes({"PYTO_HARNESS_HOME": escape, "HOME": home_dir})
+        self.assertEqual(candidates, [escape, home_dir, expanded, self.cwd, self.entry])
+
+    def test_it_skips_what_the_resolver_would_skip(self) -> None:
+        cwd_patch, entry_patch = self.guesses()
+        with cwd_patch, entry_patch, mock.patch.object(home.os.path, "expanduser", return_value="~"):
+            candidates = home.candidate_homes({"PYTO_HARNESS_HOME": "~/escape", "HOME": "relative/home"})
+        self.assertEqual(
+            candidates, [self.cwd, self.entry], "an unexpandable '~' and a relative HOME are not homes"
+        )
+
+    def test_it_never_creates_anything(self) -> None:
+        cwd_patch, entry_patch = self.guesses()
+        before = self.snapshot()
+        with cwd_patch, entry_patch, mock.patch.object(home.os.path, "expanduser", return_value=self.path("expanded")):
+            candidates = home.candidate_homes(
+                {
+                    "PYTO_HARNESS_HOME": self.path("guessed"),
+                    "HOME": self.path("home-ish"),
+                    "PYTO_HARNESS_STATE_DIR": self.path("state-dir"),
+                }
+            )
+            self.assertIn(self.path("guessed"), candidates)
+            self.assertEqual(self.snapshot(), before, "guessing must not create a directory")
+        self.assertEqual(self.snapshot(), before)
+
+    def test_a_pyto_like_run_migrates_the_working_directory_without_probing_it(self) -> None:
+        """No HOME, an unexpandable '~', an old folder in the folder Pyto opened."""
+        cwd_patch, entry_patch = self.guesses()
+        self.write(os.path.join(self.cwd, home.LEGACY_STATE_DIR_NAME, "config.json"), '{"api_key": "sk-old"}')
+        with cwd_patch, entry_patch, mock.patch.object(home.os.path, "expanduser", return_value="~"):
+            message = home.migrate_candidate_homes({"PYTO_HARNESS_HOME": "", "HOME": ""})
+        self.assertEqual(message, home.MIGRATED_MESSAGE)
+        self.assertEqual(
+            self.read(os.path.join(self.cwd, home.STATE_DIR_NAME, "config.json")), '{"api_key": "sk-old"}'
+        )
+        self.assertFalse(os.path.lexists(os.path.join(self.cwd, home.LEGACY_STATE_DIR_NAME)))
+
+    def test_it_is_silent_and_creates_nothing_when_there_is_no_old_folder(self) -> None:
+        cwd_patch, entry_patch = self.guesses()
+        before = self.snapshot()
+        with cwd_patch, entry_patch, mock.patch.object(home.os.path, "expanduser", return_value="~"):
+            message = home.migrate_candidate_homes({"PYTO_HARNESS_HOME": "", "HOME": ""})
+        self.assertEqual(message, "")
+        self.assertEqual(self.snapshot(), before, "the startup hook must not create a state directory")
 
 
 if __name__ == "__main__":
