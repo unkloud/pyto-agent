@@ -478,10 +478,24 @@ def can_prompt(ios_module=None) -> bool:
 
 
 def read_hidden(prompt: str) -> str:
-    """``getpass`` in one place, so a platform without a tty has a seam to patch."""
-    import getpass
+    """Read one line of secret input.
 
-    return getpass.getpass(prompt)
+    ``getpass`` is used only where it can actually suppress echo.  On a console without a
+    tty — Pyto's is one, and so is a piped run — ``getpass`` falls back to ``input()`` *and*
+    prints "Warning: Password input may be echoed" plus a ``GetPassWarning`` line, which is
+    alarming noise at the one prompt the user sees.  Asking plainly there is the same
+    behaviour without the scare.
+    """
+    stream = getattr(sys, "stdin", None)
+    try:
+        hidden_possible = bool(stream is not None and stream.isatty())
+    except (AttributeError, ValueError, OSError):
+        hidden_possible = False
+    if hidden_possible:
+        import getpass
+
+        return getpass.getpass(prompt)
+    return input(prompt)
 
 
 def ask_yes_no(question: str, default: bool = False) -> bool:
@@ -603,7 +617,10 @@ def validate_key(modules, *, api_base: str, model: str, key: str, config_path: s
         }
 
     status = int(response["status"])
-    body = " ".join((response.get("text") or "").split())[:200]
+    # Keep the shape of an error (it is what tells the user *why* a key was rejected) but
+    # never paste a success body into the installer's output: a 200 here is a model reply,
+    # and echoing it is both noise and a way to leak content into logs or a screenshot.
+    body = "" if status == 200 else " ".join((response.get("text") or "").split())[:200]
     verdict = {
         "kind": "inconclusive",
         "status": status,

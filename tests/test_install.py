@@ -770,6 +770,18 @@ class TestForcedPrompt(unittest.TestCase):
         self.assertFalse(os.path.exists(self.config_path), "no key should be written")
         self.assertIn("no API key", out)
 
+    def test_the_success_line_does_not_echo_the_model_reply(self):
+        """A 200 here is a model answer; pasting it into the installer output is noise."""
+        provider = MockProvider([text_response("SECRET-REPLY-TEXT-SHOULD-NOT-APPEAR")])
+        self.addCleanup(provider.close)
+        code, out, _err = self.run_install(
+            "--zip", self.zip_path, "--into", self.target, "--api-base", provider.api_base,
+            "--api-key", "sk-canary-body-0123456789abcdef",
+        )
+        self.assertEqual(code, 0, out)
+        self.assertIn("accepted the key", out)
+        self.assertNotIn("SECRET-REPLY-TEXT-SHOULD-NOT-APPEAR", out)
+
     def test_can_prompt_is_true_when_pyto_is_present(self):
         class FakeIos:
             @staticmethod
