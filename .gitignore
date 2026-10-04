@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Runtime state this harness creates (never commit: keys and chats live here)
+.pyto_harness/
+pyto_harness_workspace/
+PYTO_LIBS.md
+SHORTCUTS.md
+*.jsonl
+*.jsonl.torn
+*.jsonl.corrupt
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
