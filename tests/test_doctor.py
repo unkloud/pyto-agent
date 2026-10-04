@@ -1074,5 +1074,164 @@ class TestSecretsNeverLeak(DoctorTestCase):
         self.assertIn("<redacted>", text)
 
 
+class TestStateAndDuplicates(DoctorTestCase):
+    """The ``state`` check, the ``--paths`` block, and the one automatic repair.
+
+    The report this comes from: one install, three ``pyto_harness`` folders, the key in one
+    of them and the harness reading another.  The doctor must name the folder in use, every
+    candidate that holds a config, the duplicate copies, and it may *copy* a stranded config
+    into the chosen home -- never move it, never overwrite one.
+    """
+
+    def stranded(self, root: str, key: str = "sk-stranded-key") -> "doctor.home.StateCandidate":
+        config = os.path.join(root, doctor.home.STATE_DIR_NAME, "config.json")
+        os.makedirs(os.path.dirname(config), exist_ok=True)
+        with open(config, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps({"api_key": key}))
+        os.chmod(config, 0o600)
+        return doctor.home.StateCandidate(
+            home=root, config=config, label="the folder above the install", has_api_key=True
+        )
+
+    def test_paths_report_names_every_path_and_the_rule(self) -> None:
+        ctx = self.make_ctx()
+        ctx.home = self.path("Documents")
+        ctx.home_note = "from the folder above the install (rule 6: the install's parent)"
+        ctx.home_source = "install_parent"
+        text = doctor.paths_report(ctx)
+        self.assertIn("home       : {} (from the folder above the install".format(ctx.home), text)
+        self.assertIn("config     : {} (missing)".format(ctx.config_path), text)
+        self.assertIn("state      : {}".format(ctx.state), text)
+        self.assertIn("workspace  : {}".format(ctx.workspace), text)
+        self.assertIn("sessions   : {}".format(ctx.sessions_dir), text)
+        self.assertIn("pointer    : ", text)
+        self.assertIn("duplicates : none", text)
+        report = doctor.format_report([doctor.result("home", "Home", "ok", "fine")], ctx=ctx)
+        for line in doctor.path_lines(ctx):
+            self.assertIn(line, report, "the doctor header shows the same block")
+
+    def test_paths_report_says_when_the_config_exists(self) -> None:
+        ctx = self.make_ctx()
+        self.write_config({"api_key": "sk-test"})
+        self.assertIn("exists, mode 0o600", doctor.paths_report(ctx))
+
+    def test_paths_report_names_the_pointer_and_the_copies(self) -> None:
+        ctx = self.make_ctx()
+        ctx.pointer = self.path("pyto-agent", doctor.home.POINTER_FILE_NAME)
+        ctx.pointer_used = True
+        os.makedirs(os.path.dirname(ctx.pointer), exist_ok=True)
+        with open(ctx.pointer, "w", encoding="utf-8") as handle:
+            handle.write(ctx.home + "\n")
+        ctx.duplicates = (self.path("pyto_harness 2"),)
+        text = doctor.paths_report(ctx)
+        self.assertIn(ctx.pointer, text)
+        self.assertIn("in use", text)
+        self.assertIn("1 likely iCloud/Files copy", text)
+
+    def test_state_check_is_ok_when_the_config_is_in_use(self) -> None:
+        ctx = self.make_ctx()
+        self.write_config({"api_key": "sk-test"})
+        item = doctor.run_one(ctx, "state")
+        self.assertEqual(item.status, "ok", item.detail)
+        self.assertIn(ctx.config_path, item.detail)
+        self.assertIn(ctx.sessions_dir, item.detail)
+
+    def test_state_check_names_another_candidate_that_holds_a_config(self) -> None:
+        ctx = self.make_ctx()
+        self.write_config({"api_key": "sk-test"})
+        other = self.stranded(self.path("elsewhere"))
+        ctx.candidates = (other,)
+        item = doctor.run_one(ctx, "state")
+        self.assertEqual(item.status, "warn", item.detail)
+        self.assertIn(other.config, item.detail)
+        self.assertIn("PYTO_HARNESS_HOME", item.human_action or "")
+        self.assertNotIn("sk-stranded-key", doctor.format_report([item], ctx=ctx))
+
+    def test_state_check_offers_the_copy_fix_when_the_chosen_home_has_no_config(self) -> None:
+        ctx = self.make_ctx()
+        ctx.home = self.path("chosen-home")
+        other = self.stranded(self.path("install-parent"))
+        ctx.candidates = (other,)
+        item = doctor.run_one(ctx, "state")
+        self.assertTrue(item.failed(), item.detail)
+        self.assertEqual(item.fix_id, "state.copy_config")
+        self.assertIn(other.config, item.human_action or "")
+        self.assertIn("never overwritten", item.human_action or "")
+
+    def test_the_copy_fix_copies_never_moves_and_never_overwrites(self) -> None:
+        ctx = self.make_ctx()
+        ctx.home = self.path("chosen-home")
+        other = self.stranded(self.path("install-parent"))
+        ctx.candidates = (other,)
+        item = doctor.run_one(ctx, "state")
+
+        outcome = doctor.apply_fix(ctx, "state.copy_config", item)
+
+        self.assertTrue(outcome.ok, outcome.error)
+        self.assertTrue(os.path.isfile(ctx.config_path), outcome.detail)
+        self.assertEqual(stat.S_IMODE(os.stat(ctx.config_path).st_mode), 0o600, "the copy must be 0600")
+        self.assertEqual(json.loads(self.read_text(ctx.config_path))["api_key"], "sk-stranded-key")
+        self.assertTrue(os.path.isfile(other.config), "the file it came from is never moved")
+        self.assertNotIn("sk-stranded-key", outcome.detail, "the key itself is never reported")
+
+        with open(ctx.config_path, "w", encoding="utf-8") as handle:
+            handle.write('{"api_key": "sk-mine"}')
+        again = doctor.apply_fix(ctx, "state.copy_config", item)
+        self.assertFalse(again.ok, "an existing config is never overwritten")
+        self.assertEqual(self.read_text(ctx.config_path), '{"api_key": "sk-mine"}')
+
+    def test_the_copy_fix_is_registered_but_not_applied_without_asking(self) -> None:
+        fix = doctor.FIXES["state.copy_config"]
+        self.assertEqual(fix.check_id, "state")
+        self.assertFalse(fix.safe, "only `--doctor --fix` may copy a key into the chosen home")
+        ctx = self.make_ctx()
+        ctx.home = self.path("chosen-home")
+        ctx.candidates = (self.stranded(self.path("install-parent")),)
+        item = doctor.run_one(ctx, "state")
+        _results, outcomes = doctor.apply_fixes(ctx, [item], safe_only=True)
+        self.assertEqual(outcomes, [], "the fast first-run pass must not copy anything")
+        self.assertFalse(os.path.exists(ctx.config_path))
+
+    def test_state_check_warns_about_likely_icloud_copies(self) -> None:
+        ctx = self.make_ctx()
+        self.write_config({"api_key": "sk-test"})
+        copy_dir = self.path("pyto_harness 2")
+        os.makedirs(copy_dir)
+        ctx.duplicates = (copy_dir,)
+        item = doctor.run_one(ctx, "state")
+        self.assertEqual(item.status, "warn", item.detail)
+        self.assertIn(copy_dir, item.detail)
+        self.assertIn("keep one", item.human_action or "")
+        self.assertTrue(os.path.isdir(copy_dir), "the doctor never deletes a copy")
+
+    def test_state_check_names_a_stray_state_folder_inside_the_install(self) -> None:
+        ctx = self.make_ctx()
+        self.write_config({"api_key": "sk-test"})
+        install = self.path("pyto-agent")
+        stray = os.path.join(install, doctor.home.STATE_DIR_NAME)
+        os.makedirs(stray, exist_ok=True)
+        with mock.patch.object(doctor.home, "entry_point_dirs", return_value=[(install, "the folder that holds run.py")]):
+            item = doctor.run_one(ctx, "state")
+        self.assertIn(stray, item.detail)
+        self.assertIn("not in use", item.detail)
+        self.assertTrue(os.path.isdir(stray), "a stray state folder is reported, never deleted")
+
+    def test_state_check_is_skipped_when_there_is_no_home(self) -> None:
+        ctx = self.make_ctx()
+        ctx.home = ""
+        ctx.home_error = "cannot find a writable folder"
+        item = doctor.run_one(ctx, "state")
+        self.assertEqual(item.status, "skipped")
+        self.assertIn("home", item.human_action or "")
+
+    def test_state_check_is_registered(self) -> None:
+        self.assertIn("state", doctor.CHECK_FUNCTIONS)
+        self.assertIn("state", doctor.CHECK_TITLES)
+
+    def read_text(self, path: str) -> str:
+        with open(path, encoding="utf-8") as handle:
+            return handle.read()
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -57,6 +57,7 @@ from .config import (
     DEFAULT_MODEL,
     Config,
     ConfigError,
+    config_file_mode,
     default_config_path,
     default_sessions_dir,
     default_workspace,
@@ -368,6 +369,17 @@ class DoctorContext:
     home_source: str = ""
     #: The actionable message when no home directory could be resolved at all.
     home_error: str = ""
+    #: The remembered choice (the visible pointer file next to the entry point), if any.
+    pointer: str = ""
+    #: True when the home came *from* the pointer file rather than being recorded in it.
+    pointer_used: bool = False
+    #: Every candidate folder that already holds a ``pyto_harness/config.json``, in the
+    #: resolver's precedence order -- including the ones that were not chosen.
+    candidates: Tuple[home.StateCandidate, ...] = ()
+    #: ``pyto_harness 2``-style folders and duplicated installs: likely iCloud/Files copies.
+    duplicates: Tuple[str, ...] = ()
+    #: The plain warning the resolver printed once (ambiguity, stale pointer, duplicates).
+    home_warning: str = ""
     env: Mapping[str, str] = field(default_factory=lambda: dict(os.environ))
     network: bool = False
     deep: bool = False
@@ -504,6 +516,11 @@ class DoctorContext:
             home_note=home_choice.note,
             home_source=home_choice.source,
             home_error=home_error,
+            pointer=home_choice.pointer,
+            pointer_used=home_choice.pointer_used,
+            candidates=tuple(home_choice.candidates),
+            duplicates=tuple(home_choice.duplicates),
+            home_warning=home_choice.warning,
             state_migration=state_migration,
             env=environ,
             network=network,
@@ -1916,7 +1933,132 @@ def check_home(ctx: DoctorContext) -> CheckResult:
         "home",
         "Home folder and state directory",
         "ok",
-        "{} is writable (home {} from {})".format(path, ctx.home, ctx.home_source or "default"),
+        "{} is writable (home {}; rule: {})".format(path, ctx.home, ctx.home_source or "default"),
+        evidence=evidence,
+    )
+
+
+def check_state(ctx: DoctorContext) -> CheckResult:
+    """Which folder holds the key, where sessions and backups live, and the duplicates.
+
+    The failure this check exists for was reported from a real iPhone: one install had three
+    ``pyto_harness`` folders -- one beside the install (holding the key), one created because
+    the harness had once been started from inside the install folder, and one made by iCloud
+    when the Files app duplicated a folder.  The state location depended on where the script
+    was started from.
+
+    So this check names the folder actually in use, every *other* candidate that holds a
+    ``config.json`` (a second key must never be discovered by accident), the sessions and
+    backups folders, and the likely iCloud/Files copies.  When the chosen home has no config
+    but a candidate does, the one automatic repair of this release can **copy** it over --
+    never move it, never overwrite an existing config, always ``0600`` -- and ``--fix`` does
+    exactly that, through the same fix registry as every other repair.
+    """
+    evidence: Dict[str, Any] = {
+        "state": ctx.state,
+        "config": ctx.config_path,
+        "sessions": ctx.sessions_dir,
+        "backups": ctx.backups_dir,
+    }
+    if ctx.candidates:
+        evidence["candidates"] = [item.config for item in ctx.candidates]
+    if ctx.duplicates:
+        evidence["duplicates"] = list(ctx.duplicates)
+    if ctx.pointer:
+        evidence["pointer"] = ctx.pointer
+
+    if ctx.home_error or not ctx.home:
+        return result(
+            "state",
+            "State folder, key location and duplicates",
+            "skipped",
+            "no home was resolved, so the state folder cannot be placed",
+            human_action="fix the home first (`--doctor` reports it as `home`)",
+            evidence=evidence,
+        )
+
+    unchosen = tuple(
+        item for item in ctx.candidates if os.path.abspath(item.home) != os.path.abspath(ctx.home)
+    )
+    strays = home.stray_state_dirs(ctx.home, ctx.state)
+    if strays:
+        evidence["stray_state"] = strays
+    where = "sessions {} ({}); backups {} ({})".format(
+        ctx.sessions_dir or "<none>",
+        "present" if ctx.sessions_dir and os.path.isdir(ctx.sessions_dir) else "missing",
+        ctx.backups_dir or "<none>",
+        "present" if ctx.backups_dir and os.path.isdir(ctx.backups_dir) else "not yet",
+    )
+    if strays:
+        where += (
+            "; also present but not in use (no config -- left by an older run started inside "
+            "the install): {}".format(", ".join(strays))
+        )
+    if ctx.duplicates:
+        return result(
+            "state",
+            "State folder, key location and duplicates",
+            "warn",
+            "state {}; {}; {} likely iCloud/Files copy(ies): {}".format(
+                ctx.state, where, len(ctx.duplicates), ", ".join(ctx.duplicates)
+            ),
+            human_action=(
+                "keep one copy: the harness uses {} and never merges or deletes anything. "
+                "Move or delete the others yourself when you are sure.".format(ctx.state)
+            ),
+            evidence=evidence,
+        )
+
+    if os.path.isfile(ctx.config_path):
+        detail = "in use: {} ({}); {}; state {}".format(
+            ctx.config_path, describe_config_state(ctx.config_path), where, ctx.state
+        )
+        if unchosen:
+            return result(
+                "state",
+                "State folder, key location and duplicates",
+                "warn",
+                detail + "; also found (not in use): {}".format(
+                    ", ".join(item.config for item in unchosen)
+                ),
+                human_action=(
+                    "two configs are never merged. To use another folder: "
+                    "PYTO_HARNESS_HOME=<folder> (or delete the one you do not need)."
+                ),
+                evidence=evidence,
+            )
+        return result("state", "State folder, key location and duplicates", "ok", detail, evidence=evidence)
+
+    if unchosen:
+        source = unchosen[0]
+        return result(
+            "state",
+            "State folder, key location and duplicates",
+            "fail",
+            "no config at {} ({}), but {} already holds one{}".format(
+                ctx.config_path,
+                describe_config_state(ctx.config_path),
+                source.config,
+                " (with an api_key)" if source.has_api_key else "",
+            ),
+            fixable=True,
+            fix_id="state.copy_config",
+            human_action=(
+                "run `--doctor --fix` to copy {} to {} (a copy: the file it comes from is "
+                "left where it is, and an existing config is never overwritten).".format(
+                    source.config, ctx.config_path
+                )
+            ),
+            evidence=evidence,
+        )
+
+    return result(
+        "state",
+        "State folder, key location and duplicates",
+        "ok",
+        "{}; {}; no other candidate holds a config.json".format(
+            describe_config_state(ctx.config_path), where
+        ),
         evidence=evidence,
     )
 
@@ -2974,6 +3116,62 @@ def fix_home_create(ctx: DoctorContext, item: CheckResult) -> FixOutcome:
     return FixOutcome("home.create", item.id, True, "created {}".format(ctx.state))
 
 
+def fix_state_copy_config(ctx: DoctorContext, item: CheckResult) -> FixOutcome:
+    """Copy a stranded config into the chosen home.  The one automatic repair of this release.
+
+    The rules, in order: never move (the folder it comes from is left exactly as it is),
+    never overwrite (``O_EXCL``: an existing config is the user's only copy of the key), and
+    keep the copy ``0600`` (``open_private``).  The key itself is never printed: the report
+    says where the file went and whether it holds an ``api_key``, nothing else.
+    """
+    target = ctx.config_path
+    source = ""
+    for candidate in ctx.candidates:
+        if os.path.abspath(candidate.home) == os.path.abspath(ctx.home):
+            continue
+        if os.path.isfile(candidate.config) and not os.path.islink(candidate.config):
+            source = candidate.config
+            break
+    if not source:
+        return FixOutcome(
+            "state.copy_config", item.id, False, error="no other candidate holds a config.json any more"
+        )
+    if not target:
+        return FixOutcome("state.copy_config", item.id, False, error="there is no config path to write to")
+    if os.path.lexists(target):
+        return FixOutcome(
+            "state.copy_config",
+            item.id,
+            False,
+            error="{} already exists; an existing config is never overwritten".format(target),
+        )
+    try:
+        with open(source, "rb") as handle:
+            payload = handle.read()
+        directory = os.path.dirname(target)
+        if directory:
+            mkdir_private(directory)
+        with open_private(target, exclusive=True) as handle:
+            handle.write(payload if isinstance(payload, str) else payload.decode("utf-8", "replace"))
+    except OSError as exc:
+        return FixOutcome(
+            "state.copy_config", item.id, False, error="{}: {}".format(type(exc).__name__, exc)
+        )
+    mode = config_file_mode(target) or "unknown"
+    detail = "copied {} to {} (mode {}); the file it came from is still there (nothing is moved)".format(
+        source, target, mode
+    )
+    if home.config_has_api_key(target):
+        detail += "; it holds an api_key"
+    return FixOutcome(
+        "state.copy_config",
+        item.id,
+        True,
+        detail,
+        evidence={"source": source, "target": target, "mode": mode},
+    )
+
+
 def fix_workspace_create(ctx: DoctorContext, item: CheckResult) -> FixOutcome:
     try:
         mkdir_private(ctx.workspace)  # 0700: programs, memory and spill files live here
@@ -3371,6 +3569,13 @@ FIXES: Dict[str, Fix] = {
         Fix("config.schema_repair", "config_schema", "drop invalid config values so defaults apply", False, fix_config_schema),
         Fix("workspace.create", "workspace", "create the workspace directory", True, fix_workspace_create),
         Fix("home.create", "home", "create the state directory inside the resolved home", True, fix_home_create),
+        Fix(
+            "state.copy_config",
+            "state",
+            "copy the config another candidate folder holds into the chosen home (never moves, never overwrites)",
+            False,
+            fix_state_copy_config,
+        ),
         Fix("sessions.create", "sessions", "create the sessions directory", True, fix_sessions_create),
         Fix("session.repair_safe", "sessions", "truncate a torn final session line", True, fix_session_safe),
         Fix("session.repair_full", "sessions", "quarantine or compact damaged session logs", False, fix_session_full),
@@ -3392,6 +3597,7 @@ CHECKS: Tuple[Tuple[str, Callable[[DoctorContext], CheckResult]], ...] = (
     ("importability", check_importability),
     ("stdlib_only", check_stdlib_only),
     ("home", check_home),
+    ("state", check_state),
     ("config_present", check_config_present),
     ("config_parses", check_config_parses),
     ("config_schema", check_config_schema),
@@ -3419,6 +3625,7 @@ CHECK_TITLES: Dict[str, str] = {
     "importability": "Every harness module imports",
     "stdlib_only": "No third-party imports",
     "home": "Home folder and state directory",
+    "state": "State folder, key location and duplicates",
     "config_present": "Config file exists",
     "config_parses": "Config file is valid JSON",
     "config_schema": "Config keys are known and well-typed",
@@ -3595,6 +3802,57 @@ def fix_summary_line(results: Sequence[CheckResult]) -> str:
 REPORT_ORDER = ("fail", "unfixable", "warn", "fixed", "ok", "skipped")
 
 
+def describe_config_state(path: str) -> str:
+    """``exists, mode 0600`` / ``missing`` for a config path.  Never the contents."""
+    if not path:
+        return "<none>"
+    if os.path.isdir(path):
+        return "is a directory"
+    if not os.path.exists(path):
+        return "missing"
+    return "exists, mode {}".format(config_file_mode(path) or "unknown")
+
+
+def pointer_line(ctx: DoctorContext) -> str:
+    """The remembered-choice file: where it is and whether it decided this run."""
+    path = ctx.pointer or home.primary_pointer_path()
+    if not path:
+        return "<none: no entry point to write next to>"
+    if not os.path.exists(path):
+        return "{} (not written yet)".format(path)
+    return "{} ({})".format(path, "in use" if ctx.pointer_used else "records the chosen home")
+
+
+def duplicates_line(ctx: DoctorContext) -> str:
+    """The likely iCloud/Files copies, or ``none``.  They are never merged or deleted."""
+    if not ctx.duplicates:
+        return "none"
+    return "{} likely iCloud/Files copy(ies): {}".format(len(ctx.duplicates), ", ".join(ctx.duplicates))
+
+
+def path_lines(ctx: DoctorContext) -> List[str]:
+    """The exact paths (and the rule that chose the home) — ``--paths`` prints these.
+
+    One line per path, with the resolved home carrying the rule that won, the config
+    carrying whether it exists (never its contents) and the pointer file and duplicates
+    named when there are any.  This is the block a user on a phone can paste back.
+    """
+    return [
+        "home       : {}".format(ctx.home_line),
+        "config     : {} ({})".format(ctx.config_path, describe_config_state(ctx.config_path)),
+        "state      : {}".format(ctx.state),
+        "workspace  : {}".format(ctx.workspace),
+        "sessions   : {}".format(ctx.sessions_dir),
+        "pointer    : {}".format(pointer_line(ctx)),
+        "duplicates : {}".format(duplicates_line(ctx)),
+    ]
+
+
+def paths_report(ctx: DoctorContext) -> str:
+    """``run.py --paths``: exactly the resolved paths and nothing else."""
+    return "\n".join(path_lines(ctx))
+
+
 def format_report(
     results: Sequence[CheckResult],
     *,
@@ -3608,11 +3866,7 @@ def format_report(
     if ctx is not None:
         lines.append("root       : {}".format(ctx.root))
         lines.append("python     : {} ({})".format(_client_tls_python(), platform.platform()))
-        lines.append("home       : {}".format(ctx.home_line))
-        lines.append("config     : {}".format(ctx.config_path))
-        lines.append("workspace  : {}".format(ctx.workspace))
-        lines.append("sessions   : {}".format(ctx.sessions_dir))
-        lines.append("state      : {}".format(ctx.state))
+        lines.extend(path_lines(ctx))
         if ctx.state_migration:
             lines.append("migration  : {}".format(ctx.state_migration))
         lines.append("network    : {}".format("checked" if ctx.network else "not checked (fast pass / --no-network)"))

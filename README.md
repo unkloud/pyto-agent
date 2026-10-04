@@ -99,12 +99,19 @@ left exactly where it is and named, with the command that deletes it.)
 > **If Pyto has no home directory.** Some Pyto installs cannot resolve `~`: there is no
 > usable `HOME` and `os.path.expanduser("~")` returns the string `"~"`, so `~/pyto_harness`
 > is a *relative* path with a literal tilde and iOS refuses to create it —
-> `[Errno 1] Operation not permitted: '~/pyto_harness'`. The harness does not trust `~`:
-> it picks the first folder it can really write to (`PYTO_HARNESS_HOME`, then a usable
-> `HOME`, then the folder Pyto runs scripts from, then — with a loud warning — the
-> temporary directory), and `--doctor` prints which one won. If the installer tells you it
-> cannot find a writable folder, paste this once in the same console and re-run the
-> installer:
+> `[Errno 1] Operation not permitted: '~/pyto_harness'`. The harness does not trust `~`, and
+> it does not trust the working directory either: the state is **anchored to the install**.
+> In order it uses `PYTO_HARNESS_HOME`, then `PYTO_HARNESS_STATE_DIR`/`PYTO_HARNESS_CONFIG`,
+> then the folder remembered in `<install>/pyto_harness_home.txt`, then the one candidate
+> folder that already holds a `pyto_harness/config.json` (nothing is ever moved or merged),
+> then a usable `HOME`, then a really-expanded `~`, then the folder **above the install**
+> (the default: it survives replacing the install folder), then the install folder, then the
+> folder Pyto runs scripts from, and finally — with a loud warning — the temporary
+> directory. `python run.py --paths` prints every resolved path and the rule that chose the
+> home; `--doctor` prints the same block. If two folders hold a `config.json`, or a
+> `pyto_harness 2` copy appears beside the one in use, the harness names all of them and
+> never merges or deletes anything. If the installer tells you it cannot find a writable
+> folder, paste this once in the same console and re-run the installer:
 >
 > ```python
 > import os; os.environ["PYTO_HARNESS_HOME"] = os.getcwd()
@@ -300,6 +307,12 @@ Environment variables: `PYTO_HARNESS_MODEL`, `PYTO_HARNESS_API_BASE`,
   directory unless `PYTO_HARNESS_STATE_DIR` says otherwise).
 * **`PYTO_HARNESS_STATE_DIR`** — where `health.json`, `capabilities.json` and the source
   backups go.
+
+With neither `PYTO_HARNESS_HOME` nor the two above set, the home is remembered in a plain
+`pyto_harness_home.txt` next to `run.py` (delete it to choose again), an existing
+`pyto_harness/config.json` in one of the known candidates is adopted, and the fallback
+default is the folder **above** the install. `python run.py --paths` shows the winner, the
+rule that chose it and every path derived from it.
 
 A `~` in any of these, or in `--workspace`/`--resume`/`--into`, is expanded, and **refused
 with an explanation** when this device cannot expand it — it is never used literally.
@@ -666,7 +679,14 @@ pyto_harness/                     the state directory (no leading dot: Files sho
   backups/                        signed source snapshots (harness/ + run.py only)
   health.json, capabilities.json  the last health pass, and what this device can do
 pyto_harness_workspace/           the agent's own files: programs, memory.json, tool-output/
+pyto_harness_home.txt             inside the install: the home this run remembered
 ```
+
+The two visible folders sit in the home `--paths` reports — the folder above the install by
+default, so replacing the install folder (the usual way to update on iOS) never moves your
+key, sessions or memory. A `pyto_harness 2` folder next to the one in use is an iCloud/Files
+copy: the harness names it, uses only the folder it resolved, and never merges or deletes
+anything.
 
 A copy of the tree made by the self-repair tests keeps its state beside itself, in
 `pyto_harness_state/` — older copies used a hidden `.pyto_harness_state/`, which is still
@@ -678,6 +698,7 @@ read so their snapshots stay restorable.
 python3 -m unittest discover -s tests -t .     # 664 tests, offline, no network (~34 s)
 python3 stdlib_audit.py                        # third_party_modules: [], 18 files parse at (3,10)
 python3 run.py --dry-run "hello"               # prints the request, sends nothing
+python3 run.py --paths                         # every resolved path and the rule that chose it
 python3 run.py --doctor                        # health report, exit 0 healthy / 1 fixable / 2 human
 python3 run.py --doctor --fix                  # repair, then re-check
 ```

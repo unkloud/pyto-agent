@@ -12,17 +12,36 @@ directory and a temp file, then delete it), and raising :class:`~harness.errors.
 with the workaround (``PYTO_HARNESS_HOME``) when nothing is writable.  It never returns a
 path that still contains an unexpanded ``~``.
 
-Precedence, first writable candidate wins:
+Precedence, first *usable* candidate wins:
 
 1. ``PYTO_HARNESS_HOME`` — the documented escape hatch (created if missing);
-2. ``HOME`` from the environment, when it is absolute and writable;
-3. ``os.path.expanduser("~")``, when the result is absolute (i.e. really expanded);
-4. the folder Pyto runs scripts from — the current working directory, then the folder
-   that holds ``run.py`` — each probed through a ``pyto_harness`` directory inside it;
-5. :func:`tempfile.gettempdir` with a ``pyto_harness`` subdirectory.  This one is
-   **temporary**: iOS can purge it at any time, so a loud warning is printed;
-6. nothing writable → :class:`ConfigError` naming the folder Pyto opened and the exact
-   line to run.
+2. ``PYTO_HARNESS_STATE_DIR`` / ``PYTO_HARNESS_CONFIG`` — when the user has named the
+   state folder (or the config file) explicitly, the folder that owns it is the home;
+3. the **remembered choice**: the visible pointer file written next to the entry point
+   (``<install>/pyto_harness_home.txt``).  It is read first, validated for writability,
+   and ignored — with a report — when it no longer names a usable folder;
+4. **an existing state folder**: when exactly one of the known candidates (``HOME``, a
+   genuinely expanded ``~``, the install's parent, the install itself, the current
+   directory) already holds ``pyto_harness/config.json``, that folder is adopted and the
+   pointer file records it.  Nothing is ever moved, copied, merged or deleted here.  Two
+   or more candidates with a config: the first in this order wins, and a plain warning
+   names every one of them and says how to switch;
+5. ``HOME`` from the environment when it is absolute and writable, then
+   ``os.path.expanduser("~")`` when the result is absolute (i.e. really expanded);
+6. the folder **above the install** — ``<parent of the folder holding run.py>``, probed
+   through the ``pyto_harness`` directory inside it.  This is the default: it survives
+   replacing the install directory and never depends on where the script was started;
+7. the install folder itself, then the folder Pyto opened (the current working
+   directory) — each probed through a ``pyto_harness`` directory inside it;
+8. :func:`tempfile.gettempdir` with a ``pyto_harness`` subdirectory.  This one is
+   **temporary**: iOS can purge it at any time, so a loud warning is printed (and the
+   pointer file is *not* written: a purgeable folder must not be remembered);
+9. nothing writable → :class:`ConfigError` naming the folder Pyto opened, every candidate
+   that was tried and the exact line to run.
+
+The state folder therefore never lands inside the code search path by accident, the choice
+is stable across runs started from different directories, and nothing is created, moved or
+deleted anywhere except inside the folder :func:`resolve_home` returns.
 
 The state directory is :data:`STATE_DIR_NAME` (``pyto_harness``), deliberately without a
 leading dot: the iOS Files app hides dot-folders, so a hidden state directory could not be
@@ -33,9 +52,9 @@ kept it under the legacy hidden name, :data:`LEGACY_STATE_DIR_NAME`;
 The move has to happen *before the resolver probes anything*, because a probe **creates**
 ``<home>/pyto_harness`` — and an empty new directory on disk is what used to make the move
 a no-op and strand the old data.  The startup hooks therefore use
-:func:`candidate_homes`, a guess that only reads the environment, ``argv[0]`` and the
-current directory and creates nothing, and call :func:`migrate_legacy_state` for each
-candidate.  When the new directory is already there, :func:`migrate_legacy_state` moves the
+:func:`candidate_homes`, a guess that only reads the environment, the pointer file,
+``argv[0]`` and the current directory and creates nothing, and call
+:func:`migrate_legacy_state` for each candidate.  When the new directory is already there, :func:`migrate_legacy_state` moves the
 old entries in one by one without overwriting anything, or (when the new directory already
 owns a ``config.json``) leaves the old one alone and says so — it never merges two configs
 and never deletes a non-empty folder.
@@ -47,19 +66,37 @@ honoured.  :func:`reset_home_cache` clears it for tests.
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import sys
 import tempfile
 from dataclasses import dataclass, field
-from typing import Dict, List, Mapping, Optional, Tuple
+from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
 from .errors import ConfigError
-from .security import mkdir_private
+from .security import mkdir_private, open_private
 
 #: The directory the harness keeps its own state in, inside the resolved home.  Visible in
 #: the iOS Files app: ``pyto_harness``, no leading dot.
 STATE_DIR_NAME = "pyto_harness"
+#: The config file inside the state directory.  Spelled here once so the resolver can ask
+#: "does this candidate already hold a config?" without importing :mod:`harness.config`
+#: (which imports this module).
+CONFIG_FILE_NAME = "config.json"
+#: The remembered choice: a **visible** file (no leading dot, so the Files app shows it)
+#: written next to the entry point, holding the home directory that was chosen.  One line
+#: of path, ``#`` comments allowed.
+POINTER_FILE_NAME = "pyto_harness_home.txt"
+#: Never read more than this from a pointer file: it is a path, not a document.
+POINTER_MAX_BYTES = 4096
+#: The header line of the pointer file, so a human who opens it knows what it is.
+POINTER_HEADER = (
+    "# pyto-harness: the folder that holds {state}/. Delete this file to choose again.".format(
+        state=STATE_DIR_NAME
+    )
+)
+
 #: The name releases before the visible-state change used.  Read once at startup by
 #: :func:`migrate_legacy_state` and then left empty; nothing writes to it any more.
 LEGACY_STATE_DIR_NAME = ".pyto_harness"
@@ -135,12 +172,42 @@ def legacy_kept_message(legacy_path: str) -> str:
 
 
 @dataclass(frozen=True)
+class StateCandidate:
+    """One folder that already holds ``<home>/pyto_harness/config.json``."""
+
+    home: str = ""
+    config: str = ""
+    label: str = ""
+    has_api_key: bool = False
+
+    def describe(self) -> str:
+        return "{} ({}; config with an api_key: {})".format(
+            self.config, self.label or "candidate", "yes" if self.has_api_key else "no"
+        )
+
+
+@dataclass(frozen=True)
+class PointerRecord:
+    """What the visible pointer file next to the entry point says, if anything."""
+
+    path: str = ""
+    home: str = ""
+    #: Why the file was ignored ("" when it was not read or was usable).
+    problem: str = ""
+
+    @property
+    def usable(self) -> bool:
+        return bool(self.home) and not self.problem
+
+
+@dataclass(frozen=True)
 class HomeChoice:
     """How the home directory was chosen, for diagnostics and for the failure path."""
 
     path: str = ""
-    #: Machine-readable winner: ``PYTO_HARNESS_HOME``, ``HOME``, ``expanduser``,
-    #: ``cwd``, ``runpy``, ``tempdir`` or ``""``.
+    #: Machine-readable winner: ``PYTO_HARNESS_HOME``, ``PYTO_HARNESS_STATE_DIR``,
+    #: ``PYTO_HARNESS_CONFIG``, ``pointer``, ``adopted``, ``HOME``, ``expanduser``,
+    #: ``install_parent``, ``runpy``, ``cwd``, ``tempdir`` or ``""``.
     source: str = ""
     #: Human suffix for the doctor line, e.g. ``from cwd; HOME was unusable``.
     note: str = ""
@@ -150,16 +217,39 @@ class HomeChoice:
     temporary: bool = False
     #: The full actionable message when nothing was writable (``path`` is empty then).
     error: str = field(default="")
+    #: The pointer file that recorded (or is about to record) the choice, when there is one.
+    pointer: str = ""
+    #: True when the choice came *from* the pointer file rather than being written to it.
+    pointer_used: bool = False
+    #: Every candidate that already held a ``pyto_harness/config.json``, in precedence
+    #: order -- including the ones that were not chosen.
+    candidates: Tuple[StateCandidate, ...] = ()
+    #: ``pyto_harness 2``-style folders and duplicated install folders: likely iCloud/Files
+    #: copies.  Reported, never touched.
+    duplicates: Tuple[str, ...] = ()
+    #: The plain warning to print once per process (ambiguity, stale pointer, duplicates).
+    warning: str = ""
 
     @property
     def ok(self) -> bool:
         return bool(self.path) and not self.error
+
+    @property
+    def adopted_from(self) -> str:
+        """The candidate folder whose config was adopted (``""`` when not adopted)."""
+        return self.path if self.source == SOURCE_ADOPTED else ""
 
     def describe(self) -> str:
         """``/path (from cwd; HOME was unusable)`` — the doctor's one line."""
         if not self.path:
             return "<unresolved>"
         return "{} ({})".format(self.path, self.note) if self.note else self.path
+
+    def unchosen_candidates(self) -> Tuple[StateCandidate, ...]:
+        """Candidates that hold a config but are not the home in use."""
+        if not self.path:
+            return self.candidates
+        return tuple(item for item in self.candidates if os.path.abspath(item.home) != os.path.abspath(self.path))
 
 
 # --------------------------------------------------------------------------------------
@@ -457,25 +547,409 @@ def _cwd() -> str:
         return ""
 
 
+# --------------------------------------------------------------------------------------
+# The remembered choice, the folder above the install, and existing state
+# --------------------------------------------------------------------------------------
+
+#: Machine-readable sources, kept in one place so tests and reports never spell them out.
+SOURCE_ENV_HOME = ENV_HOME
+SOURCE_ENV_STATE = ENV_STATE_DIR
+SOURCE_ENV_CONFIG = ENV_CONFIG
+SOURCE_POINTER = "pointer"
+SOURCE_ADOPTED = "adopted"
+SOURCE_HOME = "HOME"
+SOURCE_EXPANDUSER = "expanduser"
+SOURCE_INSTALL_PARENT = "install_parent"
+SOURCE_INSTALL = "runpy"
+SOURCE_CWD = "cwd"
+SOURCE_TEMPDIR = "tempdir"
+
+
+def config_path_in(home_dir: str) -> str:
+    """``<home_dir>/pyto_harness/config.json`` — the file that makes a home *the* home."""
+    return os.path.join(home_dir, STATE_DIR_NAME, CONFIG_FILE_NAME)
+
+
+def owner_home(path: str) -> str:
+    """The home that owns ``path``: its parent when it is itself a ``pyto_harness`` folder."""
+    cleaned = path.rstrip(os.sep) or path
+    parent = os.path.dirname(cleaned)
+    if os.path.basename(cleaned) == STATE_DIR_NAME and parent:
+        return parent
+    return path
+
+
+def override_home(environ: Optional[Mapping[str, str]] = None) -> Optional[Tuple[str, str, str]]:
+    """``(home, source, description)`` for ``PYTO_HARNESS_STATE_DIR`` / ``PYTO_HARNESS_CONFIG``.
+
+    ``None`` when neither is set.  The folder that *owns* the state directory (or the config
+    file) is the home, so with the documented layout — ``$HOME/pyto_harness/config.json`` —
+    the home is ``$HOME`` and ``<home>/pyto_harness`` is the very folder the user named.
+    Raises :class:`ConfigError` for an unexpandable ``~``, exactly like the path helpers this
+    mirrors (``config.default_state_dir`` / ``config.default_config_path``); the caller
+    decides whether that is fatal.
+    """
+    env = environment(environ)
+    raw_state = str(env.get(ENV_STATE_DIR) or "").strip()
+    if raw_state:
+        state_path = expand_user_path(raw_state, what=ENV_STATE_DIR)
+        return (owner_home(state_path), SOURCE_ENV_STATE, "{}={}".format(ENV_STATE_DIR, state_path))
+    raw_config = str(env.get(ENV_CONFIG) or "").strip()
+    if raw_config:
+        config_path = expand_user_path(raw_config, what=ENV_CONFIG)
+        return (
+            owner_home(os.path.dirname(config_path)),
+            SOURCE_ENV_CONFIG,
+            "{}={}".format(ENV_CONFIG, config_path),
+        )
+    return None
+
+
+def pointer_file_paths() -> List[str]:
+    """Every place the remembered choice may live, best first (next to the entry point)."""
+    paths: List[str] = []
+    for directory, _label in entry_point_dirs():
+        candidate = os.path.join(directory, POINTER_FILE_NAME)
+        if candidate not in paths:
+            paths.append(candidate)
+    return paths
+
+
+def primary_pointer_path() -> str:
+    """Where the remembered choice is written: next to the running entry point."""
+    paths = pointer_file_paths()
+    return paths[0] if paths else ""
+
+
+def first_path_line(text: str) -> str:
+    """The first non-empty, non-comment line of a pointer file (``""`` when none)."""
+    for line in str(text or "").splitlines():
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#"):
+            return stripped
+    return ""
+
+
+def read_pointer() -> PointerRecord:
+    """Read the pointer file next to the entry point, if there is one.
+
+    **Reads only**: nothing is created and nothing is written, so the startup hooks can call
+    this before anything resolves a home.  A missing file returns an empty record.  A file
+    that is empty, or that names a relative path or a path with an unexpanded ``~``, is
+    *ignored* — the reason lands in :attr:`PointerRecord.problem`, the resolver re-resolves,
+    and nothing is ever raised.  Whether the folder it names is still writable is the
+    resolver's question (it is the one that probes).
+    """
+    for path in pointer_file_paths():
+        if not os.path.isfile(path):
+            continue
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as handle:
+                text = handle.read(POINTER_MAX_BYTES)
+        except OSError as exc:
+            return PointerRecord(path=path, problem="it could not be read ({})".format(_oserror_text(exc)))
+        named = first_path_line(text)
+        if not named:
+            return PointerRecord(path=path, problem="it does not name a folder")
+        if has_unexpanded_tilde(named) or not os.path.isabs(named):
+            return PointerRecord(
+                path=path, problem="it names {!r}, which is not an absolute path".format(named)
+            )
+        return PointerRecord(path=path, home=os.path.abspath(named))
+    return PointerRecord()
+
+
+def record_pointer(home_dir: str) -> str:
+    """Write (or refresh) the pointer file next to the entry point.  Never raises.
+
+    Returns the path written, or ``""`` when there is nowhere to write it.  The file is
+    written ``0600`` through a temporary file and an atomic replace, so a torn pointer can
+    never become the remembered choice, and a path that is not a regular file is left alone
+    rather than written through.  A pointer that already names ``home_dir`` is not touched.
+    """
+    if not home_dir:
+        return ""
+    path = primary_pointer_path()
+    if not path:
+        return ""
+    if os.path.lexists(path) and not os.path.isfile(path):
+        return ""
+    try:
+        if os.path.isfile(path):
+            with open(path, "r", encoding="utf-8", errors="replace") as handle:
+                current = first_path_line(handle.read(POINTER_MAX_BYTES))
+            if (
+                current
+                and not has_unexpanded_tilde(current)
+                and os.path.isabs(current)
+                and os.path.abspath(current) == os.path.abspath(home_dir)
+            ):
+                return path
+        temporary = path + ".tmp"
+        with open_private(temporary, truncate=True) as handle:
+            handle.write("{}\n{}\n".format(POINTER_HEADER, os.path.abspath(home_dir)))
+        os.replace(temporary, path)
+    except OSError:
+        try:
+            os.unlink(path + ".tmp")
+        except OSError:
+            pass
+        return ""
+    return path
+
+
+def looks_like_install(directory: str) -> bool:
+    """True when ``directory`` really is an install folder (holds ``run.py`` or ``harness``).
+
+    The folder above an install is a home candidate; the folder above an unrelated
+    ``sys.argv[0]`` (``python -m unittest``, a wrapper in ``/usr/lib``) must never be one.
+    """
+    if not directory or not os.path.isdir(directory):
+        return False
+    return os.path.isfile(os.path.join(directory, "run.py")) or os.path.isdir(
+        os.path.join(directory, "harness")
+    )
+
+
+def install_parent_dirs() -> List[Tuple[str, str]]:
+    """``(directory, label)`` for the folder above each install folder, best first.
+
+    The folder above the install is the new default home: it survives replacing the install
+    directory (the common way to update on iOS) and never moves with the working directory.
+    The filesystem root is never a candidate.
+    """
+    pairs: List[Tuple[str, str]] = []
+    for directory, _label in entry_point_dirs():
+        absolute = os.path.abspath(directory)
+        if not looks_like_install(absolute):
+            continue
+        parent = os.path.dirname(absolute)
+        if not parent or parent == absolute or parent == os.path.dirname(parent):
+            continue  # the filesystem root has no parent worth probing
+        if not os.path.isdir(parent):
+            continue
+        if any(os.path.abspath(existing) == parent for existing, _label in pairs):
+            continue
+        pairs.append((parent, "the folder above the install"))
+    return pairs
+
+
+def state_candidate_dirs(environ: Optional[Mapping[str, str]] = None) -> List[Tuple[str, str]]:
+    """``(home, label)`` for the folders that may already hold ``pyto_harness``, in order.
+
+    The order is the resolver's own precedence among them — ``HOME``, a genuinely expanded
+    ``~``, the folder above the install, the install itself, then the working directory — so
+    "the highest-precedence candidate" means the same thing here and in the fallback rules.
+    This function only *reads*: nothing is created, moved or deleted.
+    """
+    env = environment(environ)
+    pairs: List[Tuple[str, str]] = []
+
+    def remember(path: str, label: str) -> None:
+        text = str(path or "").strip()
+        if not text or has_unexpanded_tilde(text) or not os.path.isabs(text):
+            return
+        absolute = os.path.abspath(text)
+        if any(existing == absolute for existing, _label in pairs):
+            return
+        pairs.append((absolute, label))
+
+    remember(str(env.get("HOME") or ""), "HOME")
+    try:
+        expanded = os.path.expanduser("~")
+    except Exception:  # noqa: BLE001 - a hostile expanduser must not stop the scan
+        expanded = ""
+    if expanded and expanded != "~":
+        remember(expanded, "a genuinely expanded ~")
+    for directory, label in install_parent_dirs():
+        remember(directory, label)
+    for directory, label in entry_point_dirs():
+        remember(directory, label)
+    remember(_cwd(), "the current directory")
+    return pairs
+
+
+def config_has_api_key(path: str) -> bool:
+    """True when the config file holds a non-empty ``api_key``.  The value is never kept."""
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except (OSError, ValueError):
+        return False
+    if not isinstance(payload, dict):
+        return False
+    key = payload.get("api_key")
+    return isinstance(key, str) and bool(key.strip())
+
+
+def candidates_with_config(environ: Optional[Mapping[str, str]] = None) -> List[StateCandidate]:
+    """Every known candidate that already holds ``pyto_harness/config.json``, in order."""
+    found: List[StateCandidate] = []
+    for home_dir, label in state_candidate_dirs(environ):
+        path = config_path_in(home_dir)
+        if not os.path.isfile(path):
+            continue
+        found.append(
+            StateCandidate(home=home_dir, config=path, label=label, has_api_key=config_has_api_key(path))
+        )
+    return found
+
+
+def is_duplicate_name(name: str, stem: str) -> bool:
+    """True for ``stem`` plus a numeric suffix: ``pyto_harness 2``, ``pyto_harness3``."""
+    if not name.startswith(stem):
+        return False
+    tail = name[len(stem) :].strip()
+    return bool(tail) and tail.isdigit()
+
+
+def duplicate_state_dirs(home_dir: str = "", state_dir: str = "") -> List[str]:
+    """``pyto_harness 2``-style siblings of the state folder, sorted.
+
+    This is what the Files app and iCloud produce when the same folder is saved twice: a
+    second copy beside the first.  They are reported, never merged into and never deleted —
+    only the user can decide which copy to keep.
+    """
+    roots: List[str] = []
+    for root in (home_dir, os.path.dirname(state_dir) if state_dir else ""):
+        if root and os.path.isdir(root) and root not in roots:
+            roots.append(root)
+    found: List[str] = []
+    for root in roots:
+        for name in _listdir(root) or []:
+            if is_duplicate_name(name, STATE_DIR_NAME):
+                path = os.path.join(root, name)
+                if path not in found:
+                    found.append(path)
+    return sorted(found)
+
+
+def duplicate_install_dirs() -> List[str]:
+    """Copies of the install folder (``pyto-agent 2``) sitting next to it, sorted."""
+    found: List[str] = []
+    for directory, _label in entry_point_dirs():
+        absolute = os.path.abspath(directory)
+        stem = os.path.basename(absolute)
+        parent = os.path.dirname(absolute)
+        if not stem or not os.path.isdir(parent):
+            continue
+        for name in _listdir(parent) or []:
+            path = os.path.join(parent, name)
+            if (
+                name != stem
+                and is_duplicate_name(name, stem)
+                and os.path.isdir(path)
+                and not os.path.islink(path)
+                and path not in found
+            ):
+                found.append(path)
+    return sorted(found)
+
+
+def likely_icloud_copies(home_dir: str = "", state_dir: str = "") -> List[str]:
+    """The likely iCloud/Files copies worth reporting: state-folder and install copies."""
+    found = duplicate_state_dirs(home_dir, state_dir)
+    for path in duplicate_install_dirs():
+        if path not in found:
+            found.append(path)
+    return sorted(found)
+
+
+def stray_state_dirs(home_dir: str = "", state_dir: str = "") -> List[str]:
+    """``<install>/pyto_harness`` folders that are *not* the state folder in use.
+
+    An install that was once started from inside its own folder left its state there --
+    exactly the bug this release fixes.  Such a folder usually has sessions, memory and a
+    health file but no ``config.json``, so it cannot hold the key; it is named for the user
+    and never touched.  A folder that *is* the state folder in use is not listed.
+    """
+    in_use = os.path.abspath(state_dir) if state_dir else ""
+    found: List[str] = []
+    for directory, _label in entry_point_dirs():
+        candidate = os.path.abspath(state_dir_in(directory))
+        if in_use and candidate == in_use:
+            continue
+        if os.path.isdir(candidate) and not os.path.islink(candidate) and candidate not in found:
+            found.append(candidate)
+    return sorted(found)
+
+
+def duplicates_warning(copies: Sequence[str]) -> str:
+    """The short, plain warning for likely iCloud/Files copies (which are never touched)."""
+    lines = [
+        "[warning] {} folder(s) next to the harness look like iCloud/Files copies:".format(len(copies))
+    ]
+    lines.extend("[warning]   {}".format(path) for path in copies)
+    lines.append("[warning] the harness uses only the folder it resolved; keep one copy, and")
+    lines.append("[warning] move or delete the others yourself (nothing is ever merged).")
+    return "\n".join(lines)
+
+
+def ambiguity_warning(chosen: str, chosen_label: str, others: Sequence[StateCandidate]) -> str:
+    """Two or more candidates hold a config: name them all, say which is in use, how to switch."""
+    lines = [
+        "[warning] {} folders hold a {}/{}:".format(
+            len(others) + 1, STATE_DIR_NAME, CONFIG_FILE_NAME
+        ),
+        "[warning]   in use: {} ({})".format(config_path_in(chosen), chosen_label or "chosen"),
+    ]
+    for item in others:
+        lines.append("[warning]   also  : {} ({})".format(item.config, item.label or "candidate"))
+    lines.append(
+        "[warning] to use another one: {}={} (two configs are never merged)".format(
+            ENV_HOME, others[0].home
+        )
+    )
+    return "\n".join(lines)
+
+
+def _warn_once(text: str) -> None:
+    """Print a warning once per process (a run must not repeat itself)."""
+    if not text or text in _WARNED:
+        return
+    _WARNED.add(text)
+    try:
+        print(text, file=sys.stderr)
+    except Exception:  # pragma: no cover - a closed stderr must not break the run
+        pass
+
+
+def _write_pointer_for(source: str, home_dir: str) -> str:
+    """Record an implicitly-chosen home; an explicit override needs no remembering.
+
+    The temporary folder is never remembered (iOS can purge it), and neither are the
+    explicit overrides (``PYTO_HARNESS_HOME``, the state/config variables): the user said
+    what they want, and a stale pointer must not outlive that decision.
+    """
+    if source in (SOURCE_ENV_HOME, SOURCE_ENV_STATE, SOURCE_ENV_CONFIG, SOURCE_TEMPDIR, SOURCE_POINTER):
+        return ""
+    return record_pointer(home_dir)
+
+
+#: Warnings already printed by :func:`_warn_once`; cleared by :func:`reset_home_cache`.
+_WARNED: set = set()
+
+
 def candidate_homes(environ: Optional[Mapping[str, str]] = None) -> List[str]:
     """The plausible home directories, in resolver order, guessed **without writing**.
 
     This is the cheap guess the startup hooks use to find a legacy ``.pyto_harness``
     *before* anything resolves the home: :func:`resolve_home` proves a candidate with a
     real write probe, and that probe creates ``<home>/pyto_harness`` -- which is exactly
-    what used to defeat the one-time move.  So this function reads the environment,
-    ``argv[0]`` and the current directory and nothing else: it creates no directory, writes
-    no probe file and never calls :func:`resolve_home` (``os.path.isdir`` on the entry
-    points is the only filesystem question it asks).
+    what used to defeat the one-time move.  So this function reads the environment, the
+    pointer file, ``argv[0]`` and the current directory and nothing else: it creates no
+    directory, writes no probe file and never calls :func:`resolve_home`.
 
-    The candidates mirror the resolver's first four sources:
+    The candidates mirror the resolver's order:
 
     1. ``PYTO_HARNESS_HOME`` — absolutised like the resolver does, so a relative escape
        hatch is honoured;
-    2. ``HOME`` — only when it is already an absolute path (never a literal ``~``);
-    3. ``os.path.expanduser("~")`` — only when it genuinely expanded;
-    4. the directories Pyto runs scripts from: the current directory, then the folder that
-       holds ``run.py``.
+    2. the folder that owns ``PYTO_HARNESS_STATE_DIR`` / ``PYTO_HARNESS_CONFIG``;
+    3. the remembered choice in the pointer file next to the entry point;
+    4. ``HOME`` — only when it is already an absolute path (never a literal ``~``);
+    5. ``os.path.expanduser("~")`` — only when it genuinely expanded;
+    6. the folder above the install, then the install folder itself, then the current
+       directory.
 
     Duplicates are removed, order preserved.  A candidate that does not exist is still
     listed: whether it holds a legacy folder is :func:`migrate_legacy_state`'s question.
@@ -497,6 +971,13 @@ def candidate_homes(environ: Optional[Mapping[str, str]] = None) -> List[str]:
     if escape and not has_unexpanded_tilde(escape):
         escape = os.path.abspath(escape)
     remember(escape)
+    try:
+        override = override_home(env)
+    except ConfigError:
+        override = None
+    if override is not None:
+        remember(override[0])
+    remember(read_pointer().home)
     remember(str(env.get("HOME") or ""))
     try:
         expanded = os.path.expanduser("~")
@@ -504,9 +985,11 @@ def candidate_homes(environ: Optional[Mapping[str, str]] = None) -> List[str]:
         expanded = ""
     if expanded and expanded != "~":
         remember(expanded)
-    remember(_cwd())
+    for directory, _label in install_parent_dirs():
+        remember(directory)
     for directory, _label in entry_point_dirs():
         remember(directory)
+    remember(_cwd())
     return candidates
 
 
@@ -550,8 +1033,9 @@ def _on_pyto() -> bool:
 # The resolver
 # --------------------------------------------------------------------------------------
 
-#: Cache keyed by ``(purpose, PYTO_HARNESS_HOME, HOME, cwd)`` so a changed environment
-#: re-resolves while repeated calls in one run do not re-probe.
+#: Cache keyed by the values that can change the answer — the purpose, the home/state/config
+#: environment, ``HOME`` and the working directory — so a changed environment re-resolves
+#: while repeated calls in one run do not re-probe.
 _CACHE: Dict[Tuple[str, str, str, str], HomeChoice] = {}
 
 #: Set once the temporary-folder warning has been printed.
@@ -560,8 +1044,17 @@ _WARNED_TEMPORARY = False
 
 def _cache_key(purpose: str, environ: Mapping[str, str]) -> Tuple[str, str, str, str]:
     # The working directory is part of the key: it is a candidate, and a process that
-    # chdirs (or a test that does) must not keep a stale winner or a stale failure.
-    return (purpose, str(environ.get(ENV_HOME) or ""), str(environ.get("HOME") or ""), _cwd())
+    # chdirs (or a test that does) must not keep a stale winner or a stale failure.  The
+    # pointer file is deliberately *not* in the key: resolving writes it, and a write of
+    # our own must not invalidate the answer we just gave (a new process re-reads it).
+    return (
+        purpose,
+        str(environ.get(ENV_HOME) or ""),
+        str(environ.get(ENV_STATE_DIR) or ""),
+        str(environ.get(ENV_CONFIG) or ""),
+        str(environ.get("HOME") or ""),
+        _cwd(),
+    )
 
 
 def environment(environ: Optional[Mapping[str, str]] = None) -> Mapping[str, str]:
@@ -584,6 +1077,7 @@ def reset_home_cache() -> None:
     """Forget the cached resolution.  For tests and for a changed environment."""
     global _WARNED_TEMPORARY
     _CACHE.clear()
+    _WARNED.clear()
     _WARNED_TEMPORARY = False
 
 
@@ -640,6 +1134,42 @@ def _resolve(purpose: str, environ: Mapping[str, str]) -> HomeChoice:
     probe_subdir = STATE_DIR_NAME if purpose == "state" else "{}_{}".format(STATE_DIR_NAME, purpose)
     skipped: List[str] = []
     tried: List[str] = []
+    warnings: List[str] = []
+    # Every candidate that already holds a config, in precedence order.  Pure reads, and
+    # computed before the probes so the doctor can report a config that was *not* chosen.
+    candidates = candidates_with_config(environ)
+
+    def finish(
+        path: str,
+        source: str,
+        origin: str,
+        *,
+        pointer: str = "",
+        pointer_used: bool = False,
+        temporary: bool = False,
+        warning: str = "",
+    ) -> HomeChoice:
+        """Record the winner (remembered choice, warnings) and build the choice."""
+        copies = tuple(likely_icloud_copies(path))
+        parts = [item for item in ([warning] if warning else []) + warnings if item]
+        if copies:
+            parts.append(duplicates_warning(copies))
+        text = "\n".join(parts)
+        if not temporary:
+            pointer = _write_pointer_for(source, path) or pointer
+        _warn_once(text)
+        return HomeChoice(
+            path=path,
+            source=source,
+            note=_note(origin, skipped),
+            skipped=tuple(skipped),
+            temporary=temporary,
+            pointer=pointer,
+            pointer_used=pointer_used,
+            candidates=tuple(candidates),
+            duplicates=copies,
+            warning=text,
+        )
 
     # 1. PYTO_HARNESS_HOME: the documented escape hatch.  Created if missing, because the
     #    user explicitly asked for this folder.
@@ -653,16 +1183,94 @@ def _resolve(purpose: str, environ: Mapping[str, str]) -> HomeChoice:
         candidate = os.path.abspath(raw_home)
         ok, why = _probe(candidate, create=True)
         if ok:
-            return HomeChoice(
-                path=candidate,
-                source=ENV_HOME,
-                note=_note("from {} (the escape hatch)".format(ENV_HOME), skipped),
-                skipped=tuple(skipped),
+            return finish(
+                candidate,
+                ENV_HOME,
+                "from {} (rule 1: the escape hatch)".format(ENV_HOME),
             )
         skipped.append("{0} was not writable".format(ENV_HOME))
         tried.append("{0}={1}: {2}".format(ENV_HOME, candidate, why))
 
-    # 2. HOME from the environment: only when it is already an absolute path.
+    # 2. PYTO_HARNESS_STATE_DIR / PYTO_HARNESS_CONFIG: the user named the state folder (or
+    #    the config file) explicitly, so the folder that owns it is the home.  Nothing else
+    #    is probed: an explicit override is the answer, not a hint.
+    try:
+        override = override_home(environ)
+    except ConfigError as exc:
+        override = None
+        skipped.append("the state/config override was unusable")
+        tried.append(str(exc).splitlines()[0])
+    if override is not None:
+        candidate, source, description = override
+        ok, why = _probe(candidate, create=True)
+        if ok:
+            return finish(
+                candidate,
+                source,
+                "from {} (rule 2: the folder that owns the state; {})".format(candidate, description),
+            )
+        skipped.append("{} was not writable".format(source))
+        tried.append("{}={}: {}".format(source, candidate, why))
+    elif not raw_home:
+        tried.append("{0}/{1} are not set".format(ENV_STATE_DIR, ENV_CONFIG))
+
+    # 3. The remembered choice: the visible pointer file next to the entry point.
+    pointer = read_pointer()
+    if pointer.problem:
+        skipped.append("the remembered choice was ignored")
+        tried.append("{}: {}".format(pointer.path, pointer.problem))
+        warnings.append(
+            "[warning] ignoring the remembered choice in {}: {}\n"
+            "[warning] resolving the home again; nothing was moved or deleted.".format(
+                pointer.path, pointer.problem
+            )
+        )
+    elif pointer.home:
+        ok, why = _probe(pointer.home, create=False)
+        if ok:
+            return finish(
+                pointer.home,
+                SOURCE_POINTER,
+                "from the remembered choice (rule 3: {})".format(pointer.path),
+                pointer=pointer.path,
+                pointer_used=True,
+            )
+        problem = "it names {}, which is not usable ({})".format(pointer.home, why)
+        skipped.append("the remembered choice was ignored")
+        tried.append("{}: {}".format(pointer.path, problem))
+        warnings.append(
+            "[warning] ignoring the remembered choice in {}: {}\n"
+            "[warning] resolving the home again; nothing was moved or deleted.".format(pointer.path, problem)
+        )
+
+    # 4. An existing state folder: adopt the highest-precedence candidate that already has
+    #    a config.json.  Nothing is moved, copied or merged -- the folder is simply used.
+    if candidates:
+        usable: List[StateCandidate] = []
+        for item in candidates:
+            ok, why = _probe(item.home, create=False, subdir=probe_subdir)
+            if ok:
+                usable.append(item)
+            else:
+                tried.append("{} ({}): {}".format(item.home, item.label, why))
+        if usable:
+            chosen = usable[0]
+            others = tuple(item for item in candidates if item.config != chosen.config)
+            if others:
+                skipped.append(
+                    "{} other candidate(s) hold {}/{}".format(len(others), STATE_DIR_NAME, CONFIG_FILE_NAME)
+                )
+            return finish(
+                chosen.home,
+                SOURCE_ADOPTED,
+                "adopted {} (rule 4: it already holds {}/{})".format(
+                    chosen.home, STATE_DIR_NAME, CONFIG_FILE_NAME
+                ),
+                warning=ambiguity_warning(chosen.home, chosen.label, others) if others else "",
+            )
+        skipped.append("the folder(s) holding a config were not writable")
+
+    # 5. HOME from the environment: only when it is already an absolute path.
     raw_home_env = str(environ.get("HOME") or "").strip()
     if not raw_home_env:
         skipped.append("HOME was unset")
@@ -673,11 +1281,11 @@ def _resolve(purpose: str, environ: Mapping[str, str]) -> HomeChoice:
     else:
         ok, why = _probe(raw_home_env, create=False)
         if ok:
-            return HomeChoice(path=raw_home_env, source="HOME", note=_note("from HOME", skipped), skipped=tuple(skipped))
+            return finish(raw_home_env, SOURCE_HOME, "from HOME (rule 5: the HOME directory)")
         skipped.append("HOME was unusable")
         tried.append("HOME={}: {}".format(raw_home_env, why))
 
-    # 3. os.path.expanduser("~"): only when it really expanded to an absolute path.
+    # 5 (continued). os.path.expanduser("~"): only when it really expanded to an absolute path.
     try:
         expanded = os.path.expanduser("~")
     except Exception as exc:  # noqa: BLE001 - a hostile expanduser must not be fatal
@@ -690,39 +1298,47 @@ def _resolve(purpose: str, environ: Mapping[str, str]) -> HomeChoice:
         else:
             ok, why = _probe(expanded, create=False)
             if ok:
-                return HomeChoice(
-                    path=expanded,
-                    source="expanduser",
-                    note=_note("from ~ (os.path.expanduser)", skipped),
-                    skipped=tuple(skipped),
-                )
+                return finish(expanded, SOURCE_EXPANDUSER, "from ~ (rule 5: os.path.expanduser)")
             skipped.append("the home directory was unusable")
             tried.append("os.path.expanduser('~')={}: {}".format(expanded, why))
 
-    # 4. The folders Pyto runs scripts from: cwd first, then the folder holding run.py.
-    #    Each is probed through the state directory that will actually be created inside.
+    # 6. The folder above the install: the default, because it does not move with the working
+    #    directory and survives replacing the install folder.  Probed through the state
+    #    directory that will actually be created inside it.
+    for directory, label in install_parent_dirs():
+        ok, why = _probe(directory, create=False, subdir=probe_subdir)
+        if ok:
+            return finish(
+                directory,
+                SOURCE_INSTALL_PARENT,
+                "from {} ({}) (rule 6: the install's parent)".format(label, directory),
+            )
+        tried.append("{} ({}): {}".format(directory, label, why))
+
+    # 7. The install folder itself, then the folder Pyto opened (the current directory).
+    for directory, label in entry_point_dirs():
+        ok, why = _probe(directory, create=False, subdir=probe_subdir)
+        if ok:
+            return finish(
+                directory,
+                SOURCE_INSTALL,
+                "from {} ({}) (rule 7: the install folder)".format(
+                    label, os.path.join(directory, probe_subdir)
+                ),
+            )
+        tried.append("{} ({}): {}".format(directory, label, why))
+
     cwd = _cwd()
     if cwd:
         ok, why = _probe(cwd, create=False, subdir=probe_subdir)
         if ok:
             origin = "from cwd" + (" (Pyto)" if _on_pyto() else "")
-            return HomeChoice(path=cwd, source="cwd", note=_note(origin, skipped), skipped=tuple(skipped))
+            return finish(cwd, SOURCE_CWD, "{} (rule 7: the current directory)".format(origin))
         tried.append("{} (the folder Pyto opened): {}".format(cwd, why))
     else:  # pragma: no cover - only when the working directory was deleted
         tried.append("os.getcwd() failed")
 
-    for directory, label in entry_point_dirs():
-        ok, why = _probe(directory, create=False, subdir=probe_subdir)
-        if ok:
-            return HomeChoice(
-                path=directory,
-                source="runpy",
-                note=_note("from {} ({})".format(label, os.path.join(directory, probe_subdir)), skipped),
-                skipped=tuple(skipped),
-            )
-        tried.append("{} ({}): {}".format(directory, label, why))
-
-    # 5. The system temp directory: works, but iOS can purge it without warning.
+    # 8. The system temp directory: works, but iOS can purge it without warning.
     try:
         temp_root = _temp_root()
     except Exception as exc:  # noqa: BLE001 - a broken tempdir must not be fatal
@@ -733,17 +1349,23 @@ def _resolve(purpose: str, environ: Mapping[str, str]) -> HomeChoice:
         ok, why = _probe(candidate, create=True)
         if ok:
             _warn_temporary(candidate)
-            return HomeChoice(
-                path=candidate,
-                source="tempdir",
-                note=_note("from {} (TEMPORARY: iOS can purge it)".format(candidate), skipped),
-                skipped=tuple(skipped),
+            return finish(
+                candidate,
+                SOURCE_TEMPDIR,
+                "from {} (rule 8: TEMPORARY, iOS can purge it)".format(candidate),
                 temporary=True,
             )
         tried.append("{} (temporary folder): {}".format(candidate, why))
 
-    # 6. Nothing writable: say what to do about it.
-    return HomeChoice(error=no_home_message(tried, folder_name=probe_subdir), skipped=tuple(skipped))
+    # 9. Nothing writable: say what to do about it, candidate by candidate.
+    for item in candidates:
+        tried.append("{} holds {}/{} but could not be used".format(item.home, STATE_DIR_NAME, CONFIG_FILE_NAME))
+    return HomeChoice(
+        error=no_home_message(tried, folder_name=probe_subdir),
+        skipped=tuple(skipped),
+        candidates=tuple(candidates),
+        warning="\n".join(warnings),
+    )
 
 
 def _note(origin: str, skipped: List[str]) -> str:
@@ -761,6 +1383,9 @@ def no_home_message(tried: List[str], *, folder_name: str = STATE_DIR_NAME, cwd:
         "every fallback the harness tried is unwritable or cannot be created:",
     ]
     lines.extend("  - {}".format(item) for item in tried)
+    root = harness_root()
+    if root:
+        lines.append("The harness itself is installed in {}.".format(root))
     lines.append("The folder Pyto opened is {}.".format(where))
     lines.append(WORKAROUND)
     return "\n".join(lines)

@@ -7,6 +7,7 @@
     python run.py --resume <session.jsonl> "and again"  continue a previous chat
     python run.py --dry-run "..."                       print the request, send nothing
     python run.py --capabilities                        what this device can do
+    python run.py --paths                                where home, config, state and sessions are
     python run.py --doctor                              diagnose this installation
     python run.py --doctor --fix                        repair what a machine can
     python run.py --repair "<what is broken>"           gated edit of the harness source
@@ -157,6 +158,28 @@ def run_doctor_command(args: argparse.Namespace, migration: str = "") -> int:
         print(doctor.format_report(before, ctx=ctx, title="doctor"))
     doctor.save_health(ctx, after)
     return doctor.exit_code(after)
+
+
+def run_paths_command(args: argparse.Namespace) -> int:
+    """``--paths``: exactly the resolved paths, so a user on a phone can paste them back.
+
+    Nothing else goes to stdout, and a broken config file does not stop it — the point is to
+    be able to say *where* everything is when something is wrong.  The home line carries the
+    rule that chose it, the config line whether the file exists (never its contents), and
+    the pointer and duplicates lines are filled in when there are any.
+    """
+    config, config_error = resolve_config_lenient(args)
+    if config_error:
+        print("configuration error: {} (printing the paths anyway)".format(config_error), file=sys.stderr)
+    ctx = doctor.DoctorContext.for_config(
+        config,
+        network=False,
+        deep=False,
+        persist=False,
+        workspace=args.workspace or None,
+    )
+    print(doctor.paths_report(ctx))
+    return 0
 
 
 def run_backups_command(args: argparse.Namespace) -> int:
@@ -373,6 +396,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="never trim the session log (by default it is compacted near 4000 events / 4 MB)",
     )
     parser.add_argument("--capabilities", action="store_true", help="print the device capability report and exit")
+    parser.add_argument(
+        "--paths",
+        action="store_true",
+        help="print the resolved paths and exit: home (and the rule that chose it), config, "
+        "state, workspace, sessions, the pointer file and any duplicates",
+    )
     parser.add_argument("--tools", action="store_true", help="list the tools and exit")
     parser.add_argument("--init", action="store_true", help="write a starter config file and exit")
     parser.add_argument(
@@ -577,6 +606,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     if args.capabilities:
         print(ios.capability_report())
         return 0
+    if args.paths:
+        return run_paths_command(args)
     if args.init:
         try:
             path = write_sample_config(force=bool(args.force))

@@ -934,6 +934,60 @@ class TestInstallWithoutAHome(SetupTestCase):
         self.assertNotIn(self.KEY, out + err, "the key must never be printed")
 
 
+class TestInstallParentMigration(SetupTestCase):
+    """The folder above the install is a home candidate now, so migration must look there.
+
+    The device report behind this release: the key lives in ``<root>/pyto_harness`` and the
+    install in ``<root>/pyto-agent``.  An older release that kept its state in the hidden
+    folder next to the install has to be moved *before* the installer's first write probe
+    creates anything -- and the guess that finds the homes must therefore include the folder
+    above the install, not just the current directory.
+    """
+
+    def test_a_hidden_state_folder_above_the_install_is_migrated(self):
+        import types
+
+        from harness import config as config_module
+        from harness import home as home_module
+
+        root = os.path.join(self.tmp, "device")
+        install_dir = os.path.join(root, "pyto-agent")
+        os.makedirs(install_dir, exist_ok=True)
+        with open(os.path.join(install_dir, "run.py"), "w", encoding="utf-8") as handle:
+            handle.write("# the entry point\n")
+        legacy = os.path.join(root, home_module.LEGACY_STATE_DIR_NAME)
+        os.makedirs(os.path.join(legacy, "sessions"))
+        with open(os.path.join(legacy, "config.json"), "w", encoding="utf-8") as handle:
+            handle.write('{"api_key": "sk-above-the-install"}')
+        with open(os.path.join(legacy, "sessions", "old.jsonl"), "w", encoding="utf-8") as handle:
+            handle.write("{}\n")
+
+        modules = types.SimpleNamespace(config=config_module)
+        with mock.patch.object(
+            home_module, "entry_point_dirs", return_value=[(install_dir, "the folder that holds run.py")]
+        ), mock.patch.object(home_module, "_cwd", return_value=self.tmp), mock.patch.dict(
+            os.environ,
+            {
+                "PYTO_HARNESS_HOME": "",
+                "PYTO_HARNESS_CONFIG": "",
+                "PYTO_HARNESS_STATE_DIR": "",
+                "HOME": "",
+            },
+        ):
+            message = install.migrate_state_directories(modules)
+
+        self.assertEqual(message, home_module.MIGRATED_MESSAGE)
+        moved = os.path.join(root, home_module.STATE_DIR_NAME)
+        payload = json.loads(self.read_text(os.path.join(moved, "config.json")))
+        self.assertEqual(payload["api_key"], "sk-above-the-install")
+        self.assertEqual(self.read_text(os.path.join(moved, "sessions", "old.jsonl")), "{}\n")
+        self.assertFalse(os.path.lexists(legacy), "the hidden folder must be gone after the move")
+        self.assertFalse(
+            os.path.lexists(os.path.join(install_dir, home_module.STATE_DIR_NAME)),
+            "nothing may be created inside the install folder",
+        )
+
+
 class TestForcedPrompt(unittest.TestCase):
     """``--ask`` (and Pyto detection) must reach the user even without a tty.
 

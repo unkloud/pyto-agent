@@ -21,6 +21,7 @@ from __future__ import annotations
 import contextlib
 import importlib.machinery
 import io
+import json
 import os
 import shutil
 import sys
@@ -67,8 +68,34 @@ class HomeTestCase(unittest.TestCase):
         self.addCleanup(home.reset_home_cache)
         self.original_cwd = os.getcwd()
         self.addCleanup(os.chdir, self.original_cwd)
+        # The checkout these tests run from must never become a candidate: the resolver's
+        # new default is the folder *above* the install, and its pointer file is written
+        # next to the entry point.  Pinning the entry points to nothing keeps every test
+        # inside its own temp tree; the tests that exercise the install rules pin a fake
+        # install with :meth:`pin_install` instead.
+        self.entry_points = mock.patch.object(home, "entry_point_dirs", return_value=[])
+        self.entry_points.start()
+        self.addCleanup(self.entry_points.stop)
 
     # -- helpers -------------------------------------------------------------------
+
+    def pin_install(self, *parts: str, make_run_py: bool = True) -> str:
+        """Point the resolver at a fake install inside the temp tree.
+
+        Writes ``run.py`` into it -- that is what makes a folder an install, and therefore
+        what makes the folder *above* it the new default home.
+        """
+        install = self.path(*parts)
+        os.makedirs(install, exist_ok=True)
+        if make_run_py:
+            with open(os.path.join(install, "run.py"), "w", encoding="utf-8") as handle:
+                handle.write("# a fake entry point\n")
+        patcher = mock.patch.object(
+            home, "entry_point_dirs", return_value=[(install, "the folder that holds run.py")]
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return install
 
     def path(self, *parts: str) -> str:
         return os.path.join(self.tmp, *parts)
@@ -270,7 +297,7 @@ class TestPytoFallback(HomeTestCase):
         self.assertEqual(choice.source, "cwd")
         self.assertIn("Pyto", choice.note)
 
-    def test_the_run_py_folder_is_tried_after_the_working_directory(self) -> None:
+    def test_the_run_py_folder_is_used_when_the_working_directory_is_not(self) -> None:
         self.install_fake_pyto()
         run_folder = self.make_dir("install", "pyto-agent")
         opened = self.unwritable("Documents")  # Pyto opened a folder it cannot write
@@ -706,14 +733,40 @@ class TestCandidateHomes(HomeTestCase):
         cwd_patch, entry_patch = self.guesses()
         with cwd_patch, entry_patch, mock.patch.object(home.os.path, "expanduser", return_value=expanded):
             candidates = home.candidate_homes({"PYTO_HARNESS_HOME": escape, "HOME": home_dir})
-        self.assertEqual(candidates, [escape, home_dir, expanded, self.cwd, self.entry])
+        self.assertEqual(candidates, [escape, home_dir, expanded, self.entry, self.cwd])
+
+    def test_it_lists_the_state_override_the_pointer_and_the_install_parent(self) -> None:
+        """The new rules are guesses too: migration must look where the resolver will."""
+        install = self.path("install", "pyto-agent")
+        os.makedirs(install)
+        with open(os.path.join(install, "run.py"), "w", encoding="utf-8") as handle:
+            handle.write("# fake\n")
+        remembered = self.make_dir("remembered")
+        with open(os.path.join(install, home.POINTER_FILE_NAME), "w", encoding="utf-8") as handle:
+            handle.write("{}\n".format(remembered))
+        with mock.patch.object(home, "_cwd", return_value=self.make_dir("cwd")), mock.patch.object(
+            home, "entry_point_dirs", return_value=[(install, "the folder that holds run.py")]
+        ), self.patch_broken_expanduser():
+            candidates = home.candidate_homes(
+                {
+                    "PYTO_HARNESS_HOME": "",
+                    "HOME": "",
+                    "PYTO_HARNESS_STATE_DIR": self.path("state", home.STATE_DIR_NAME),
+                    "PYTO_HARNESS_CONFIG": "",
+                }
+            )
+        self.assertEqual(
+            candidates,
+            [self.path("state"), remembered, self.path("install"), install, self.path("cwd")],
+            "state override, remembered choice, install parent, install, cwd -- in that order",
+        )
 
     def test_it_skips_what_the_resolver_would_skip(self) -> None:
         cwd_patch, entry_patch = self.guesses()
         with cwd_patch, entry_patch, mock.patch.object(home.os.path, "expanduser", return_value="~"):
             candidates = home.candidate_homes({"PYTO_HARNESS_HOME": "~/escape", "HOME": "relative/home"})
         self.assertEqual(
-            candidates, [self.cwd, self.entry], "an unexpandable '~' and a relative HOME are not homes"
+            candidates, [self.entry, self.cwd], "an unexpandable '~' and a relative HOME are not homes"
         )
 
     def test_it_never_creates_anything(self) -> None:
@@ -750,6 +803,258 @@ class TestCandidateHomes(HomeTestCase):
             message = home.migrate_candidate_homes({"PYTO_HARNESS_HOME": "", "HOME": ""})
         self.assertEqual(message, "")
         self.assertEqual(self.snapshot(), before, "the startup hook must not create a state directory")
+
+
+class TestInstallAnchoredState(HomeTestCase):
+    """The bug report from the iPhone: three ``pyto_harness`` folders and one key.
+
+    The install sits in ``<root>/pyto-agent``, the key is in ``<root>/pyto_harness``, and
+    the harness is started from inside the install -- so the old resolver fell back to the
+    current directory, looked for ``<install>/pyto_harness/config.json`` and announced "no
+    API key" next to the user's key.  The state is now anchored to the install: the folder
+    *above* it is adopted because it already holds the config, and nothing is moved.
+    """
+
+    def write(self, path: str, text: str) -> str:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        return path
+
+    def read(self, path: str) -> str:
+        with open(path, encoding="utf-8") as handle:
+            return handle.read()
+
+    def phone_tree(self):
+        """The reported layout, exactly: install, key one level up, a stray state folder."""
+        root = self.make_dir("root")
+        install = self.pin_install("root", "pyto-agent")
+        key = self.write(os.path.join(root, home.STATE_DIR_NAME, "config.json"), '{"api_key": "sk-phone-key"}')
+        stray = os.path.join(install, home.STATE_DIR_NAME)  # what the cwd fallback left there
+        self.write(os.path.join(stray, "health.json"), "{}\n")
+        self.write(os.path.join(stray, "capabilities.json"), '{"modules": {}}\n')
+        os.makedirs(os.path.join(stray, "sessions"), exist_ok=True)
+        return root, install, key
+
+    def test_the_key_one_level_above_the_install_is_found(self) -> None:
+        root, install, key = self.phone_tree()
+        os.chdir(install)
+        env = {"PYTO_HARNESS_HOME": "", "HOME": ""}
+        with self.unset_env(), self.patch_broken_expanduser():
+            resolved = home.resolve_home(environ=env)
+            choice = home.resolve_home_choice(environ=env)
+            config = default_config_path()
+        self.assertEqual(resolved, root, "the folder that already holds the key must be adopted")
+        self.assertEqual(choice.source, "adopted")
+        self.assertIn("adopted {}".format(root), choice.note)
+        self.assertEqual(config, key)
+        self.assertEqual(json.loads(self.read(config))["api_key"], "sk-phone-key")
+
+    def test_the_cwd_fallback_folder_inside_the_install_is_left_alone(self) -> None:
+        """Nothing is created, moved or deleted inside the install except the pointer."""
+        root, install, _key = self.phone_tree()
+        stray = os.path.join(install, home.STATE_DIR_NAME)
+        before = sorted(os.listdir(stray))
+        os.chdir(install)
+        with self.unset_env(), self.patch_broken_expanduser():
+            home.resolve_home()
+        self.assertEqual(sorted(os.listdir(stray)), before, "the stray state folder must be untouched")
+        self.assertFalse(
+            os.path.exists(os.path.join(stray, "config.json")),
+            "no config may be invented inside the install",
+        )
+        self.assertEqual(
+            sorted(os.listdir(install)),
+            sorted(["run.py", home.STATE_DIR_NAME, home.POINTER_FILE_NAME]),
+            "the install folder gains the pointer file and nothing else",
+        )
+
+    def test_nothing_at_all_is_created_inside_a_clean_install(self) -> None:
+        root = self.make_dir("root")
+        install = self.pin_install("root", "pyto-agent")
+        self.write(os.path.join(root, home.STATE_DIR_NAME, "config.json"), '{"api_key": "sk-x"}')
+        os.chdir(install)
+        with self.unset_env(), self.patch_broken_expanduser():
+            resolved = home.resolve_home()
+        self.assertEqual(resolved, root)
+        self.assertEqual(
+            sorted(os.listdir(install)),
+            sorted(["run.py", home.POINTER_FILE_NAME]),
+            "the install folder gains the pointer file and nothing else",
+        )
+
+    def test_the_same_home_from_the_parent_the_install_and_an_unrelated_folder(self) -> None:
+        """Stability: the rule may change (adopt, then the pointer), the answer may not."""
+        root, install, _key = self.phone_tree()
+        elsewhere = self.make_dir("elsewhere")
+        seen = []
+        for where in (root, install, elsewhere):
+            home.reset_home_cache()
+            os.chdir(where)
+            with self.unset_env(), self.patch_broken_expanduser():
+                seen.append((home.resolve_home(), home.resolve_home_choice().source))
+        self.assertEqual([item[0] for item in seen], [root, root, root], seen)
+        self.assertEqual(seen[0][1], "adopted", "the first run finds the existing state")
+        for _path, source in seen[1:]:
+            self.assertEqual(source, "pointer", "later runs follow the remembered choice")
+
+
+class TestRememberedChoice(HomeTestCase):
+    """The visible pointer file next to the entry point: written, honoured, validated."""
+
+    def write(self, path: str, text: str) -> str:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        return path
+
+    def read(self, path: str) -> str:
+        with open(path, encoding="utf-8") as handle:
+            return handle.read()
+
+    def install_with_state(self, *parts: str):
+        """A fake install in the temp tree plus a home that already holds a config."""
+        root = self.make_dir(*parts)
+        install = self.pin_install(*parts, "pyto-agent")
+        self.write(os.path.join(root, home.STATE_DIR_NAME, "config.json"), '{"api_key": "sk-remembered"}')
+        return root, install
+
+    def test_it_is_written_next_to_the_entry_point_and_honoured_on_the_next_call(self) -> None:
+        root, install = self.install_with_state("root")
+        pointer = os.path.join(install, home.POINTER_FILE_NAME)
+        os.chdir(install)
+        with self.unset_env(), self.patch_broken_expanduser():
+            home.resolve_home()
+            self.assertTrue(os.path.isfile(pointer), "the choice must be remembered")
+            self.assertIn(root, self.read(pointer))
+            self.assertIn(home.POINTER_HEADER, self.read(pointer))
+
+            home.reset_home_cache()
+            os.chdir(self.make_dir("somewhere-else"))  # a different start directory
+            resolved = home.resolve_home()
+            choice = home.resolve_home_choice()
+        self.assertEqual(resolved, root)
+        self.assertEqual(choice.source, "pointer")
+        self.assertTrue(choice.pointer_used)
+        self.assertEqual(choice.pointer, pointer)
+
+    def test_a_pointer_that_names_an_unwritable_folder_is_ignored_and_reported(self) -> None:
+        root, install = self.install_with_state("root")
+        gone = self.unwritable("gone")
+        pointer = self.write(os.path.join(install, home.POINTER_FILE_NAME), gone + "\n")
+        stderr = io.StringIO()
+        os.chdir(self.make_dir("Documents"))
+        with self.unset_env(), self.patch_broken_expanduser(), contextlib.redirect_stderr(stderr):
+            resolved = home.resolve_home()
+            choice = home.resolve_home_choice()
+        self.assertNotEqual(resolved, gone)
+        self.assertIsNone(home.writability_problem(resolved))
+        self.assertIn("the remembered choice was ignored", choice.note)
+        report = stderr.getvalue()
+        self.assertIn(pointer, report, "the ignored pointer file must be named")
+        self.assertIn(gone, report)
+        self.assertIn(resolved, self.read(pointer), "the pointer is repaired with the home that won")
+
+    def test_a_stale_or_foreign_pointer_file_is_ignored_without_raising(self) -> None:
+        root, install = self.install_with_state("root")
+        pointer = os.path.join(install, home.POINTER_FILE_NAME)
+        cases = {
+            "garbage": "just some notes, not a path\n",
+            "relative": "pyto_harness\n",
+            "empty": "# nothing but a comment\n",
+            "unexpandable tilde": "~/pyto_harness\n",
+            "binary junk": "\x00\x01\x02 not utf-8 \xff\n",
+        }
+        for label, text in cases.items():
+            home.reset_home_cache()
+            with self.subTest(content=label):
+                with open(pointer, "w", encoding="utf-8", errors="replace") as handle:
+                    handle.write(text)
+                os.chdir(self.make_dir("Documents"))
+                with self.unset_env(), self.patch_broken_expanduser(), contextlib.redirect_stderr(io.StringIO()):
+                    resolved = home.resolve_home()  # must not raise
+                    choice = home.resolve_home_choice()
+                self.assertEqual(resolved, root, label)
+                self.assertIn("the remembered choice was ignored", choice.note, label)
+                self.assertIn(resolved, self.read(pointer), "the pointer is rewritten, not trusted")
+
+
+class TestAmbiguityAndDuplicates(HomeTestCase):
+    """Two configs, or an iCloud copy: name every folder, merge nothing, delete nothing."""
+
+    def write(self, path: str, text: str) -> str:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        return path
+
+    def read(self, path: str) -> str:
+        with open(path, encoding="utf-8") as handle:
+            return handle.read()
+
+    def test_two_candidates_with_a_config_warn_and_the_first_one_wins(self) -> None:
+        root = self.make_dir("root")                       # the install's parent
+        install = self.pin_install("root", "pyto-agent")
+        home_dir = self.make_dir("home")                   # HOME: rule 5, ahead of the install
+        near_install = self.write(
+            os.path.join(root, home.STATE_DIR_NAME, "config.json"), '{"api_key": "sk-near-install"}'
+        )
+        in_home = self.write(
+            os.path.join(home_dir, home.STATE_DIR_NAME, "config.json"), '{"api_key": "sk-in-home"}'
+        )
+        stderr = io.StringIO()
+        os.chdir(install)
+        with self.unset_env(HOME=home_dir), self.patch_broken_expanduser(), contextlib.redirect_stderr(stderr):
+            resolved = home.resolve_home()
+            choice = home.resolve_home_choice()
+        self.assertEqual(resolved, home_dir, "the highest-precedence candidate wins")
+        self.assertEqual(choice.source, "adopted")
+        self.assertEqual(len(choice.candidates), 2)
+        self.assertEqual([item.home for item in choice.unchosen_candidates()], [root])
+        warning = stderr.getvalue()
+        self.assertIn(in_home, warning, "the config in use must be named")
+        self.assertIn(near_install, warning, "the other config must be named too")
+        self.assertIn("in use", warning)
+        self.assertIn("PYTO_HARNESS_HOME", warning, "and how to switch")
+        self.assertIn(near_install, choice.warning)
+        self.assertEqual(self.read(in_home), '{"api_key": "sk-in-home"}', "nothing is merged")
+        self.assertEqual(self.read(near_install), '{"api_key": "sk-near-install"}', "nothing is moved")
+
+    def test_a_pyto_harness_2_folder_is_reported_as_a_likely_icloud_copy(self) -> None:
+        root = self.make_dir("root")
+        install = self.pin_install("root", "pyto-agent")
+        self.write(os.path.join(root, home.STATE_DIR_NAME, "config.json"), '{"api_key": "sk-one"}')
+        copy_dir = self.make_dir("root", "{} 2".format(home.STATE_DIR_NAME))
+        copy_config = self.write(os.path.join(copy_dir, "config.json"), '{"api_key": "sk-two"}')
+        install_copy = self.make_dir("root", "pyto-agent 2")
+        stderr = io.StringIO()
+        os.chdir(install)
+        with self.unset_env(), self.patch_broken_expanduser(), contextlib.redirect_stderr(stderr):
+            resolved = home.resolve_home()
+            choice = home.resolve_home_choice()
+        self.assertEqual(resolved, root, "an iCloud copy is never adopted")
+        self.assertIn(copy_dir, choice.duplicates)
+        self.assertIn(install_copy, choice.duplicates, "a duplicated install folder counts too")
+        report = stderr.getvalue()
+        self.assertIn("iCloud/Files copies", report)
+        self.assertIn(copy_dir, report)
+        self.assertIn("keep one", report)
+        self.assertEqual(self.read(copy_config), '{"api_key": "sk-two"}', "a copy is never rewritten")
+        self.assertTrue(os.path.isdir(copy_dir), "a copy is never deleted")
+        self.assertTrue(os.path.isdir(install_copy), "a duplicated install is never touched")
+
+    def test_no_duplicate_warning_when_there_is_nothing_to_report(self) -> None:
+        root = self.make_dir("root")
+        install = self.pin_install("root", "pyto-agent")
+        self.write(os.path.join(root, home.STATE_DIR_NAME, "config.json"), '{"api_key": "sk-one"}')
+        stderr = io.StringIO()
+        os.chdir(install)
+        with self.unset_env(), self.patch_broken_expanduser(), contextlib.redirect_stderr(stderr):
+            home.resolve_home()
+            choice = home.resolve_home_choice()
+        self.assertEqual(choice.duplicates, ())
+        self.assertEqual(choice.warning, "")
+        self.assertNotIn("iCloud", stderr.getvalue())
 
 
 if __name__ == "__main__":

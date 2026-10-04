@@ -246,6 +246,30 @@ class TestSubprocessCli(TempDirTestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("platform:", result.stdout)
 
+    def test_run_py_paths_prints_only_the_resolved_paths(self) -> None:
+        """`--paths` is the phone-friendly answer: seven lines, nothing else on stdout."""
+        env = dict(os.environ)
+        env["PYTO_HARNESS_HOME"] = self.path("home")
+        env["PYTO_HARNESS_NO_BROWSER"] = "1"
+        result = subprocess.run(
+            [sys.executable, os.path.join(ROOT, "run.py"), "--paths"],
+            capture_output=True,
+            text=True,
+            cwd=ROOT,
+            env=env,
+            timeout=60,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        lines = [line for line in result.stdout.strip().splitlines() if line.strip()]
+        self.assertEqual(len(lines), 7, result.stdout)
+        self.assertIn("home       : {} (from PYTO_HARNESS_HOME".format(self.path("home")), result.stdout)
+        self.assertIn("config     : {}".format(os.path.join(self.path("home"), "pyto_harness", "config.json")), result.stdout)
+        self.assertIn("state      : ", result.stdout)
+        self.assertIn("workspace  : ", result.stdout)
+        self.assertIn("sessions   : ", result.stdout)
+        self.assertIn("pointer    : ", result.stdout)
+        self.assertIn("duplicates : ", result.stdout)
+
     def test_run_py_dry_run_is_offline(self) -> None:
         env = dict(os.environ)
         env["DEEPSEEK_API_KEY"] = "sk-test-key"
