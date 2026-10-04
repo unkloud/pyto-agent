@@ -109,10 +109,19 @@ def open_private(
     return os.fdopen(fd, text_mode, encoding=encoding)
 
 
-def write_private(path: str, data: "str | bytes", *, exclusive: bool = False) -> str:
-    """One-shot private write.  ``data`` is written verbatim; returns ``path``."""
+def write_private(
+    path: str, data: "str | bytes", *, exclusive: bool = False, truncate: bool = True
+) -> str:
+    """One-shot private write.  ``data`` is written verbatim; returns ``path``.
+
+    ``truncate`` defaults to True: every caller of this helper writes a *complete*
+    payload, so leaving the tail of a longer previous version behind would corrupt the
+    JSON caches and spill files.  Use :func:`open_private` directly when appending.
+    """
     binary = isinstance(data, bytes)
-    handle = open_private(path, exclusive=exclusive, mode=PRIVATE_FILE_MODE, binary=binary)
+    handle = open_private(
+        path, exclusive=exclusive, truncate=truncate, mode=PRIVATE_FILE_MODE, binary=binary
+    )
     try:
         handle.write(data)  # type: ignore[arg-type]
         handle.flush()

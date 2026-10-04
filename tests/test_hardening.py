@@ -937,5 +937,55 @@ class TestUnattendedPrograms(unittest.TestCase):
                 session.close()
 
 
+class TestPrivateWritesTruncate(TempDirTestCase):
+    """Regression: a shorter rewrite must not leave the tail of the previous file.
+
+    ``write_private`` opened without ``O_TRUNC``, so shrinking a JSON cache or a spill
+    file produced invalid content (old bytes after the new ones).  Found while building
+    the one-stop installer, which works around it with ``open_private(truncate=True)``.
+    """
+
+    def test_a_shorter_rewrite_leaves_no_tail(self):
+        from harness.security import write_private
+
+        path = self.path("cache.json")
+        write_private(path, "A" * 4096 + "\n")
+        write_private(path, "B" * 10 + "\n")
+        with open(path, "r", encoding="utf-8") as handle:
+            self.assertEqual(handle.read(), "B" * 10 + "\n")
+
+    def test_the_rewrite_is_still_private(self):
+        import stat as stat_module
+
+        from harness.security import write_private
+
+        path = self.path("spill.txt")
+        write_private(path, "x" * 100)
+        write_private(path, "y")
+        self.assertEqual(stat_module.S_IMODE(os.stat(path).st_mode), 0o600)
+        with open(path, "r", encoding="utf-8") as handle:
+            self.assertEqual(handle.read(), "y")
+
+    def test_bytes_payloads_truncate_too(self):
+        from harness.security import write_private
+
+        path = self.path("blob.bin")
+        write_private(path, b"\x00" * 100)
+        write_private(path, b"ok")
+        with open(path, "rb") as handle:
+            self.assertEqual(handle.read(), b"ok")
+
+    def test_truncate_can_be_turned_off_explicitly(self):
+        from harness.security import write_private
+
+        path = self.path("append-ish.txt")
+        write_private(path, "head-")
+        write_private(path, "tail", truncate=False)
+        with open(path, "r", encoding="utf-8") as handle:
+            # Overwrites from offset 0 and keeps the remaining byte: the escape hatch
+            # exists, but no caller uses it for a whole-file write.
+            self.assertEqual(handle.read(), "tail-")
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

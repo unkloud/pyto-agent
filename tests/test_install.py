@@ -1,22 +1,32 @@
-"""Tests for install.py — the GitHub installer.
+"""Tests for install.py — the GitHub installer and the one-stop setup.
 
 Everything here is offline: the network path is exercised through ``--zip`` and through
-an injected opener, so the suite never calls GitHub.
+an injected opener, and the setup phase talks to ``tests/mock_provider.py`` on
+127.0.0.1 only.  The real ``~/.pyto_harness`` is never touched: every setup test points
+``PYTO_HARNESS_CONFIG``/``PYTO_HARNESS_STATE_DIR``/``PYTO_HARNESS_WORKSPACE`` at a
+private temp directory.
 """
 
 from __future__ import annotations
 
+import contextlib
 import io
+import json
 import os
 import shutil
+import stat
 import sys
 import tempfile
 import unittest
 import zipfile
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import install  # noqa: E402
+from tests.mock_provider import MockProvider, error_response, text_response  # noqa: E402
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def make_zip(entries, *, root="pyto-agent-main"):
@@ -227,7 +237,7 @@ class TestMain(unittest.TestCase):
 
     def test_installs_from_a_local_zip(self):
         target = os.path.join(self.base, "app")
-        code, output = self.run_main("--zip", self.zip_path, "--into", target, expect=0)
+        code, output = self.run_main("--zip", self.zip_path, "--into", target, "--no-setup", expect=0)
         self.assertTrue(os.path.isfile(os.path.join(target, "run.py")))
         self.assertIn("Installed to", output)
         self.assertIn("runpy.run_path", output, "the next steps must be paste-ready")
@@ -235,8 +245,8 @@ class TestMain(unittest.TestCase):
 
     def test_a_second_run_is_an_update(self):
         target = os.path.join(self.base, "app")
-        self.run_main("--zip", self.zip_path, "--into", target, expect=0)
-        _code, output = self.run_main("--zip", self.zip_path, "--into", target, expect=0)
+        self.run_main("--zip", self.zip_path, "--into", target, "--no-setup", expect=0)
+        _code, output = self.run_main("--zip", self.zip_path, "--into", target, "--no-setup", expect=0)
         self.assertIn("updating the existing install", output)
 
     def test_refuses_an_unrelated_directory(self):
@@ -253,7 +263,7 @@ class TestMain(unittest.TestCase):
         os.makedirs(target)
         with open(os.path.join(target, "notes.txt"), "w", encoding="utf-8") as handle:
             handle.write("mine")
-        self.run_main("--zip", self.zip_path, "--into", target, "--force", expect=0)
+        self.run_main("--zip", self.zip_path, "--into", target, "--force", "--no-setup", expect=0)
         self.assertTrue(os.path.isfile(os.path.join(target, "run.py")))
 
     def test_missing_zip_is_a_usage_error(self):
@@ -272,7 +282,7 @@ class TestMain(unittest.TestCase):
         target = os.path.join(self.base, "app")
         with mock.patch.object(install, "verify", side_effect=AssertionError("verify must not run")):
             _code, output = self.run_main(
-                "--zip", self.zip_path, "--into", target, "--no-verify", expect=0
+                "--zip", self.zip_path, "--into", target, "--no-verify", "--no-setup", expect=0
             )
         self.assertNotIn("verify:", output)
 
@@ -293,6 +303,489 @@ class TestDefaults(unittest.TestCase):
         text = install.next_steps("pyto-agent")
         self.assertIn("~/.pyto_harness", text)
         self.assertIn("never touched by an update", text)
+
+    def test_start_line_names_the_absolute_directory_and_one_command(self):
+        line = install.start_line("pyto-agent")
+        self.assertIn(repr(os.path.abspath("pyto-agent")), line)
+        self.assertEqual(line.count("runpy.run_path"), 1)
+        self.assertIn("sys.argv = ['run.py']", line)
+
+    def test_placeholder_keys_are_recognised(self):
+        for value in ("sk-REPLACE-ME", "your-key-here", "", None, "sk-", "<set>"):
+            self.assertTrue(install.is_placeholder_key(value), value)
+        self.assertFalse(install.is_placeholder_key("sk-0123456789abcdef"))
+
+
+# --------------------------------------------------------------------------------------
+# The one-stop setup phase
+# --------------------------------------------------------------------------------------
+
+_REPO_ZIP = None
+
+
+def repo_zip_bytes() -> bytes:
+    """This repository as a GitHub-shaped archive, built once (offline, in memory).
+
+    The setup phase runs the *installed* harness's own doctor, so the tests need a real
+    tree rather than the four-file stub: everything except ``tests/`` goes in, which keeps
+    extraction fast while the doctor still sees the code it audits.
+    """
+    global _REPO_ZIP
+    if _REPO_ZIP is None:
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+            for base, dirs, files in os.walk(ROOT):
+                dirs[:] = [name for name in dirs if name not in install.SKIP_DIRS | {"tests"}]
+                for name in sorted(files):
+                    if name.endswith(install.SKIP_SUFFIXES):
+                        continue
+                    full = os.path.join(base, name)
+                    archive.write(full, "pyto-agent-main/" + os.path.relpath(full, ROOT))
+        _REPO_ZIP = buffer.getvalue()
+    return _REPO_ZIP
+
+
+class PathScriptMock(MockProvider):
+    """A mock whose answer depends on the request path.
+
+    ``MockProvider`` scripts responses by call order; the 404 -> ``/v1`` fallback needs a
+    server that 404s ``/chat/completions`` and answers ``/v1/chat/completions``, so this
+    subclass keys the spec on the path the handler already recorded.
+    """
+
+    def __init__(self, by_path, **kwargs):
+        self.by_path = dict(by_path)
+        super().__init__(list(by_path.values()), **kwargs)
+
+    def _spec_for(self, index, body):
+        with self.lock:
+            path = self.requests[index]["path"] if index < len(self.requests) else ""
+        spec = self.by_path.get(path)
+        if spec is None:
+            return {"status": 404, "json": {"error": {"message": "no such endpoint: " + path}}}
+        return spec(body) if callable(spec) else spec
+
+
+class SetupTestCase(unittest.TestCase):
+    """An install target, a private config/state/workspace, and no network but the mock."""
+
+    KEY = "sk-test-key-0123456789abcdef"
+
+    def setUp(self):
+        super().setUp()
+        self.tmp = tempfile.mkdtemp(prefix="pyto-install-setup-")
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.target = os.path.join(self.tmp, "pyto-agent")
+        self.config_path = os.path.join(self.tmp, "home", "config.json")
+        self.state_dir = os.path.join(self.tmp, "home", "state")
+        self.workspace = os.path.join(self.tmp, "workspace")
+        self.sessions_dir = os.path.join(self.tmp, "sessions")
+        self.zip_path = os.path.join(self.tmp, "archive.zip")
+        with open(self.zip_path, "wb") as handle:
+            handle.write(repo_zip_bytes())
+        # Empty, not absent: the harness treats "" as unset, and a real DEEPSEEK_API_KEY in
+        # the developer's environment must not leak into these tests.
+        self.env = mock.patch.dict(
+            os.environ,
+            {
+                "PYTO_HARNESS_CONFIG": self.config_path,
+                "PYTO_HARNESS_STATE_DIR": self.state_dir,
+                "PYTO_HARNESS_WORKSPACE": self.workspace,
+                "PYTO_HARNESS_SESSIONS_DIR": self.sessions_dir,
+                "DEEPSEEK_API_KEY": "",
+                "OPENAI_API_KEY": "",
+                "PYTO_HARNESS_API_KEY": "",
+            },
+        )
+        self.env.start()
+        self.addCleanup(self.env.stop)
+
+    # -- helpers -------------------------------------------------------------------
+
+    def base_args(self, *extra):
+        return ("--zip", self.zip_path, "--into", self.target) + tuple(extra)
+
+    def run_install(self, *argv, expect=None, stdin=""):
+        """Run ``install.main`` with stdout/stderr captured and stdin pinned to a non-tty."""
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(sys, "stdin", io.StringIO(stdin)):
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = install.main(list(argv))
+        if expect is not None:
+            self.assertEqual(code, expect, out.getvalue() + err.getvalue())
+        return code, out.getvalue(), err.getvalue()
+
+    def mock_provider(self, *script):
+        provider = MockProvider(list(script) or [text_response("ok")])
+        self.addCleanup(provider.close)
+        return provider
+
+    def path_mock(self, by_path):
+        provider = PathScriptMock(by_path)
+        self.addCleanup(provider.close)
+        return provider
+
+    def write_config(self, payload):
+        os.makedirs(os.path.dirname(self.config_path), exist_ok=True)
+        with open(self.config_path, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle)
+        return payload
+
+    def read_config(self):
+        with open(self.config_path, "r", encoding="utf-8") as handle:
+            return json.load(handle)
+
+    def assert_private_mode(self, path):
+        if os.name != "posix":  # pragma: no cover - the suite runs on POSIX
+            return
+        self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600, "{} is not 0600".format(path))
+
+    # -- the tests -----------------------------------------------------------------
+
+    def test_no_key_without_a_tty_finishes_with_the_single_command(self):
+        code, out, err = self.run_install(*self.base_args(), expect=0)
+        self.assertIn("no API key", out)
+        self.assertIn("Next step - one command", out)
+        self.assertIn(install.start_line(self.target), out)
+        self.assertEqual(out.count("runpy.run_path"), 1, "exactly one thing to paste")
+        self.assertIn("doctor:", out)
+        self.assertFalse(os.path.exists(self.config_path), "no key -> no config file")
+        self.assertNotIn("Traceback", out + err)
+
+    def test_api_key_is_validated_saved_0600_and_never_printed(self):
+        provider = self.mock_provider(text_response("ok"))
+        code, out, err = self.run_install(
+            *self.base_args("--api-key", self.KEY, "--api-base", provider.api_base, "--model", "mock-model"),
+            expect=0,
+        )
+        payload = self.read_config()
+        self.assertEqual(payload["api_key"], self.KEY)
+        self.assertEqual(payload["api_base"], provider.api_base)
+        self.assertEqual(payload["model"], "mock-model")
+        self.assert_private_mode(self.config_path)
+        self.assertTrue(provider.requests, "the key must be proven with a real request")
+        self.assertIn("doctor:", out)
+        self.assertIn("Next step - one command", out)
+        self.assertIn("<set:{} chars".format(len(self.KEY)), out)
+        for text in (out, err):
+            self.assertNotIn(self.KEY, text)
+        launcher = os.path.join(self.target, "start.py")
+        self.assertTrue(os.path.isfile(launcher), "start.py must be written")
+
+    def test_a_rejected_key_is_asked_for_three_times_then_gives_up(self):
+        provider = self.mock_provider(error_response(401, "invalid api key"))
+        typed = []
+
+        def fake_hidden(prompt):
+            typed.append(prompt)
+            return "sk-wrong-key-{}".format(len(typed))
+
+        with mock.patch.object(install, "can_prompt", return_value=True), mock.patch.object(
+            install, "read_hidden", side_effect=fake_hidden
+        ):
+            code, out, err = self.run_install(*self.base_args("--api-base", provider.api_base), expect=1)
+        self.assertEqual(len(typed), install.KEY_ATTEMPTS)
+        self.assertIn("rejected", err)
+        self.assertFalse(os.path.exists(self.config_path), "a rejected key is never saved")
+        for index in range(1, install.KEY_ATTEMPTS + 1):
+            self.assertNotIn("sk-wrong-key-{}".format(index), out + err)
+
+    def test_an_explicit_rejected_key_exits_1_without_writing(self):
+        provider = self.mock_provider(error_response(403, "forbidden"))
+        code, out, err = self.run_install(
+            *self.base_args("--api-key", self.KEY, "--api-base", provider.api_base), expect=1
+        )
+        self.assertFalse(os.path.exists(self.config_path))
+        self.assertNotIn(self.KEY, out + err)
+
+    def test_a_404_falls_back_to_the_v1_variant(self):
+        provider = self.path_mock({"/v1/chat/completions": text_response("ok")})
+        code, out, err = self.run_install(
+            *self.base_args("--api-key", self.KEY, "--api-base", provider.api_base), expect=0
+        )
+        self.assertEqual(self.read_config()["api_base"], provider.api_base + "/v1")
+        paths = [record["path"] for record in provider.requests]
+        self.assertEqual(paths[0], "/chat/completions")
+        self.assertIn("/v1/chat/completions", paths)
+
+    def test_a_404_with_no_working_variant_writes_nothing(self):
+        provider = self.path_mock({})  # every path 404s
+        code, out, err = self.run_install(
+            *self.base_args("--api-key", self.KEY, "--api-base", provider.api_base), expect=1
+        )
+        self.assertIn("404", err)
+        self.assertFalse(os.path.exists(self.config_path))
+
+    def test_no_setup_does_no_key_work_and_prints_the_old_steps(self):
+        with mock.patch.object(install, "setup", side_effect=AssertionError("setup must not run")):
+            code, out, err = self.run_install(*self.base_args("--no-setup"), expect=0)
+        self.assertIn("Next, in this order", out)
+        self.assertIn("--init", out)
+        self.assertIn("--doctor", out)
+        self.assertEqual(out.count("runpy.run_path"), 4, "the old multi-step text is unchanged")
+        self.assertFalse(os.path.exists(self.config_path))
+        self.assertFalse(os.path.exists(os.path.join(self.target, "start.py")))
+
+    def test_reconfigure_asks_again_and_keeps_the_other_fields(self):
+        self.write_config(
+            {
+                "api_key": "sk-old-key-0123456789abcdef",
+                "workspace": "~/elsewhere",
+                "sessions_dir": "~/elsewhere/sessions",
+                "extra_headers": {"x-org": "acme"},
+                "max_turns": 3,
+                "model": "old-model",
+            }
+        )
+        provider = self.mock_provider(text_response("ok"))
+        new_key = "sk-new-key-fedcba9876543210"
+
+        def fake_hidden(prompt):
+            return new_key
+
+        with mock.patch.object(install, "can_prompt", return_value=True), mock.patch.object(
+            install, "read_hidden", side_effect=fake_hidden
+        ):
+            code, out, err = self.run_install(
+                *self.base_args("--reconfigure", "--api-base", provider.api_base, "--model", "mock-model"),
+                expect=0,
+            )
+        payload = self.read_config()
+        self.assertEqual(payload["api_key"], new_key)
+        self.assertEqual(payload["workspace"], "~/elsewhere")
+        self.assertEqual(payload["sessions_dir"], "~/elsewhere/sessions")
+        self.assertEqual(payload["extra_headers"], {"x-org": "acme"})
+        self.assertEqual(payload["max_turns"], 3)
+
+    def test_an_existing_working_key_is_kept_and_the_file_is_left_alone(self):
+        provider = self.mock_provider(text_response("ok"))
+        self.write_config({"api_key": self.KEY, "api_base": provider.api_base, "model": "mock-model"})
+        before = open(self.config_path, "r", encoding="utf-8").read()
+        code, out, err = self.run_install(*self.base_args(), expect=0)
+        self.assertIn("keeping the API key already in", out)
+        self.assertEqual(open(self.config_path, "r", encoding="utf-8").read(), before)
+        self.assertTrue(provider.requests, "the stored key is re-checked with a real request")
+        self.assertNotIn(self.KEY, out + err)
+
+    def test_a_placeholder_key_in_the_file_is_not_treated_as_configured(self):
+        self.write_config({"api_key": "sk-REPLACE-ME", "api_base": "http://127.0.0.1:1"})
+        with mock.patch("builtins.input", side_effect=AssertionError("--yes must never prompt")):
+            code, out, err = self.run_install(*self.base_args("--yes"), expect=0)
+        self.assertIn("no API key", out)
+        self.assertEqual(self.read_config()["api_key"], "sk-REPLACE-ME")
+
+    def test_yes_never_blocks_on_input(self):
+        with mock.patch.object(install, "can_prompt", return_value=True), mock.patch(
+            "builtins.input", side_effect=AssertionError("--yes must never prompt")
+        ), mock.patch.object(install, "read_hidden", side_effect=AssertionError("--yes must never prompt")):
+            code, out, err = self.run_install(*self.base_args("--yes"), expect=0)
+        self.assertFalse(os.path.exists(self.config_path))
+        self.assertIn("Next step - one command", out)
+
+    def test_yes_saves_the_key_even_when_the_endpoint_is_unreachable(self):
+        code, out, err = self.run_install(
+            *self.base_args("--api-key", self.KEY, "--api-base", "http://127.0.0.1:1", "--yes"), expect=0
+        )
+        self.assertEqual(self.read_config()["api_key"], self.KEY)
+        self.assertIn("saving the key unverified", out)
+
+    def test_a_network_failure_with_save_anyway_still_writes_the_config(self):
+        code, out, err = self.run_install(
+            *self.base_args("--api-key", self.KEY, "--api-base", "http://127.0.0.1:1", "--save-anyway"),
+            expect=0,
+        )
+        self.assertEqual(self.read_config()["api_key"], self.KEY)
+        self.assertIn("could not reach", out)
+        self.assertNotIn(self.KEY, out + err)
+
+    def test_a_network_failure_without_save_anyway_writes_nothing(self):
+        code, out, err = self.run_install(
+            *self.base_args("--api-key", self.KEY, "--api-base", "http://127.0.0.1:1"), expect=0
+        )
+        self.assertFalse(os.path.exists(self.config_path))
+        self.assertIn("not saving the key", out)
+
+    def test_no_network_saves_without_touching_the_network(self):
+        provider = self.mock_provider(text_response("ok"))
+        code, out, err = self.run_install(
+            *self.base_args("--api-key", self.KEY, "--api-base", provider.api_base, "--no-network"), expect=0
+        )
+        self.assertEqual(self.read_config()["api_key"], self.KEY)
+        self.assertEqual(provider.requests, [], "--no-network must not send anything")
+
+    def test_key_file_is_read_and_used(self):
+        key_file = os.path.join(self.tmp, "key.txt")
+        with open(key_file, "w", encoding="utf-8") as handle:
+            handle.write(self.KEY + "\n")
+        provider = self.mock_provider(text_response("ok"))
+        code, out, err = self.run_install(
+            *self.base_args("--key-file", key_file, "--api-base", provider.api_base), expect=0
+        )
+        self.assertEqual(self.read_config()["api_key"], self.KEY)
+        self.assertNotIn(self.KEY, out + err)
+
+    def test_an_environment_key_is_used_without_prompting(self):
+        provider = self.mock_provider(text_response("ok"))
+        with mock.patch.dict(os.environ, {"DEEPSEEK_API_KEY": self.KEY}):
+            with mock.patch("builtins.input", side_effect=AssertionError("must not prompt")):
+                code, out, err = self.run_install(
+                    *self.base_args("--api-base", provider.api_base), expect=0
+                )
+        self.assertEqual(self.read_config()["api_key"], self.KEY)
+
+    def test_an_unreadable_config_is_backed_up_before_it_is_replaced(self):
+        os.makedirs(os.path.dirname(self.config_path), exist_ok=True)
+        with open(self.config_path, "w", encoding="utf-8") as handle:
+            handle.write("{not json at all")
+        provider = self.mock_provider(text_response("ok"))
+        code, out, err = self.run_install(
+            *self.base_args("--api-key", self.KEY, "--api-base", provider.api_base), expect=0
+        )
+        self.assertIn("not valid JSON", out)
+        self.assertEqual(self.read_config()["api_key"], self.KEY)
+        self.assertTrue(os.path.isfile(self.config_path + ".bak"))
+        self.assert_private_mode(self.config_path + ".bak")
+
+    def test_skip_fixes_checks_but_does_not_repair(self):
+        provider = self.mock_provider(text_response("ok"))
+        code, out, err = self.run_install(
+            *self.base_args("--api-key", self.KEY, "--api-base", provider.api_base, "--skip-fixes"), expect=0
+        )
+        self.assertIn("0 fixed", out)
+        self.assertIn("--skip-fixes", out)
+        self.assertFalse(os.path.isdir(self.workspace), "no fix ran, so nothing was created")
+
+    def test_the_doctor_writes_the_workspace_documents(self):
+        provider = self.mock_provider(text_response("ok"))
+        self.run_install(
+            *self.base_args("--api-key", self.KEY, "--api-base", provider.api_base), expect=0
+        )
+        self.assertTrue(os.path.isfile(os.path.join(self.workspace, "SHORTCUTS.md")))
+        self.assertTrue(os.path.isfile(os.path.join(self.workspace, "PYTO_LIBS.md")))
+
+    def _launch_case(self, flag, expected_tail):
+        provider = self.mock_provider(text_response("ok"))
+        calls = []
+
+        def fake_run_path(path, run_name=None):
+            calls.append((path, run_name, list(sys.argv)))
+            return {"__name__": "__main__"}
+
+        saved = list(sys.argv)
+        with mock.patch("runpy.run_path", side_effect=fake_run_path):
+            code, out, err = self.run_install(
+                *self.base_args("--api-key", self.KEY, "--api-base", provider.api_base) + flag, expect=0
+            )
+        self.assertEqual(sys.argv, saved, "sys.argv must be restored after the launch")
+        self.assertEqual(len(calls), 1)
+        path, run_name, argv = calls[0]
+        self.assertEqual(path, os.path.join(os.path.abspath(self.target), "run.py"))
+        self.assertEqual(run_name, "__main__")
+        self.assertEqual(argv, [path] + expected_tail)
+        self.assertIn("starting:", out)
+        self.assertEqual(self.read_config()["api_key"], self.KEY)
+
+    def test_chat_launches_the_installed_run_py(self):
+        self._launch_case(("--chat",), [])
+
+    def test_ui_launches_the_installed_run_py_with_ui(self):
+        self._launch_case(("--ui",), ["--ui"])
+
+    def test_task_launches_the_installed_run_py_with_the_task(self):
+        self._launch_case(("--task", "rename my screenshots"), ["rename my screenshots"])
+
+    def test_start_py_is_a_launcher_with_the_chdir_and_runpy_lines(self):
+        self.run_install(*self.base_args("--yes"), expect=0)
+        path = os.path.join(self.target, "start.py")
+        self.assertTrue(os.path.isfile(path))
+        text = open(path, "r", encoding="utf-8").read()
+        self.assertIn("os.chdir(", text)
+        self.assertIn('runpy.run_path("run.py", run_name="__main__")', text)
+        self.assertIn("sys.argv = [os.path.join(HERE, \"run.py\")] + sys.argv[1:]", text)
+
+    def test_setup_leaves_the_install_directory_with_run_py(self):
+        self.run_install(*self.base_args("--yes"), expect=0)
+        self.assertTrue(os.path.isfile(os.path.join(self.target, "run.py")))
+        self.assertTrue(os.path.isdir(os.path.join(self.target, "harness")))
+
+
+class TestForcedPrompt(unittest.TestCase):
+    """``--ask`` (and Pyto detection) must reach the user even without a tty.
+
+    Pyto's console has no tty, so ``sys.stdin.isatty()`` is false on the target device;
+    without these paths the installer would fall back to "edit the JSON by hand", which is
+    exactly the complaint that produced the one-stop flow.  This class is standalone: it
+    does not inherit the other setup cases, which would otherwise run again here.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="pyto-install-ask-")
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.target = os.path.join(self.tmp, "app")
+        self.config_path = os.path.join(self.tmp, "home", "config.json")
+        self.zip_path = os.path.join(self.tmp, "archive.zip")
+        with open(self.zip_path, "wb") as handle:
+            handle.write(make_zip(VALID).read())
+        self.env = mock.patch.dict(
+            os.environ,
+            {
+                "PYTO_HARNESS_CONFIG": self.config_path,
+                "PYTO_HARNESS_STATE_DIR": os.path.join(self.tmp, "home"),
+                "DEEPSEEK_API_KEY": "",
+                "OPENAI_API_KEY": "",
+                "PYTO_HARNESS_API_KEY": "",
+            },
+        )
+        self.env.start()
+        self.addCleanup(self.env.stop)
+
+    def run_install(self, *argv, stdin=""):
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(sys, "stdin", io.StringIO(stdin)):
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = install.main(list(argv))
+        return code, out.getvalue(), err.getvalue()
+
+    def test_ask_prompts_on_a_piped_stdin_and_saves_the_key_0600(self):
+        provider = MockProvider([text_response("ok")])
+        self.addCleanup(provider.close)
+        key = "sk-forced-prompt-canary-0123456789"
+        code, out, _err = self.run_install(
+            "--zip", self.zip_path, "--into", self.target, "--api-base", provider.api_base,
+            "--ask", stdin=key + "\n",
+        )
+        self.assertEqual(code, 0, out)
+        self.assertTrue(os.path.exists(self.config_path), out)
+        self.assertEqual(stat.S_IMODE(os.stat(self.config_path).st_mode), 0o600)
+        with open(self.config_path, "r", encoding="utf-8") as handle:
+            saved = json.load(handle)
+        self.assertEqual(saved["api_key"], key)
+        self.assertNotIn(key, out, "the key must never be echoed")
+
+    def test_without_ask_a_non_tty_run_does_not_prompt(self):
+        code, out, _err = self.run_install(
+            "--zip", self.zip_path, "--into", self.target, stdin="sk-should-not-be-read\n"
+        )
+        self.assertEqual(code, 0, out)
+        self.assertFalse(os.path.exists(self.config_path), "no key should be written")
+        self.assertIn("no API key", out)
+
+    def test_can_prompt_is_true_when_pyto_is_present(self):
+        class FakeIos:
+            @staticmethod
+            def is_pyto():
+                return True
+
+        self.assertTrue(install.can_prompt(FakeIos))
+
+    def test_can_prompt_is_false_without_tty_or_pyto(self):
+        class FakeIos:
+            @staticmethod
+            def is_pyto():
+                return False
+
+        with mock.patch.object(sys, "stdin", io.StringIO("")):
+            self.assertFalse(install.can_prompt(FakeIos))
 
 
 if __name__ == "__main__":  # pragma: no cover

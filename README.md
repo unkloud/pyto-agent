@@ -6,7 +6,7 @@ week's notes", "put the thing I just copied into a note" — and the agent write
 file into a workspace on the device, runs it, and tells you what happened.
 
 * **Standard library only.** No `pip install`, no `requests`, no `pydantic`. Every claim
-  in this README is checked by `stdlib_audit.py` and 585 tests.
+  in this README is checked by `stdlib_audit.py` and 612 tests.
 * **Python 3.10**, the version Pyto ships. Verified on real CPython 3.10.22 and 3.12.
 * **OpenAI-compatible API** — DeepSeek by default (`deepseek-chat`), anything
   chat-completions-shaped otherwise.
@@ -23,7 +23,7 @@ Pyto has **no `git`, no `unzip` and no `pip`** — but it has Python, so the ins
 nothing but the standard library: it downloads the repository archive over HTTPS and unpacks
 it. You do not need a computer, a cable or a Mac.
 
-### Option A — paste three lines into the Pyto console (recommended)
+### Option A — one snippet, the whole setup (recommended)
 
 Open Pyto, tap the console, and paste. This installs the **released, digest-verified
 `v1.0.0`**, not "whatever `main` is today":
@@ -36,10 +36,73 @@ runpy.run_path("install.py", run_name="__main__")
 ```
 
 If the download does not match that digest, the installer **refuses and writes nothing**.
-It installs `pyto-agent` into a folder next to where Pyto starts, checks that every file
-parses as Python 3.10 and that the package imports, then prints the exact commands to run
-next — with the absolute paths for *your* device already filled in. Every run prints the
-**SHA-256 of the archive it downloaded**.
+Every run prints the **SHA-256 of the archive it downloaded**. (A tag installs exactly that
+tag's bytes, including that tag's installer; the one-stop flow below is what `main` — and
+releases after `v1.0.0` — does. The *Track the latest* snippet a few lines down is how to
+get it today.)
+
+**That single run is the whole setup. There is nothing else to paste.** It unpacks
+`pyto-agent` next to where Pyto starts, checks that every file parses as Python 3.10 and
+that the package imports, and then:
+
+1. **asks for your API key**, once:
+
+   ```
+   setup: an API key is needed for model calls; local tools work without one.
+          It is not echoed, and it will be stored in /…/.pyto_harness/config.json (mode 0600).
+   API key (input hidden):
+   ```
+
+   The key is read with `getpass` where the platform can hide it, and with a plain line
+   (saying so) where it cannot. The installer never echoes it and never logs it.
+2. **proves the key before saving it**, with one minimal chat request through the
+   harness's own doctor probe. `401`/`403` means the key is wrong and you are asked again
+   (three tries, then it stops without saving anything); `404` makes it try the `/v1` form
+   of `api_base` and keep whichever answers; an unreachable network is reported and you are
+   offered `--save-anyway` (or `--yes` to accept it) instead of being blocked. The key is
+   only ever shown as `<set:35 chars, ...AB12>`.
+3. **writes `~/.pyto_harness/config.json`** through the harness's own hardened writer:
+   mode `0600`, created `O_EXCL`, never silently replacing a config that already holds a
+   working key (pass `--reconfigure` to replace it deliberately), and keeping every field
+   it does not own — `workspace`, `sessions_dir`, extra headers, `max_turns`, anything else
+   you put there.
+4. **health-checks and repairs**, printing one compact line instead of the whole report:
+
+   ```
+   doctor: 17 ok, 4 fixed, 0 need you
+   ```
+
+   Only fixes nobody can object to are applied: create the workspace and session
+   directories, tighten file modes, cut a torn session line, write the `PYTO_LIBS.md` and
+   `SHORTCUTS.md` references into the workspace. `--skip-fixes` runs the checks without
+   changing anything.
+5. **writes `start.py`** next to `run.py` and prints **exactly one** command:
+
+   ```python
+   import os, runpy, sys; os.chdir('/…/pyto-agent'); sys.argv = ['run.py']; runpy.run_path('run.py', run_name='__main__')
+   ```
+
+That is the last thing you have to paste. Or **open `start.py` in Pyto's editor and press
+Run**: it does the `chdir` and the `runpy` with the real path for you, forwarding any
+arguments, so you never copy a line at all.
+
+If you would rather the installer started the agent immediately, ask it to:
+
+```python
+sys.argv = ["install.py", "--chat"]                    # terminal chat REPL
+sys.argv = ["install.py", "--ui"]                      # Pyto chat window
+sys.argv = ["install.py", "--task", "rename my screenshots by date"]
+```
+
+**No terminal and no key? Nothing blocks.** The installer finishes, prints the one command
+above, and exits 0 with a line telling you how to add the key later
+(`python install.py --api-key sk-...`, or `export DEEPSEEK_API_KEY=…`).
+
+Other flags: `--api-key`, `--key-file`, `--api-base`, `--model`, `--yes` (accept every
+default and never prompt), `--save-anyway`, `--reconfigure`, `--skip-fixes`, and
+`--no-network` (make no network request at all). **`--no-setup` installs the files only** —
+no key, no config, no doctor — and prints the old step-by-step instructions; that is the
+form to use from automation and CI.
 
 **Track the latest instead** (simpler, and you accept that `main` moves). Drop the
 `--sha256` line and the `v1.0.0` refs, and fetch the installer from `main`:
@@ -76,15 +139,17 @@ import runpy
 runpy.run_path("install.py", run_name="__main__")
 ```
 
-The file is 371 lines and imports only `argparse`, `ast`, `hashlib`, `io`, `os`, `re`,
-`shutil`, `sys`, `zipfile` and `urllib`.
+The file is one self-contained script (no package, no imports beyond the standard library:
+`argparse`, `ast`, `getpass`, `hashlib`, `importlib`, `io`, `json`, `os`, `re`, `runpy`,
+`shutil`, `sys`, `types`, `urllib`, `zipfile`).
 
 ### Option C — download the zip on the phone or on a computer
 
 1. Download **https://github.com/unkloud/pyto-agent/archive/refs/heads/main.zip**
    (in Safari, or on a computer and AirDrop/iCloud it across).
 2. Put `pyto-agent-main.zip` somewhere Pyto can read — On My iPhone → Pyto, or iCloud Drive.
-3. In the Pyto console, install from that file:
+3. In the Pyto console, install from that file — the same one-stop setup, from local bytes
+   instead of a download:
 
 ```python
 import sys, runpy
@@ -124,20 +189,39 @@ runpy.run_path("install.py", run_name="__main__")
 An update replaces the code and nothing else. Your API key, sessions, memory and backups
 live in `~/.pyto_harness`, and the programs the agent writes live in the workspace
 (`~/pyto_harness_workspace` by default) — neither is inside the code directory, so
-updating cannot lose them. The installer refuses to touch a directory that is not a
-`pyto-agent` checkout unless you pass `--force`.
+updating cannot lose them. A working key already in the config is kept and re-checked, not
+rewritten. The installer refuses to touch a directory that is not a `pyto-agent` checkout
+unless you pass `--force`.
 
 ### Checking it worked
 
+The install already told you: the last line it printed is the command that starts the
+agent, and `doctor: … 0 need you` means the checks passed. To look closer:
+
 ```python
 import os, runpy, sys
-os.chdir("pyto-agent")
+os.chdir("pyto-agent")                                    # or just open start.py and press Run
 sys.argv = ["run.py", "--version"]; runpy.run_path("run.py", run_name="__main__")
 sys.argv = ["run.py", "--tools"];   runpy.run_path("run.py", run_name="__main__")   # 34 tools
 ```
 
 `run.py` adds its own directory to `sys.path`, so it does not matter which directory Pyto
-started in — `os.chdir` is only there to keep relative paths (workspace, `install.py`) sane.
+started in — `os.chdir` is only there to keep relative paths (workspace, `start.py`) sane.
+
+### What still needs you
+
+The installer does these last three things for you only where it can, and says so when it
+cannot:
+
+* **The Shortcut automation** — starting the harness from the Home screen, the Share sheet
+  or Siri is a Shortcut you build once, in the Shortcuts app, following §5a. The doctor
+  writes `SHORTCUTS.md` into the workspace with the exact URL scheme and task variable, so
+  you are copying from a document, not guessing.
+* **iOS permissions** — the first time a generated program touches the photo library, the
+  calendar, notifications or speech, iOS shows *its* prompt. Grant it then; a denial is
+  reported and never retried silently (§6).
+* **The account behind the key** — the installer proves the key is accepted with one
+  minimal request. It cannot buy credit, lift a rate limit or un-suspend an account.
 
 > Pyto's `sys.executable` is not a real interpreter you can spawn. That is fine — the
 > harness detects this (`harness/ios.py: has_fake_subprocess()`) and runs programs
@@ -154,9 +238,14 @@ Any one of these, highest priority last:
 export DEEPSEEK_API_KEY=sk-...
 export OPENAI_API_KEY=sk-...        # used if DEEPSEEK_API_KEY is unset
 
-# 2. a config file (persists across launches)
+# 2. a config file (persists across launches) -- written for you by install.py,
+#    or by hand with:
 python run.py --init                # writes ~/.pyto_harness/config.json, mode 0600
 ```
+
+`install.py` (see §1) already does this one: it asks for the key once, proves it with one
+minimal request, and writes the file 0600 through the same writer `--init` uses. Reach for
+`--init` only if you are setting a machine up by hand.
 
 The config file looks like this:
 
@@ -193,9 +282,9 @@ contains `api_key`, `token`, `secret`, `password` or `authorization`.
 
 ## 3. Running it
 
-**On the device there is no shell to type `python run.py` into.** Pyto runs a script, so you
-either open `run.py` in Pyto's editor and press Run, or — for flags and arguments — use the
-one-line form the installer prints:
+**On the device there is no shell to type `python run.py` into.** Pyto runs a script, so the
+easiest thing is to open **`start.py`** — the launcher the installer wrote next to `run.py` —
+and press Run. For flags and arguments, use the one-line form the installer prints:
 
 ```python
 import os, runpy, sys
@@ -435,7 +524,7 @@ applies the repairs a machine can and prints a before/after report. `--repair "<
 lets the model change the harness's own source, subject to a path jail, an AST/stdlib
 pre-check, a snapshot with hashes, and the offline test suite as the gate: a red suite
 reverts the edit byte-for-byte and hands back the failure verbatim. A bounded gate (~3 s,
-227 tests) is the default; `--deep-tests` asks for all 585.
+227 tests) is the default; `--deep-tests` asks for all 612.
 
 **The full story — the three tiers, the guardrail list, what is deliberately not automated,
 and a worked transcript — is in [SELF-REPAIR.md](SELF-REPAIR.md).**
@@ -503,7 +592,8 @@ the agent reads it back with `memory_read` and stops asking.
 ## 9. Layout
 
 ```
-install.py             installs/updates from GitHub with the standard library only (no git, no unzip)
+install.py             one-stop installer: GitHub -> files -> key -> config -> doctor -> start line
+                       (stdlib only; `--no-setup` is the files-only form for CI)
 run.py                 CLI entry point
 harness/
   llm.py               chat-completions client: SSE, retries, cancellation, non-streaming fallback
@@ -521,7 +611,7 @@ harness/
   repair.py            self-repair: path-jailed, snapshot-first, test-gated source edits
   pyto_api.py          Pyto library grounding: 25 modules / 160 members, curated + introspected
   errors.py            error taxonomy with retryability
-tests/                 585 offline tests against a stdlib mock OpenAI server
+tests/                 612 offline tests against a stdlib mock OpenAI server
 examples/              three programs the agent is expected to be able to write
 stdlib_audit.py        proves "stdlib only" and "parses as Python 3.10"
 ```
@@ -529,8 +619,8 @@ stdlib_audit.py        proves "stdlib only" and "parses as Python 3.10"
 ## 10. Verifying it yourself
 
 ```bash
-python3 -m unittest discover -s tests -t .     # 585 tests, offline, no network (~22 s)
-python3 stdlib_audit.py                        # third_party_modules: [], 16 files parse at (3,10)
+python3 -m unittest discover -s tests -t .     # 612 tests, offline, no network (~28 s)
+python3 stdlib_audit.py                        # third_party_modules: [], 18 files parse at (3,10)
 python3 run.py --dry-run "hello"               # prints the request, sends nothing
 python3 run.py --doctor                        # health report, exit 0 healthy / 1 fixable / 2 human
 python3 run.py --doctor --fix                  # repair, then re-check
@@ -538,3 +628,7 @@ python3 run.py --doctor --fix                  # repair, then re-check
 
 The test suite talks only to `127.0.0.1`: `tests/mock_provider.py` is a scriptable
 OpenAI-compatible server built on `http.server`, so the suite runs with no network at all.
+The installer is covered the same way (`python3 -m unittest tests.test_install -v`): it
+installs from an in-memory zip of this repository, points `--api-base` at the mock, and
+asserts the key is validated before it is written, that a rejected key is never saved, and
+that a run with no terminal finishes instead of blocking.
