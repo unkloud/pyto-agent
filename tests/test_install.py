@@ -24,6 +24,7 @@ from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import install  # noqa: E402
+from tests import support  # noqa: E402,F401 - imported for its side effect: PYTO_HARNESS_HOME
 from tests.mock_provider import MockProvider, error_response, text_response  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -440,6 +441,10 @@ class SetupTestCase(unittest.TestCase):
             return
         self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600, "{} is not 0600".format(path))
 
+
+class TestSetup(SetupTestCase):
+    """The one-stop setup flow, end to end (helpers live in :class:`SetupTestCase`)."""
+
     # -- the tests -----------------------------------------------------------------
 
     def test_no_key_without_a_tty_finishes_with_the_single_command(self):
@@ -707,6 +712,120 @@ class SetupTestCase(unittest.TestCase):
         self.run_install(*self.base_args("--yes"), expect=0)
         self.assertTrue(os.path.isfile(os.path.join(self.target, "run.py")))
         self.assertTrue(os.path.isdir(os.path.join(self.target, "harness")))
+
+
+class TestInstallWithoutAHome(SetupTestCase):
+    """The device that reported ``[Errno 1] Operation not permitted: '~/.pyto_harness'``.
+
+    ``os.path.expanduser`` is broken the way Pyto breaks it and there is no writable home
+    anywhere: the install must still finish, write ``start.py``, print the
+    ``PYTO_HARNESS_HOME`` workaround and exit 0.
+    """
+
+    def setUp(self):
+        super().setUp()
+        from harness import home as home_module
+
+        self.home_module = home_module
+        self.home_module.reset_home_cache()
+        self.addCleanup(self.home_module.reset_home_cache)
+        self.unwritable = os.path.join(self.tmp, "readonly")
+        os.makedirs(self.unwritable, exist_ok=True)
+        os.chmod(self.unwritable, 0o500)
+        self.addCleanup(os.chmod, self.unwritable, 0o700)
+        # The installer must not run the doctor against the checkout: run it from the
+        # private temp directory instead, so every fallback path lands there.
+        self.original_cwd = os.getcwd()
+        os.chdir(self.tmp)
+        self.addCleanup(os.chdir, self.original_cwd)
+
+    def broken_expanduser(self, path, _real=os.path.expanduser):
+        if str(path).startswith("~"):
+            return path
+        return _real(path)
+
+    def no_home_anywhere(self):
+        """Make every candidate of the resolver fail, the way a locked-down device does."""
+        stack = contextlib.ExitStack()
+        stack.enter_context(
+            mock.patch.dict(
+                os.environ,
+                {
+                    "PYTO_HARNESS_HOME": "",
+                    "PYTO_HARNESS_CONFIG": "",
+                    "PYTO_HARNESS_STATE_DIR": "",
+                    "PYTO_HARNESS_WORKSPACE": "",
+                    "PYTO_HARNESS_SESSIONS_DIR": "",
+                    "HOME": self.unwritable,
+                },
+            )
+        )
+        stack.enter_context(mock.patch.object(install.os.path, "expanduser", side_effect=self.broken_expanduser))
+        stack.enter_context(mock.patch.object(self.home_module, "_cwd", return_value=self.unwritable))
+        stack.enter_context(mock.patch.object(self.home_module, "_temp_root", return_value=os.path.join(self.unwritable, "tmp")))
+        stack.enter_context(mock.patch.object(self.home_module, "entry_point_dirs", return_value=[]))
+        return stack
+
+    def real_modules(self):
+        """The harness modules the installer would load, so the home patches apply."""
+        import types
+
+        from harness import config as config_module
+        from harness import doctor as doctor_module
+        from harness import ios as ios_module
+        from harness import security as security_module
+
+        return types.SimpleNamespace(
+            package=None,
+            doctor=doctor_module,
+            config=config_module,
+            security=security_module,
+            ios=ios_module,
+            note="",
+        )
+
+    def test_install_finishes_without_a_writable_home(self):
+        with self.no_home_anywhere(), mock.patch.object(install, "load_harness", return_value=self.real_modules()):
+            code, out, err = self.run_install(*self.base_args(), expect=0)
+        self.assertIn("PYTO_HARNESS_HOME", out)
+        self.assertIn("os.getcwd()", out)
+        self.assertIn("Next step - one command", out)
+        self.assertIn(install.start_line(self.target), out)
+        self.assertIn("no API key", out)
+        self.assertTrue(os.path.isfile(os.path.join(self.target, "start.py")), "start.py must be written")
+        self.assertNotIn("Traceback", out + err)
+        self.assertFalse(os.path.exists(os.path.join(self.tmp, "~")), "a directory named '~' was created")
+        self.assertFalse(os.path.exists(os.path.join(self.target, "~")), "a directory named '~' was created")
+
+    def test_an_unexpandable_into_path_is_refused_before_anything_is_written(self):
+        with mock.patch.object(install.os.path, "expanduser", side_effect=self.broken_expanduser):
+            code, out, err = self.run_install("--zip", self.zip_path, "--into", "~/pyto-agent", expect=2)
+        self.assertIn("cannot expand", err)
+        self.assertIn("PYTO_HARNESS_HOME", err)
+        self.assertFalse(os.path.exists(os.path.join(self.tmp, "~")), "a directory named '~' was created")
+
+    def test_an_unwritable_workspace_is_reported_not_raised(self):
+        """PYTO_HARNESS_WORKSPACE pointing into a read-only folder must not stop the install."""
+        workspace = os.path.join(self.unwritable, "workspace")
+        with self.no_home_anywhere(), mock.patch.dict(os.environ, {"PYTO_HARNESS_WORKSPACE": workspace}), \
+                mock.patch.object(install, "load_harness", return_value=self.real_modules()):
+            code, out, err = self.run_install(*self.base_args("--api-key", self.KEY, "--no-network"), expect=0)
+        self.assertIn("PYTO_HARNESS_HOME", out)
+        self.assertTrue(os.path.isfile(os.path.join(self.target, "start.py")))
+        self.assertNotIn("Traceback", out + err)
+        self.assertFalse(os.path.exists(os.path.join(self.unwritable, "~")))
+        self.assertFalse(os.path.exists(workspace))
+
+    def test_config_write_failure_still_installs(self):
+        """A real EPERM/EACCES on the config write: report the workaround and exit 0."""
+        unwritable_config = os.path.join(self.unwritable, "config.json")
+        with mock.patch.dict(os.environ, {"PYTO_HARNESS_CONFIG": unwritable_config}):
+            code, out, err = self.run_install(*self.base_args("--api-key", self.KEY, "--no-network"), expect=0)
+        self.assertIn("PYTO_HARNESS_HOME", out)
+        self.assertTrue(os.path.isfile(os.path.join(self.target, "start.py")))
+        self.assertNotIn("Traceback", out + err)
+        self.assertFalse(os.path.exists(unwritable_config))
+        self.assertNotIn(self.KEY, out + err, "the key must never be printed")
 
 
 class TestForcedPrompt(unittest.TestCase):

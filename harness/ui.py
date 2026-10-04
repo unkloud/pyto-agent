@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
 
 from .errors import UnsupportedCapability
+from .home import expand_user_path
 from .loop import Event, LoopOptions, make_policy, run_turn
 from .session import SessionLog, new_session_path
 
@@ -401,7 +402,7 @@ class _UIStream:
 def open_session(config: Any, *, resume: Optional[str] = None, label: str = "chat") -> SessionLog:
     """Resume a named session file, or start a new one in the configured sessions dir."""
     if resume:
-        path = os.path.expanduser(resume)
+        path = expand_user_path(resume, what="--resume path")
         if os.path.isdir(path):
             candidates = sorted(
                 (os.path.join(path, name) for name in os.listdir(path) if name.endswith(".jsonl")),

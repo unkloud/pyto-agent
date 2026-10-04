@@ -21,6 +21,15 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Mapping, Optional
 
 from .errors import ConfigError
+from .home import (
+    ENV_CONFIG,
+    ENV_STATE_DIR,
+    STATE_DIR_NAME,
+    WORKAROUND as HOME_WORKAROUND,
+    WORKSPACE_DIR_NAME,
+    expand_user_path,
+    resolve_home,
+)
 from .security import chmod_private, is_secret_header, open_private, redact_url_userinfo, register_secret
 
 DEFAULT_API_BASE = "https://api.deepseek.com"
@@ -28,7 +37,7 @@ DEFAULT_MODEL = "deepseek-chat"
 DEFAULT_MAX_TURNS = 8
 
 #: Config file location.  Overridable for tests with PYTO_HARNESS_CONFIG.
-CONFIG_DIR_NAME = ".pyto_harness"
+CONFIG_DIR_NAME = STATE_DIR_NAME
 CONFIG_FILE_NAME = "config.json"
 
 #: Environment variable -> Config field.  Order matters: the first variable that is
@@ -145,21 +154,33 @@ def redact_key(key: Optional[str]) -> str:
 
 
 def default_home() -> str:
-    return os.path.expanduser("~")
+    """The directory the harness writes its own files into (never a literal ``~``).
+
+    Resolved by :func:`harness.home.resolve_home`: ``PYTO_HARNESS_HOME``, then a usable
+    ``HOME``, then a really-expanded ``~``, then the folder Pyto runs scripts from, then
+    (loudly) the temporary directory.  Raises :class:`ConfigError` with the workaround
+    when nothing is writable — see :mod:`harness.home`.
+    """
+    return resolve_home()
 
 
 def default_workspace() -> str:
-    return os.path.join(default_home(), "pyto_harness_workspace")
+    return os.path.join(default_home(), WORKSPACE_DIR_NAME)
 
 
 def default_sessions_dir() -> str:
     return os.path.join(default_home(), CONFIG_DIR_NAME, "sessions")
 
 
+def default_spill_dir(workspace: Optional[str] = None) -> str:
+    """Where truncated tool output is spilled: ``<workspace>/tool-output``."""
+    return os.path.join(workspace or default_workspace(), "tool-output")
+
+
 def default_config_path() -> str:
-    override = os.environ.get("PYTO_HARNESS_CONFIG")
+    override = os.environ.get(ENV_CONFIG)
     if override:
-        return os.path.expanduser(override)
+        return expand_user_path(override, what="PYTO_HARNESS_CONFIG")
     return os.path.join(default_home(), CONFIG_DIR_NAME, CONFIG_FILE_NAME)
 
 
@@ -168,14 +189,14 @@ def default_state_dir() -> str:
 
     Precedence: ``PYTO_HARNESS_STATE_DIR``, then the directory of ``PYTO_HARNESS_CONFIG``
     (so a portable install or a test keeps its state next to its config), then
-    ``~/.pyto_harness``.
+    ``~/.pyto_harness`` (resolved, never a literal tilde).
     """
-    override = os.environ.get("PYTO_HARNESS_STATE_DIR")
+    override = os.environ.get(ENV_STATE_DIR)
     if override:
-        return os.path.abspath(os.path.expanduser(override))
-    configured = os.environ.get("PYTO_HARNESS_CONFIG")
+        return expand_user_path(override, what="PYTO_HARNESS_STATE_DIR")
+    configured = os.environ.get(ENV_CONFIG)
     if configured:
-        directory = os.path.dirname(os.path.abspath(os.path.expanduser(configured)))
+        directory = os.path.dirname(expand_user_path(configured, what="PYTO_HARNESS_CONFIG"))
         if directory:
             return directory
     return os.path.join(default_home(), CONFIG_DIR_NAME)
@@ -183,7 +204,7 @@ def default_state_dir() -> str:
 
 def load_config_file(path: Optional[str] = None) -> Dict[str, Any]:
     """Read the JSON config file.  A missing file is not an error; a broken one is."""
-    resolved = os.path.expanduser(path) if path else default_config_path()
+    resolved = expand_user_path(path, what="config file path") if path else default_config_path()
     if not os.path.exists(resolved):
         return {}
     try:
@@ -290,7 +311,7 @@ def load_config(
     if not config.sessions_dir:
         config.sessions_dir = default_sessions_dir()
     if not config.spill_dir:
-        config.spill_dir = os.path.join(config.workspace, "tool-output")
+        config.spill_dir = default_spill_dir(config.workspace)
     if config.max_turns < 1:
         raise ConfigError("max_turns must be >= 1, got {}".format(config.max_turns))
     if config.timeout <= 0:
@@ -324,14 +345,24 @@ def ensure_workspace(config: Config) -> str:
 
     Created ``0700``: the workspace holds the user's programs, the memory store and the
     spill files, and it is the one directory the agent writes freely.
+
+    A ``~`` that this platform cannot expand is refused here (never turned into a
+    directory literally named ``~``), and an ``OSError`` while creating it — EPERM,
+    EACCES, EROFS on iOS — is reported with the ``PYTO_HARNESS_HOME`` workaround rather
+    than as a bare traceback.
     """
-    path = os.path.abspath(os.path.expanduser(config.workspace))
+    path = expand_user_path(config.workspace, what="workspace")
     try:
         from .security import mkdir_private
 
         mkdir_private(path)
     except OSError as exc:
-        raise ConfigError("workspace {} could not be created: {}".format(path, exc)) from exc
+        raise ConfigError(
+            "workspace {} could not be created: {}: {}.\n"
+            "Inside Pyto only the app's own container is writable.\n{}".format(
+                path, type(exc).__name__, exc, HOME_WORKAROUND
+            )
+        ) from exc
     if not os.path.isdir(path):
         raise ConfigError("workspace {} is not a directory".format(path))
     return path
@@ -348,7 +379,7 @@ def write_sample_config(
     explicit opt-in.  The returned path is the real one; the caller prints the mode it
     actually has (``config_file_mode``), never an assumed ``0600``.
     """
-    resolved = os.path.expanduser(path) if path else default_config_path()
+    resolved = expand_user_path(path, what="config file path") if path else default_config_path()
     payload: List[str] = [
         "{",
         '  "api_base": "{}",'.format(DEFAULT_API_BASE),

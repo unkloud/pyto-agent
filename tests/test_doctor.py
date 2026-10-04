@@ -894,6 +894,90 @@ class TestHealthAndFirstRun(DoctorTestCase):
             self.assertNotIn("sk-canary-abcdefghijklmnop", handle.read())
 
 
+class TestHomeReporting(DoctorTestCase):
+    """The doctor must name the resolved home and never crash while reporting it."""
+
+    def test_report_shows_the_home_and_how_it_was_chosen(self) -> None:
+        ctx = self.make_ctx()
+        ctx.home = self.path("Documents")
+        ctx.home_note = "from cwd; HOME was unusable"
+        ctx.home_source = "cwd"
+        report = doctor.format_report([doctor.result("home", "Home folder", "ok", "fine")], ctx=ctx)
+        self.assertIn("home       : {} (from cwd; HOME was unusable)".format(ctx.home), report)
+
+    def test_an_unresolved_home_is_printed_not_hidden(self) -> None:
+        ctx = self.make_ctx()
+        ctx.home = ""
+        ctx.home_error = "cannot find a writable folder for ~/.pyto_harness"
+        report = doctor.format_report([doctor.result("home", "Home folder", "unfixable", "nope")], ctx=ctx)
+        self.assertIn("home       : <unresolved", report)
+
+    def test_home_check_ok_when_the_state_directory_is_writable(self) -> None:
+        ctx = self.make_ctx()
+        os.makedirs(ctx.state, exist_ok=True)
+        item = doctor.run_one(ctx, "home")
+        self.assertEqual(item.status, "ok", item.detail)
+        self.assertIn(ctx.state, item.detail)
+
+    def test_home_check_fails_with_the_workaround_on_an_unwritable_state_dir(self) -> None:
+        ctx = self.make_ctx()
+        os.makedirs(ctx.state, exist_ok=True)
+        if os.geteuid() == 0:  # pragma: no cover - mode checks need a non-root user
+            self.skipTest("running as root: every directory is writable")
+        os.chmod(ctx.state, 0o500)
+        self.addCleanup(os.chmod, ctx.state, 0o700)
+        item = doctor.run_one(ctx, "home")
+        self.assertTrue(item.failed(), item.detail)
+        self.assertIn("PYTO_HARNESS_HOME", item.human_action or "")
+
+    def test_home_check_reports_an_unresolvable_home_without_raising(self) -> None:
+        ctx = self.make_ctx()
+        ctx.home = ""
+        ctx.home_error = "cannot find a writable folder for ~/.pyto_harness\n" + doctor.home.WORKAROUND
+        item = doctor.run_one(ctx, "home")
+        self.assertTrue(item.failed())
+        self.assertIn("PYTO_HARNESS_HOME", item.human_action or "")
+        self.assertIn("PYTO_HARNESS_HOME", doctor.format_report([item], ctx=ctx))
+
+    def test_for_config_survives_having_nowhere_writable(self) -> None:
+        unwritable = self.path("readonly")
+        os.makedirs(unwritable, exist_ok=True)
+        if os.geteuid() == 0:  # pragma: no cover - mode checks need a non-root user
+            self.skipTest("running as root: every directory is writable")
+        os.chmod(unwritable, 0o500)
+        self.addCleanup(os.chmod, unwritable, 0o700)
+        real = os.path.expanduser
+
+        def broken(path):
+            return path if str(path).startswith("~") else real(path)
+
+        env = {"PYTO_HARNESS_HOME": "", "HOME": unwritable}
+        with mock.patch.object(doctor.home, "_cwd", return_value=unwritable), mock.patch.object(
+            doctor.home, "entry_point_dirs", return_value=[]
+        ), mock.patch.object(doctor.home, "_temp_root", return_value=os.path.join(unwritable, "tmp")), mock.patch.object(
+            doctor.home.os.path, "expanduser", side_effect=broken
+        ):
+            ctx = doctor.DoctorContext.for_config(
+                self.make_config(),
+                env=env,
+                config_path=self.path("config.json"),
+                state=self.path("state"),
+                workspace=self.workspace_dir,
+                sessions_dir=self.path("sessions"),
+            )
+        self.assertEqual(ctx.home, "")
+        self.assertIn("PYTO_HARNESS_HOME", ctx.home_error)
+        results = [doctor.run_one(ctx, "home")]
+        report = doctor.format_report(results, ctx=ctx)
+        self.assertIn("<unresolved", report)
+        self.assertIn("PYTO_HARNESS_HOME", report)
+
+    def test_home_check_is_registered(self) -> None:
+        self.assertIn("home", doctor.CHECK_FUNCTIONS)
+        self.assertIn("home", doctor.CHECK_TITLES)
+        self.assertIn("home", doctor.FIXES["home.create"].check_id)
+
+
 class TestSecretsNeverLeak(DoctorTestCase):
     def test_no_check_result_contains_the_key(self) -> None:
         canary = "sk-canary-abcdefghijklmnop0123456789"

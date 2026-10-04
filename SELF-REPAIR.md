@@ -99,7 +99,7 @@ What the gate does, in order:
 **How long the gate takes.** By default it is *bounded*: the fast base subset
 (`test_schema`, `test_config`, `test_session`, `test_tools`, `test_ios`, `test_tools_ios`)
 plus the modules that cover the file being edited (`harness/doctor.py: GATE_COVERAGE`).
-That is ~3 s and ~227 tests on a laptop — a phone should budget perhaps 3-4× that. A 30 s
+That is ~3 s and ~232 tests on a laptop — a phone should budget perhaps 3-4× that. A 30 s
 gate on every edit would be a footgun, and Pyto's watchdog agrees.
 
 The whole suite is opt-in:

@@ -7,12 +7,15 @@ path without an iPhone.
 
 from __future__ import annotations
 
+import os
 import sys
 import types
 import unittest
 import urllib.parse
+from unittest import mock
 
 from harness import ios
+from harness.errors import ConfigError
 
 from .support import TempDirTestCase
 
@@ -236,6 +239,42 @@ class TestPhotos(TempDirTestCase):
         self.assertTrue(result.ok)
         self.assertTrue(result.supported)
         self.assertEqual(module.calls[0][0], (target,))
+
+
+class TestUnexpandableTilde(TempDirTestCase):
+    """Pyto cannot expand ``~``; a user path must fail cleanly, never become a '~' dir."""
+
+    def broken_expanduser(self):
+        real = os.path.expanduser
+
+        def broken(path):
+            return path if str(path).startswith("~") else real(path)
+
+        return mock.patch.object(ios.os.path, "expanduser", side_effect=broken)
+
+    def test_save_photo_reports_it_instead_of_crashing(self) -> None:
+        with self.broken_expanduser():
+            result = ios.save_photo("~/Pictures/shot.png")
+        self.assertFalse(result.ok)
+        self.assertFalse(result.supported)
+        self.assertIn("~", result.detail)
+        self.assertFalse(os.path.exists(os.path.join(os.getcwd(), "~")))
+
+    def test_open_in_files_reports_it_instead_of_crashing(self) -> None:
+        with self.broken_expanduser():
+            result = ios.open_in_files("~/Documents")
+        self.assertFalse(result.ok)
+        self.assertIn("~", result.detail)
+
+    def test_pyto_run_url_refuses_an_unexpandable_path(self) -> None:
+        with self.broken_expanduser():
+            with self.assertRaises(ConfigError):
+                ios.pyto_run_url("~/run.py")
+
+    def test_an_absolute_path_is_untouched(self) -> None:
+        with self.broken_expanduser():
+            result = ios.save_photo(self.path("nope.png"))
+        self.assertIn(self.path("nope.png"), result.detail)
 
 
 class TestCalendar(TempDirTestCase):

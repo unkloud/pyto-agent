@@ -50,7 +50,7 @@ import urllib.parse
 from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
-from . import budget, ios, pyto_api
+from . import budget, home, ios, pyto_api
 from .config import (
     CONFIG_DIR_NAME,
     DEFAULT_API_BASE,
@@ -58,7 +58,6 @@ from .config import (
     Config,
     ConfigError,
     default_config_path,
-    default_home,
     default_sessions_dir,
     default_workspace,
     redact_key,
@@ -207,19 +206,27 @@ def state_dir(env: Optional[Mapping[str, str]] = None, config_path: Optional[str
     """Where the harness keeps its own state (health, capabilities, backups).
 
     Precedence: ``PYTO_HARNESS_STATE_DIR``, then the directory of ``PYTO_HARNESS_CONFIG``
-    (so a test or a portable install keeps its state next to its config), then
-    ``~/.pyto_harness``.
+    (so a test or a portable install keeps its state next to its config), then the
+    resolved home (``~/.pyto_harness`` — never a literal tilde, and never the temp
+    directory unless that is genuinely the only writable place).
+
+    This helper is used by the repair/backup paths, which must still work *while* the
+    doctor is reporting an unusable home, so a resolution failure falls back to
+    ``./.pyto_harness`` here; :func:`check_home` is what reports it as a failure.
     """
     environ = os.environ if env is None else env
     override = environ.get("PYTO_HARNESS_STATE_DIR")
-    if override:
-        return os.path.abspath(os.path.expanduser(override))
-    configured = config_path or environ.get("PYTO_HARNESS_CONFIG")
-    if configured:
-        directory = os.path.dirname(os.path.abspath(os.path.expanduser(configured)))
-        if directory:
-            return directory
-    return os.path.join(default_home(), CONFIG_DIR_NAME)
+    try:
+        if override:
+            return home.expand_user_path(override, what="PYTO_HARNESS_STATE_DIR")
+        configured = config_path or environ.get("PYTO_HARNESS_CONFIG")
+        if configured:
+            directory = os.path.dirname(home.expand_user_path(configured, what="PYTO_HARNESS_CONFIG"))
+            if directory:
+                return directory
+        return os.path.join(home.resolve_home(), CONFIG_DIR_NAME)
+    except ConfigError:
+        return os.path.join(os.getcwd(), CONFIG_DIR_NAME)
 
 
 def run_py_path(root: Optional[str] = None) -> str:
@@ -355,6 +362,12 @@ class DoctorContext:
     state: str = ""
     workspace: str = ""
     sessions_dir: str = ""
+    #: The resolved home directory (``~``) and how it was chosen, for the header line.
+    home: str = ""
+    home_note: str = ""
+    home_source: str = ""
+    #: The actionable message when no home directory could be resolved at all.
+    home_error: str = ""
     env: Mapping[str, str] = field(default_factory=lambda: dict(os.environ))
     network: bool = False
     deep: bool = False
@@ -371,6 +384,13 @@ class DoctorContext:
     testing: bool = False
 
     # -- derived paths -------------------------------------------------------------
+
+    @property
+    def home_line(self) -> str:
+        """``/path (from cwd; HOME was unusable)`` for the report header."""
+        if self.home:
+            return "{} ({})".format(self.home, self.home_note) if self.home_note else self.home
+        return "<unresolved: no writable folder for ~/{}>".format(CONFIG_DIR_NAME)
 
     @property
     def health_path(self) -> str:
@@ -420,21 +440,57 @@ class DoctorContext:
         models: Optional[Sequence[str]] = None,
     ) -> "DoctorContext":
         environ: Mapping[str, str] = dict(os.environ) if env is None else env
-        resolved_config_path = os.path.abspath(
-            os.path.expanduser(config_path or environ.get("PYTO_HARNESS_CONFIG") or default_config_path())
-        )
+        fallback_dir = os.path.join(os.getcwd(), CONFIG_DIR_NAME)
+        home_error = ""
+        home_choice = home.resolve_home_choice(environ=environ)
+        if not home_choice.ok:
+            home_error = home_choice.error
+
+        def absolute(value: str, what: str, fallback: str) -> str:
+            """Absolutise an explicit path, recording (not raising) an unexpandable ``~``."""
+            nonlocal home_error
+            try:
+                return home.expand_user_path(value, what=what)
+            except ConfigError as exc:
+                home_error = home_error or str(exc)
+                return fallback
+
+        default_config = config_path or environ.get("PYTO_HARNESS_CONFIG")
+        if not default_config:
+            try:
+                default_config = default_config_path()
+            except ConfigError as exc:
+                home_error = home_error or str(exc)
+                default_config = os.path.join(fallback_dir, "config.json")
+        resolved_config_path = absolute(default_config, "config file path", os.path.join(fallback_dir, "config.json"))
         resolved_state = state or state_dir(environ, resolved_config_path)
-        resolved_workspace = workspace or config.workspace or environ.get("PYTO_HARNESS_WORKSPACE") or default_workspace()
-        resolved_sessions = (
-            sessions_dir or config.sessions_dir or environ.get("PYTO_HARNESS_SESSIONS_DIR") or default_sessions_dir()
-        )
+        try:
+            resolved_workspace = (
+                workspace or config.workspace or environ.get("PYTO_HARNESS_WORKSPACE") or default_workspace()
+            )
+            resolved_sessions = (
+                sessions_dir
+                or config.sessions_dir
+                or environ.get("PYTO_HARNESS_SESSIONS_DIR")
+                or default_sessions_dir()
+            )
+        except ConfigError as exc:
+            # Nothing is writable: keep the doctor alive so check_home can report the
+            # actionable message instead of crashing the whole diagnostic.
+            home_error = home_error or str(exc)
+            resolved_workspace = workspace or os.path.join(os.getcwd(), "pyto_harness_workspace")
+            resolved_sessions = sessions_dir or os.path.join(fallback_dir, "sessions")
         return cls(
             config=config,
             config_path=resolved_config_path,
             root=os.path.abspath(root or harness_root()),
-            state=os.path.abspath(os.path.expanduser(resolved_state)),
-            workspace=os.path.abspath(os.path.expanduser(resolved_workspace)),
-            sessions_dir=os.path.abspath(os.path.expanduser(resolved_sessions)),
+            state=absolute(resolved_state, "state directory", fallback_dir),
+            workspace=absolute(resolved_workspace, "workspace", os.path.join(os.getcwd(), "pyto_harness_workspace")),
+            sessions_dir=absolute(resolved_sessions, "sessions directory", os.path.join(fallback_dir, "sessions")),
+            home=home_choice.path,
+            home_note=home_choice.note,
+            home_source=home_choice.source,
+            home_error=home_error,
             env=environ,
             network=network,
             deep=deep,
@@ -1726,6 +1782,86 @@ def check_model_accepted(ctx: DoctorContext) -> CheckResult:
 # --------------------------------------------------------------------------------------
 
 
+def check_home(ctx: DoctorContext) -> CheckResult:
+    """The resolved home directory and the state folder inside it.
+
+    This is the check for the failure that broke real installs on iOS: a ``~`` that was
+    never expanded, so every path became ``~/.pyto_harness`` and the first ``mkdir`` was
+    refused with ``Operation not permitted``.  It never raises: an unusable home is the
+    thing it exists to report.
+    """
+    evidence: Dict[str, Any] = {"state": ctx.state}
+    if ctx.home:
+        evidence["home"] = ctx.home
+    if ctx.home_source:
+        evidence["source"] = ctx.home_source
+    if ctx.home_note:
+        evidence["note"] = ctx.home_note
+
+    if ctx.home_error or not ctx.home:
+        detail = ctx.home_error or home.no_home_message(["no candidate directory is writable"])
+        return result(
+            "home",
+            "Home folder and state directory",
+            "unfixable",
+            "no writable home directory: ~/{} cannot be created".format(CONFIG_DIR_NAME),
+            human_action=detail,
+            evidence=evidence,
+        )
+
+    path = ctx.state
+    if os.path.exists(path) and not os.path.isdir(path):
+        return result(
+            "home",
+            "Home folder and state directory",
+            "unfixable",
+            "{} exists but is not a directory".format(path),
+            human_action="move that file aside; it must be a directory.",
+            evidence=evidence,
+        )
+    if not os.path.exists(path):
+        return result(
+            "home",
+            "Home folder and state directory",
+            "fail",
+            "{} does not exist (home resolved to {})".format(path, ctx.home),
+            fixable=True,
+            fix_id="home.create",
+            human_action="run `--doctor --fix` to create it, or set PYTO_HARNESS_HOME elsewhere.",
+            evidence=evidence,
+        )
+    problem = home.writability_problem(path)
+    if problem:
+        return result(
+            "home",
+            "Home folder and state directory",
+            "unfixable",
+            "{} is not writable: {}".format(path, problem),
+            human_action=home.no_home_message(["{}: {}".format(path, problem)]),
+            evidence=evidence,
+        )
+    choice = home.resolve_home_choice(environ=ctx.env)
+    if choice.ok and choice.temporary:
+        return result(
+            "home",
+            "Home folder and state directory",
+            "warn",
+            "{} is writable, but it is the temporary folder: iOS can purge it at any time".format(path),
+            human_action=(
+                "set PYTO_HARNESS_HOME to a folder you control, for example: "
+                'import os; os.environ["PYTO_HARNESS_HOME"] = os.getcwd()'
+            ),
+            evidence=evidence,
+        )
+    return result(
+        "home",
+        "Home folder and state directory",
+        "ok",
+        "{} is writable (home {} from {})".format(path, ctx.home, ctx.home_source or "default"),
+        evidence=evidence,
+    )
+
+
 def check_workspace(ctx: DoctorContext) -> CheckResult:
     path = ctx.workspace
     evidence: Dict[str, Any] = {"path": path}
@@ -2765,6 +2901,20 @@ def fix_config_schema(ctx: DoctorContext, item: CheckResult) -> FixOutcome:
     )
 
 
+def fix_home_create(ctx: DoctorContext, item: CheckResult) -> FixOutcome:
+    """Create the state directory inside the resolved home (0700: it holds the health file)."""
+    try:
+        mkdir_private(ctx.state)
+    except OSError as exc:
+        return FixOutcome(
+            "home.create",
+            item.id,
+            False,
+            error="{}: {} (set PYTO_HARNESS_HOME to a folder you can write to)".format(type(exc).__name__, exc),
+        )
+    return FixOutcome("home.create", item.id, True, "created {}".format(ctx.state))
+
+
 def fix_workspace_create(ctx: DoctorContext, item: CheckResult) -> FixOutcome:
     try:
         mkdir_private(ctx.workspace)  # 0700: programs, memory and spill files live here
@@ -3161,6 +3311,7 @@ FIXES: Dict[str, Fix] = {
         ),
         Fix("config.schema_repair", "config_schema", "drop invalid config values so defaults apply", False, fix_config_schema),
         Fix("workspace.create", "workspace", "create the workspace directory", True, fix_workspace_create),
+        Fix("home.create", "home", "create the state directory inside the resolved home", True, fix_home_create),
         Fix("sessions.create", "sessions", "create the sessions directory", True, fix_sessions_create),
         Fix("session.repair_safe", "sessions", "truncate a torn final session line", True, fix_session_safe),
         Fix("session.repair_full", "sessions", "quarantine or compact damaged session logs", False, fix_session_full),
@@ -3181,6 +3332,7 @@ CHECKS: Tuple[Tuple[str, Callable[[DoctorContext], CheckResult]], ...] = (
     ("interpreter", check_interpreter),
     ("importability", check_importability),
     ("stdlib_only", check_stdlib_only),
+    ("home", check_home),
     ("config_present", check_config_present),
     ("config_parses", check_config_parses),
     ("config_schema", check_config_schema),
@@ -3207,6 +3359,7 @@ CHECK_TITLES: Dict[str, str] = {
     "interpreter": "Python >= 3.10",
     "importability": "Every harness module imports",
     "stdlib_only": "No third-party imports",
+    "home": "Home folder and state directory",
     "config_present": "Config file exists",
     "config_parses": "Config file is valid JSON",
     "config_schema": "Config keys are known and well-typed",
@@ -3396,6 +3549,7 @@ def format_report(
     if ctx is not None:
         lines.append("root       : {}".format(ctx.root))
         lines.append("python     : {} ({})".format(_client_tls_python(), platform.platform()))
+        lines.append("home       : {}".format(ctx.home_line))
         lines.append("config     : {}".format(ctx.config_path))
         lines.append("workspace  : {}".format(ctx.workspace))
         lines.append("sessions   : {}".format(ctx.sessions_dir))
@@ -3573,9 +3727,9 @@ def run_doctor(
         models=models,
     )
     if workspace:
-        ctx.workspace = os.path.abspath(os.path.expanduser(workspace))
+        ctx.workspace = home.expand_user_path(workspace, what="workspace")
     if sessions_dir:
-        ctx.sessions_dir = os.path.abspath(os.path.expanduser(sessions_dir))
+        ctx.sessions_dir = home.expand_user_path(sessions_dir, what="sessions directory")
     before = run_checks(ctx)
     outcomes: List[FixOutcome] = []
     if fix:

@@ -31,8 +31,9 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from . import budget, ios, pyto_api
-from .config import Config
+from .config import Config, ConfigError
 from .errors import HarnessError
+from .home import expand_user_path
 from .llm import AssistantStream, LLMClient, LLMConfig, RetryPolicy, ToolCall, Usage
 from .security import scrub_secrets, scrub_value
 from .session import (
@@ -166,7 +167,12 @@ def _program_fingerprint(arguments: Mapping[str, Any], workspace: str = "") -> L
     else:
         if workspace:
             candidates.append(os.path.join(workspace, stripped))
-        candidates.append(os.path.abspath(os.path.expanduser(stripped)))
+        try:
+            candidates.append(expand_user_path(stripped, what="program path"))
+        except ConfigError:
+            # A '~' this device cannot expand: the workspace candidate above is still
+            # checked, and the preview says the path is resolved inside the workspace.
+            pass
     for candidate in candidates:
         try:
             size = os.path.getsize(candidate)

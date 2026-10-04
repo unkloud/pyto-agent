@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import errno
 import hashlib
 import io
 import json
@@ -104,6 +105,66 @@ class InstallError(Exception):
 
 class SetupError(Exception):
     """A setup step that must stop the run (a key the provider rejects, a write that fails)."""
+
+
+#: Printed whenever a write fails because the device has no usable home directory.
+#: This is the Pyto case: ``os.path.expanduser("~")`` returns ``"~"``, so every path
+#: becomes ``~/.pyto_harness`` and iOS refuses to create a directory literally named
+#: ``~`` with ``[Errno 1] Operation not permitted``.  The installer prints this and keeps
+#: going: the files are installed, only the config has to wait for the escape hatch.
+HOME_WORKAROUND = (
+    "This device has no home directory, so ~/.pyto_harness cannot be created\n"
+    "(iOS answers Operation not permitted). Set the escape hatch to a folder you can\n"
+    "write to, then re-run the installer:\n"
+    '  import os; os.environ["PYTO_HARNESS_HOME"] = os.getcwd()\n'
+    "(PYTO_HARNESS_HOME is used instead of the home directory; everything else works\n"
+    "unchanged.)"
+)
+
+
+def unexpanded_tilde(path: str) -> bool:
+    """True when a path still carries a ``~`` that ``expanduser`` could not expand."""
+    return any(part.startswith("~") for part in str(path or "").split(os.sep))
+
+
+def expand_local_path(raw: str, *, what: str) -> str:
+    """Expand an installer argument, or refuse it — never build a literal ``~`` path.
+
+    The installer runs before the harness exists, so it cannot import
+    :func:`harness.home.expand_user_path`; the rule is the same one.
+    """
+    text = str(raw or "").strip()
+    expanded = os.path.expanduser(text)
+    if unexpanded_tilde(expanded):
+        raise InstallError(
+            "cannot expand the '~' in {} ({!r}): this device has no home directory.\n"
+            "Pass an absolute path instead, or set PYTO_HARNESS_HOME to a folder you can "
+            "write to.".format(what, text)
+        )
+    return os.path.abspath(expanded)
+
+
+def report_home_workaround(report: "Report", exc: object = "") -> None:
+    """Explain the ``PYTO_HARNESS_HOME`` escape hatch, once, in the installer's voice."""
+    if exc:
+        report("setup: {}: {}".format(type(exc).__name__, exc))
+    if getattr(report, "workaround_printed", False):
+        return
+    report.workaround_printed = True  # type: ignore[attr-defined]
+    for line in HOME_WORKAROUND.splitlines():
+        report("       " + line)
+
+
+#: Fragments that mean "the sandbox refused the write", as opposed to a full disk.
+_PERMISSION_HINTS = ("permission denied", "operation not permitted", "read-only file system")
+
+
+def looks_like_a_permission_problem(exc: BaseException) -> bool:
+    """True for EPERM/EACCES/EROFS, the failures the home workaround actually fixes."""
+    if getattr(exc, "errno", None) in (errno.EPERM, errno.EACCES, errno.EROFS):
+        return True
+    text = str(exc).lower()
+    return any(hint in text for hint in _PERMISSION_HINTS)
 
 
 #: A SHA-256 in hex, the form ``--sha256`` accepts.
@@ -329,7 +390,11 @@ def next_steps(target: str) -> str:
         "       {four}\n"
         "\n"
         "Full instructions: {target}/README.md\n"
-        "Your key, sessions and memory live in ~/.pyto_harness and are never touched by an update."
+        "Your key, sessions and memory live in ~/.pyto_harness and are never touched by an update.\n"
+        "\n"
+        "If Pyto has no home directory (an error mentioning `~/.pyto_harness` and\n"
+        "`Operation not permitted`), set the escape hatch first and run step 1 again:\n"
+        '  import os; os.environ["PYTO_HARNESS_HOME"] = os.getcwd()'
     ).format(
         target=absolute,
         one=prefix + "['run.py', '--init']" + tail,
@@ -359,6 +424,8 @@ class Report:
     def __init__(self, security_module=None) -> None:
         self.security = security_module
         self.secrets: "set[str]" = set()
+        #: The PYTO_HARNESS_HOME note is printed once per run, however many writes fail.
+        self.workaround_printed = False
 
     def secret(self, value: "str | None") -> None:
         if value and isinstance(value, str):
@@ -542,7 +609,7 @@ def key_from_arguments(args, env=None) -> "tuple[str | None, str]":
     if args.api_key:
         return args.api_key.strip(), "--api-key"
     if args.key_file:
-        path = os.path.expanduser(args.key_file)
+        path = expand_local_path(args.key_file, what="--key-file")
         try:
             with open(path, "r", encoding="utf-8") as handle:
                 value = handle.read().strip()
@@ -1003,8 +1070,18 @@ def setup(args, target: str) -> int:
         )
 
     config_module = modules.config
-    config_path = os.path.abspath(os.path.expanduser(config_module.default_config_path()))
-    existing, parse_error = read_config(config_path)
+    home_error = ""
+    try:
+        # The harness resolver: an absolute, writable path, or ConfigError with the
+        # PYTO_HARNESS_HOME workaround in it (this is the path that used to be the
+        # literal "~/.pyto_harness" on a device without a home directory).
+        config_path = config_module.default_config_path()
+    except config_module.ConfigError as exc:
+        home_error = str(exc)
+        config_path = ""
+        report_home_workaround(report, exc)
+        report("setup: finishing the install without a config; everything else works.")
+    existing, parse_error = read_config(config_path) if config_path else ({}, "")
     if parse_error:
         report(
             "setup: {} is {}; a 0600 copy is kept as {}.bak before it is rewritten.".format(
@@ -1045,54 +1122,77 @@ def setup(args, target: str) -> int:
         )
         if unchanged and not parse_error:
             report("config : {} left as it is (the key in it works)".format(config_path))
+        elif not config_path:
+            report("config : not written (no writable folder; see PYTO_HARNESS_HOME above)")
         else:
-            if parse_error:
-                backup_config(modules.security, config_path, report)
-            payload = build_config_payload(
-                existing,
-                api_key=key,
-                api_base=api_base,
-                model=model,
-                defaults={
-                    "max_turns": config_module.DEFAULT_MAX_TURNS,
-                    "timeout": 60,
-                    "workspace": config_module.default_workspace(),
-                },
-            )
-            mode = save_config(modules, config_path, payload, existed=os.path.exists(config_path))
-            if mode == "0o600":
-                report("config : {} (mode 0600, key {})".format(config_path, config_module.redact_key(key)))
-            else:
-                report(
-                    "config : {} but its mode is {} -- run `chmod 600 {}` before trusting it".format(
-                        config_path, mode, config_path
-                    )
+            try:
+                if parse_error:
+                    backup_config(modules.security, config_path, report)
+                payload = build_config_payload(
+                    existing,
+                    api_key=key,
+                    api_base=api_base,
+                    model=model,
+                    defaults={
+                        "max_turns": config_module.DEFAULT_MAX_TURNS,
+                        "timeout": 60,
+                        "workspace": config_module.default_workspace(),
+                    },
                 )
+                mode = save_config(modules, config_path, payload, existed=os.path.exists(config_path))
+            except (config_module.ConfigError, SetupError, OSError) as exc:
+                # The install must finish even when the config cannot be written: the
+                # files are in place and the workaround is what unblocks the user.
+                home_error = home_error or str(exc)
+                report("config : NOT written to {}".format(config_path))
+                if isinstance(exc, config_module.ConfigError) or looks_like_a_permission_problem(exc):
+                    report_home_workaround(report, exc)
+                else:
+                    report("setup: {}: {}".format(type(exc).__name__, exc))
+            else:
+                if mode == "0o600":
+                    report("config : {} (mode 0600, key {})".format(config_path, config_module.redact_key(key)))
+                else:
+                    report(
+                        "config : {} but its mode is {} -- run `chmod 600 {}` before trusting it".format(
+                            config_path, mode, config_path
+                        )
+                    )
 
     overrides = {"api_key": key, "api_base": api_base, "model": model}
     config_error = ""
     try:
-        config = config_module.load_config(config_path=config_path, overrides=overrides)
+        config = config_module.load_config(config_path=config_path or None, overrides=overrides)
     except config_module.ConfigError as exc:
         # The file is the problem; the doctor has to be able to say so, so keep going.
         config_error = str(exc)
         config = config_module.Config(api_key=key, api_base=api_base, model=model)
-        config.workspace = os.environ.get("PYTO_HARNESS_WORKSPACE") or config_module.default_workspace()
-        config.sessions_dir = os.environ.get("PYTO_HARNESS_SESSIONS_DIR") or config_module.default_sessions_dir()
+        try:
+            config.workspace = os.environ.get("PYTO_HARNESS_WORKSPACE") or config_module.default_workspace()
+            config.sessions_dir = os.environ.get("PYTO_HARNESS_SESSIONS_DIR") or config_module.default_sessions_dir()
+        except config_module.ConfigError:
+            pass  # no writable home: the doctor reports it, the install still finishes
     setattr(config, "_installer_error", config_error)
 
     network = bool(verified) and not args.no_network
-    after, _outcomes = run_doctor(
-        modules, config, config_path=config_path, target=target, network=network, skip_fixes=args.skip_fixes
-    )
-    line = doctor_summary(modules.doctor, after)
-    if args.skip_fixes:
-        line += "  (fixes skipped: --skip-fixes)"
-    report(line)
-    for extra in doctor_attention(after):
-        report(extra)
+    try:
+        after, _outcomes = run_doctor(
+            modules, config, config_path=config_path, target=target, network=network, skip_fixes=args.skip_fixes
+        )
+        line = doctor_summary(modules.doctor, after)
+    except Exception as exc:  # noqa: BLE001 - a diagnostic must not fail the install
+        report("doctor : could not run ({}: {})".format(type(exc).__name__, exc))
+    else:
+        if args.skip_fixes:
+            line += "  (fixes skipped: --skip-fixes)"
+        report(line)
+        for extra in doctor_attention(after):
+            report(extra)
 
     launcher = write_launcher(modules, target, report)
+    if home_error:
+        report("")
+        report("home   : no writable folder for ~/.pyto_harness (see the PYTO_HARNESS_HOME note above)")
     report("")
     report("Next step - one command, nothing else to paste:")
     report("  {}".format(start_line(target)))
@@ -1216,7 +1316,11 @@ def main(argv=None) -> int:
         )
         return 2
 
-    target = os.path.abspath(os.path.expanduser(args.into))
+    try:
+        target = expand_local_path(args.into, what="--into")
+    except InstallError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
 
     if os.path.isdir(target) and os.listdir(target) and not args.force:
         if not os.path.isfile(os.path.join(target, "run.py")):
@@ -1229,7 +1333,11 @@ def main(argv=None) -> int:
         print("updating the existing install at {}".format(target))
 
     if args.zip_path:
-        source = os.path.expanduser(args.zip_path)
+        try:
+            source = expand_local_path(args.zip_path, what="--zip")
+        except InstallError as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
         if not os.path.isfile(source):
             print("no such file: {}".format(source), file=sys.stderr)
             return 2
@@ -1309,6 +1417,16 @@ def main(argv=None) -> int:
     except SetupError as exc:
         print(str(exc), file=sys.stderr)
         return 1
+    except OSError as exc:
+        # Safety net: a filesystem the sandbox refuses must never turn a completed file
+        # install into a traceback.  The files are there; the steps below finish by hand.
+        print("setup: {}: {}".format(type(exc).__name__, exc), file=sys.stderr)
+        for line in HOME_WORKAROUND.splitlines():
+            print("       " + line, file=sys.stderr)
+        print("The files are in {}, so the install itself is complete.".format(target), file=sys.stderr)
+        print()
+        print(next_steps(target))
+        return 0
 
 
 if __name__ == "__main__":

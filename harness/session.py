@@ -30,7 +30,8 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
-from .errors import SessionFormatError
+from .errors import ConfigError, SessionFormatError
+from .home import WORKAROUND, expand_user_path
 from .security import mkdir_private, open_private, scrub_value
 
 CURRENT_VERSION = 1
@@ -268,7 +269,16 @@ class SessionLog:
         header = header or SessionHeader(workspace=workspace)
         if config:
             header.config.update(config)
-        mkdir_private(os.path.dirname(resolved) or ".")
+        try:
+            mkdir_private(os.path.dirname(resolved) or ".")
+        except OSError as exc:
+            # EPERM/EACCES/EROFS on the sessions directory: say what to do about it
+            # instead of surfacing a bare errno (this is the Pyto no-home failure shape).
+            raise ConfigError(
+                "sessions directory {} could not be created: {}: {}.\n{}".format(
+                    os.path.dirname(resolved) or ".", type(exc).__name__, exc, WORKAROUND
+                )
+            ) from exc
         log = cls(header, path=resolved)
         log._handle = open_private(resolved, append=True)
         log._append_row(header.to_wire())
@@ -472,7 +482,8 @@ class SessionLog:
 
 
 def _resolve(path: str) -> str:
-    return os.path.abspath(os.path.expanduser(path))
+    """A session path: expanded or refused, never a literal ``~`` directory."""
+    return expand_user_path(path, what="session path")
 
 
 def read_log(path: str) -> Tuple[SessionHeader, List[SessionEvent], List[str]]:
@@ -522,4 +533,6 @@ def new_session_path(directory: str, *, label: str = "session") -> str:
     """A fresh, sortable session path inside ``directory``."""
     stamp = time.strftime("%Y%m%d-%H%M%S")
     safe = "".join(ch if ch.isalnum() or ch in "-_" else "-" for ch in label)[:32].strip("-") or "session"
-    return os.path.join(os.path.expanduser(directory), "{}-{}-{}.jsonl".format(stamp, safe, uuid.uuid4().hex[:6]))
+    return os.path.join(
+        expand_user_path(directory, what="sessions directory"), "{}-{}-{}.jsonl".format(stamp, safe, uuid.uuid4().hex[:6])
+    )

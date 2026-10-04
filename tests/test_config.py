@@ -5,12 +5,20 @@ from __future__ import annotations
 import json
 import os
 import unittest
+from unittest import mock
 
+from harness import home
 from harness.config import (
     Config,
     ConfigError,
+    default_config_path,
+    default_home,
+    default_sessions_dir,
+    default_spill_dir,
+    default_state_dir,
     default_workspace,
     describe,
+    ensure_workspace,
     load_config,
     load_config_file,
     redact_key,
@@ -200,6 +208,48 @@ class TestPaths(TempDirTestCase):
     def test_sessions_dir_has_a_default(self) -> None:
         config = load_config(config_path=self.path("nope.json"), env={})
         self.assertTrue(config.sessions_dir.endswith("sessions"))
+
+
+class TestHomeDerivedPaths(TempDirTestCase):
+    """Every ``~``-derived default is a real, absolute path (see tests/test_home.py)."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        home.reset_home_cache()
+        self.addCleanup(home.reset_home_cache)
+
+    def test_defaults_follow_the_escape_hatch(self) -> None:
+        hatch = self.path("hatch")
+        with mock.patch.dict(
+            os.environ,
+            {"PYTO_HARNESS_HOME": hatch, "PYTO_HARNESS_CONFIG": "", "PYTO_HARNESS_STATE_DIR": ""},
+        ):
+            self.assertEqual(default_home(), hatch)
+            self.assertEqual(default_config_path(), os.path.join(hatch, ".pyto_harness", "config.json"))
+            self.assertEqual(default_state_dir(), os.path.join(hatch, ".pyto_harness"))
+            self.assertEqual(default_sessions_dir(), os.path.join(hatch, ".pyto_harness", "sessions"))
+            self.assertEqual(default_workspace(), os.path.join(hatch, "pyto_harness_workspace"))
+            self.assertEqual(default_spill_dir(), os.path.join(hatch, "pyto_harness_workspace", "tool-output"))
+        self.assertTrue(os.path.isdir(hatch), "the escape hatch is created before it is used")
+
+    def test_state_dir_follows_a_portable_config_file(self) -> None:
+        portable = self.path("portable", "config.json")
+        with mock.patch.dict(os.environ, {"PYTO_HARNESS_CONFIG": portable, "PYTO_HARNESS_STATE_DIR": ""}):
+            self.assertEqual(default_state_dir(), self.path("portable"))
+
+    def test_an_unexpandable_workspace_is_refused(self) -> None:
+        real = os.path.expanduser
+
+        def broken(path):
+            return path if str(path).startswith("~") else real(path)
+
+        with mock.patch.object(home.os.path, "expanduser", side_effect=broken):
+            with self.assertRaises(ConfigError) as caught:
+                ensure_workspace(Config(workspace="~/pyto_harness_workspace"))
+            with self.assertRaises(ConfigError):
+                load_config_file("~/config.json")
+        self.assertIn("absolute path", str(caught.exception))
+        self.assertFalse(os.path.exists(os.path.join(os.getcwd(), "~")))
 
 
 if __name__ == "__main__":

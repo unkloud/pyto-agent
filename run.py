@@ -37,6 +37,7 @@ from harness import __version__, doctor, ios, repair  # noqa: E402
 from harness.config import (  # noqa: E402
     Config,
     ConfigError,
+    default_config_path,
     default_sessions_dir,
     default_workspace,
     describe,
@@ -114,9 +115,14 @@ def resolve_config_lenient(args: argparse.Namespace) -> Tuple[Config, str]:
         config.yolo = bool(args.yolo)
         config.compact = not args.no_compact
         config.allow_unattended_programs = bool(getattr(args, "allow_unattended_programs", False))
-        config.workspace = config.workspace or default_workspace()
-        config.sessions_dir = environ.get("PYTO_HARNESS_SESSIONS_DIR") or default_sessions_dir()
-        config.spill_dir = os.path.join(config.workspace, "tool-output")
+        try:
+            config.workspace = config.workspace or default_workspace()
+            config.sessions_dir = environ.get("PYTO_HARNESS_SESSIONS_DIR") or default_sessions_dir()
+        except ConfigError:
+            # No writable home anywhere: leave the paths empty so the doctor can report
+            # the actionable message (PYTO_HARNESS_HOME) instead of crashing here.
+            pass
+        config.spill_dir = os.path.join(config.workspace, "tool-output") if config.workspace else ""
         return config, str(exc)
 
 
@@ -610,12 +616,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     system_prompt = build_system_prompt(config, workspace)
 
     if not config.has_api_key:
+        try:
+            config_path = default_config_path()
+        except ConfigError:
+            config_path = "<no writable home: use --init once PYTO_HARNESS_HOME is set>"
         print(
             "No API key found.\n"
             "Set one with:  export DEEPSEEK_API_KEY=sk-...\n"
-            "or put it in {} (run `python run.py --init` to create the file).".format(
-                os.path.join(os.path.expanduser("~"), ".pyto_harness", "config.json")
-            ),
+            "or put it in {} (run `python run.py --init` to create the file).".format(config_path),
             file=sys.stderr,
         )
         return 2

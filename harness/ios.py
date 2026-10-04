@@ -35,6 +35,9 @@ import webbrowser
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
+from .errors import ConfigError
+from .home import expand_user_path
+
 #: Optional modules probed on iOS.  Kept as data so tests can assert the probe list.
 PYTO_MODULES = (
     "pyto",
@@ -764,7 +767,21 @@ def save_photo(path: str) -> CapabilityResult:
     ``supported=False`` — it does not pretend the picture was saved.
     """
     started = time.monotonic()
-    absolute = os.path.abspath(os.path.expanduser(path))
+    try:
+        absolute = expand_user_path(path, what="image path")
+    except ConfigError as exc:
+        # A '~' this device cannot expand must not become a path literally named '~'.
+        return record(
+            CapabilityResult(
+                action="save_photo",
+                ok=False,
+                supported=False,
+                method="none",
+                detail=str(exc).splitlines()[0],
+                data={"path": str(path)},
+                elapsed_ms=(time.monotonic() - started) * 1000,
+            )
+        )
     if not os.path.exists(absolute):
         return record(
             CapabilityResult(
@@ -893,7 +910,20 @@ def open_in_files(path: str = "") -> CapabilityResult:
     """Reveal a path (or the Files app root) via ``shareddocuments://``."""
     started = time.monotonic()
     if path:
-        absolute = os.path.abspath(os.path.expanduser(path))
+        try:
+            absolute = expand_user_path(path, what="path")
+        except ConfigError as exc:
+            return record(
+                CapabilityResult(
+                    action="open_in_files",
+                    ok=False,
+                    supported=False,
+                    method="none",
+                    detail=str(exc).splitlines()[0],
+                    data={"path": str(path)},
+                    elapsed_ms=(time.monotonic() - started) * 1000,
+                )
+            )
         url = FILES_SCHEME + urllib.parse.quote(absolute)
         targets = [url, FILES_SCHEME]
     else:
@@ -932,7 +962,7 @@ def open_in_files(path: str = "") -> CapabilityResult:
 def pyto_run_url(script_path: str, arguments: Optional[Mapping[str, str]] = None) -> str:
     """URL that makes Pyto run a script — the anchor for the Shortcuts wiring."""
     query = dict(arguments or {})
-    url = PYTO_SCHEME + urllib.parse.quote(os.path.abspath(os.path.expanduser(script_path)))
+    url = PYTO_SCHEME + urllib.parse.quote(expand_user_path(script_path, what="script path"))
     if query:
         url += "?" + urllib.parse.urlencode(query)
     return url

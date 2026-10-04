@@ -31,6 +31,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 from . import budget, doctor, ios, pyto_api, repair
 from .config import Config, ConfigError, load_config
 from .errors import ToolError
+from .home import expand_user_path
 from .security import (
     chmod_private as security_chmod,
     mkdir_private,
@@ -91,7 +92,9 @@ class Workspace:
     """
 
     def __init__(self, root: str) -> None:
-        self.root = os.path.abspath(os.path.expanduser(root))
+        # The same rule as every user-supplied path: a ``~`` is expanded or refused, so a
+        # device without a home directory never gets a workspace literally named ``~``.
+        self.root = expand_user_path(root, what="workspace")
         # 0700: the workspace holds the user's programs, the memory store and every spill
         # file (the complete output the model was not shown).  Created private, not
         # chmod'ed later.
@@ -1757,14 +1760,14 @@ def default_context(workspace_dir: str, spill_dir: str = "", *, config: Any = No
     from . import config as config_module
 
     workspace = Workspace(workspace_dir)
-    resolved_config_path = os.path.abspath(os.path.expanduser(config_module.default_config_path()))
+    resolved_config_path = expand_user_path(config_module.default_config_path(), what="config file path")
     return ToolContext(
         workspace=workspace,
         spill_dir=spill_dir or os.path.join(workspace.root, "tool-output"),
         memory_path=os.path.join(workspace.root, "memory.json"),
         config=config,
         config_path=resolved_config_path,
-        state_dir=config_module.default_state_dir(),
+        state_dir=expand_user_path(config_module.default_state_dir(), what="state directory"),
         harness_root=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
     )
 

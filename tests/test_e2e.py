@@ -10,6 +10,7 @@ import subprocess
 import sys
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
+from unittest import mock
 
 from harness.loop import LoopOptions, run_turn
 from harness.session import SessionLog
@@ -303,6 +304,40 @@ class TestDirectConversation(TempDirTestCase):
         self.assertTrue(os.path.exists(os.path.join(self.workspace_dir, "sh.py")))
         finish_events = [event for event in transcript if event.kind == "finished"]
         self.assertEqual(finish_events[0].data["message"], "Ready. Run sh.py.")
+
+
+class TestUnexpandableWorkspace(TempDirTestCase):
+    """``--workspace "~/x"`` on a device that cannot expand ``~``: refuse, never create."""
+
+    def test_workspace_with_a_literal_tilde_is_refused(self) -> None:
+        import run as runner
+
+        cwd = self.path("cwd")
+        os.makedirs(cwd, exist_ok=True)
+        real = os.path.expanduser
+
+        def broken(path):
+            return path if str(path).startswith("~") else real(path)
+
+        stdout, stderr = io.StringIO(), io.StringIO()
+        saved_env = dict(os.environ)
+        saved_cwd = os.getcwd()
+        os.environ["PYTO_HARNESS_CONFIG"] = self.path("absent.json")
+        os.environ["PYTO_HARNESS_HOME"] = self.path("hatch")
+        os.chdir(cwd)
+        try:
+            with mock.patch.object(os.path, "expanduser", side_effect=broken):
+                with redirect_stdout(stdout), redirect_stderr(stderr):
+                    code = runner.main(["--workspace", "~/somewhere", "hello"])
+        finally:
+            os.chdir(saved_cwd)
+            os.environ.clear()
+            os.environ.update(saved_env)
+        self.assertEqual(code, 2, stdout.getvalue() + stderr.getvalue())
+        self.assertIn("configuration error", stderr.getvalue())
+        self.assertIn("absolute path", stderr.getvalue())
+        self.assertFalse(os.path.exists(os.path.join(cwd, "~")), "a directory named '~' was created")
+        self.assertFalse(os.path.exists(os.path.join(cwd, ".pyto_harness")))
 
 
 if __name__ == "__main__":

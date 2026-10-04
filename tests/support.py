@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import atexit
 import os
 import shutil
 import sys
@@ -18,6 +19,15 @@ if ROOT not in sys.path:
 # Never let a test spawn a browser: the capability adapters are exercised for their
 # "unsupported" path, and `webbrowser.open` on a headless box can block.
 os.environ["PYTO_HARNESS_NO_BROWSER"] = "1"
+
+# Hermetic home for the whole suite.  The resolver *probes* for real, and on a machine
+# where $HOME is not writable (a build sandbox, or Pyto itself) the next candidate is the
+# current working directory — which would leave a `.pyto_harness` directory inside the
+# checkout.  `PYTO_HARNESS_HOME` is the documented escape hatch, so the suite uses it;
+# tests that exercise the resolution order pass their own `environ=` mapping.
+_HARNESS_HOME = tempfile.mkdtemp(prefix="pyto-harness-home-")
+atexit.register(shutil.rmtree, _HARNESS_HOME, True)
+os.environ["PYTO_HARNESS_HOME"] = _HARNESS_HOME
 
 from harness import ios, session as session_mod  # noqa: E402
 from harness.config import Config, load_config  # noqa: E402

@@ -2171,12 +2171,18 @@ def _probe(name: str) -> Tuple[bool, Dict[str, Dict[str, str]], str]:
 
 
 def capabilities_path(state_dir: Optional[str] = None) -> str:
-    """Where the doctor keeps its discovery file; ``~/.pyto_harness`` by default."""
-    if state_dir:
-        return os.path.join(os.path.abspath(os.path.expanduser(state_dir)), "capabilities.json")
-    from .config import default_state_dir
+    """Where the doctor keeps its discovery file; ``~/.pyto_harness`` by default.
 
-    return os.path.join(default_state_dir(), "capabilities.json")
+    ``state_dir`` is a path a caller (or the model) supplied, so it goes through the same
+    rule as every other user path: expand the ``~`` or refuse it, never build a literal
+    ``~`` directory.
+    """
+    from .config import default_state_dir
+    from .home import expand_user_path
+
+    if state_dir:
+        return os.path.join(expand_user_path(state_dir, what="state directory"), "capabilities.json")
+    return os.path.join(expand_user_path(default_state_dir(), what="state directory"), "capabilities.json")
 
 
 def load_cache(state_dir: Optional[str] = None) -> Dict[str, Any]:

@@ -6,7 +6,7 @@ week's notes", "put the thing I just copied into a note" — and the agent write
 file into a workspace on the device, runs it, and tells you what happened.
 
 * **Standard library only.** No `pip install`, no `requests`, no `pydantic`. Every claim
-  in this README is checked by `stdlib_audit.py` and 612 tests.
+  in this README is checked by `stdlib_audit.py` and 664 tests.
 * **Python 3.10**, the version Pyto ships. Verified on real CPython 3.10.22 and 3.12.
 * **OpenAI-compatible API** — DeepSeek by default (`deepseek-chat`), anything
   chat-completions-shaped otherwise.
@@ -85,6 +85,23 @@ that the package imports, and then:
 That is the last thing you have to paste. Or **open `start.py` in Pyto's editor and press
 Run**: it does the `chdir` and the `runpy` with the real path for you, forwarding any
 arguments, so you never copy a line at all.
+
+> **If Pyto has no home directory.** Some Pyto installs cannot resolve `~`: there is no
+> usable `HOME` and `os.path.expanduser("~")` returns the string `"~"`, so `~/.pyto_harness`
+> is a *relative* path with a literal tilde and iOS refuses to create it —
+> `[Errno 1] Operation not permitted: '~/.pyto_harness'`. The harness does not trust `~`:
+> it picks the first folder it can really write to (`PYTO_HARNESS_HOME`, then a usable
+> `HOME`, then the folder Pyto runs scripts from, then — with a loud warning — the
+> temporary directory), and `--doctor` prints which one won. If the installer tells you it
+> cannot find a writable folder, paste this once in the same console and re-run the
+> installer:
+>
+> ```python
+> import os; os.environ["PYTO_HARNESS_HOME"] = os.getcwd()
+> ```
+>
+> Everything (`config.json`, sessions, memory, backups) then lives in `./.pyto_harness`
+> next to `run.py` — see `PYTO_HARNESS_HOME` in §2.
 
 If you would rather the installer started the agent immediately, ask it to:
 
@@ -263,7 +280,19 @@ The config file looks like this:
 Environment variables: `PYTO_HARNESS_MODEL`, `PYTO_HARNESS_API_BASE`,
 `PYTO_HARNESS_MAX_TURNS`, `PYTO_HARNESS_TIMEOUT`, `PYTO_HARNESS_WORKSPACE`,
 `PYTO_HARNESS_SESSIONS_DIR`, `PYTO_HARNESS_MAX_TOKENS`, `PYTO_HARNESS_TEMPERATURE`,
-`PYTO_HARNESS_STREAM`.
+`PYTO_HARNESS_STREAM` — plus the three path overrides:
+
+* **`PYTO_HARNESS_HOME`** — the directory the harness treats as your home: state, config
+  and sessions live in `$PYTO_HARNESS_HOME/.pyto_harness`. Set it when the device has no
+  usable `~` (see §1); it is the documented escape hatch and always wins when it is
+  writable.
+* **`PYTO_HARNESS_CONFIG`** — the config file itself (its directory becomes the state
+  directory unless `PYTO_HARNESS_STATE_DIR` says otherwise).
+* **`PYTO_HARNESS_STATE_DIR`** — where `health.json`, `capabilities.json` and the source
+  backups go.
+
+A `~` in any of these, or in `--workspace`/`--resume`/`--into`, is expanded, and **refused
+with an explanation** when this device cannot expand it — it is never used literally.
 Command-line flags beat environment variables, which beat the file.
 
 **The key is never printed.** `--dry-run`, the banner, the session log and every log line
@@ -516,15 +545,16 @@ resuming a conversation after the app was killed.
 
 ## 6a. Diagnosing and repairing itself
 
-`--doctor` runs 19 checks (interpreter, imports, stdlib-only, config, key shape, DNS/TLS,
-auth, model, workspace, session-log integrity, memory, iOS modules and call shapes,
-Shortcuts wiring, and the offline suite with `--deep`) and reports each as `ok`, `warn`,
+`--doctor` runs 22 checks (interpreter, imports, stdlib-only, the home folder and its
+state directory, config, key shape, DNS/TLS, auth, model, workspace, session-log integrity,
+memory, iOS modules and call shapes, Shortcuts wiring, and the offline suite with
+`--deep`) and reports each as `ok`, `warn`,
 `fail`, `fixed`, `skipped` or `unfixable`, with an exit code of 0 / 1 / 2. `--doctor --fix`
 applies the repairs a machine can and prints a before/after report. `--repair "<problem>"`
 lets the model change the harness's own source, subject to a path jail, an AST/stdlib
 pre-check, a snapshot with hashes, and the offline test suite as the gate: a red suite
 reverts the edit byte-for-byte and hands back the failure verbatim. A bounded gate (~3 s,
-227 tests) is the default; `--deep-tests` asks for all 612.
+232 tests) is the default; `--deep-tests` asks for all 664.
 
 **The full story — the three tiers, the guardrail list, what is deliberately not automated,
 and a worked transcript — is in [SELF-REPAIR.md](SELF-REPAIR.md).**
@@ -604,14 +634,15 @@ harness/
   loop.py              agent loop, system prompt, approval policy, result truncation
   session.py           append-only JSONL log: append, resume, projection, compaction
   config.py            defaults + config.json + environment + CLI flags
+  home.py              the one resolver for ~/.pyto_harness (never a literal '~')
   budget.py            the size limits that keep iOS from killing the process
   textbudget.py        head/tail truncation with spill-to-file
   ui.py                Pyto UI window, terminal REPL, terminal approval prompt
-  doctor.py            self-diagnosis: 20 structured checks + the fixes a machine can apply
+  doctor.py            self-diagnosis: 22 structured checks + the fixes a machine can apply
   repair.py            self-repair: path-jailed, snapshot-first, test-gated source edits
   pyto_api.py          Pyto library grounding: 25 modules / 160 members, curated + introspected
   errors.py            error taxonomy with retryability
-tests/                 612 offline tests against a stdlib mock OpenAI server
+tests/                 664 offline tests against a stdlib mock OpenAI server
 examples/              three programs the agent is expected to be able to write
 stdlib_audit.py        proves "stdlib only" and "parses as Python 3.10"
 ```
@@ -619,7 +650,7 @@ stdlib_audit.py        proves "stdlib only" and "parses as Python 3.10"
 ## 10. Verifying it yourself
 
 ```bash
-python3 -m unittest discover -s tests -t .     # 612 tests, offline, no network (~28 s)
+python3 -m unittest discover -s tests -t .     # 664 tests, offline, no network (~34 s)
 python3 stdlib_audit.py                        # third_party_modules: [], 18 files parse at (3,10)
 python3 run.py --dry-run "hello"               # prints the request, sends nothing
 python3 run.py --doctor                        # health report, exit 0 healthy / 1 fixable / 2 human
