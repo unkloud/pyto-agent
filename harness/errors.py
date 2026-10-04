@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional
 
+from .security import scrub_secrets
+
 
 class HarnessError(Exception):
     """Base class for every harness failure."""
@@ -133,11 +135,13 @@ class UnsupportedCapability(HarnessError):
 def error_for_status(status: int, body: str, headers: Any = None) -> HarnessError:
     """Map an HTTP status onto the taxonomy.
 
-    ``body`` is included verbatim (truncated) because provider error bodies carry the
-    actionable part ("model not found", "insufficient balance"); the API key is never
-    in a response body, so this is safe to surface to the model and the log.
+    ``body`` is included (truncated) because provider error bodies carry the actionable
+    part ("model not found", "insufficient balance").  It is **scrubbed first**: a
+    gateway, proxy or debug endpoint routinely echoes the submitted credential back
+    ("invalid api key: sk-…"), and this message is printed and appended to the session
+    log, so the key would otherwise become durable plaintext.
     """
-    snippet = (body or "").strip()[:600]
+    snippet = scrub_secrets((body or "").strip()[:600])
     detail = f" (body: {snippet})" if snippet else ""
     if status == 429:
         retry_after: Optional[float] = None

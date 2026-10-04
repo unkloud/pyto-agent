@@ -16,10 +16,12 @@ from __future__ import annotations
 
 import json
 import os
+import stat as stat_module
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Mapping, Optional
 
 from .errors import ConfigError
+from .security import chmod_private, is_secret_header, open_private, redact_url_userinfo, register_secret
 
 DEFAULT_API_BASE = "https://api.deepseek.com"
 DEFAULT_MODEL = "deepseek-chat"
@@ -46,7 +48,7 @@ ENV_FIELDS = {
 
 _INT_FIELDS = ("max_turns", "max_tokens")
 _FLOAT_FIELDS = ("timeout", "temperature")
-_BOOL_FIELDS = ("stream", "yolo", "compact")
+_BOOL_FIELDS = ("stream", "yolo", "compact", "allow_unattended_programs")
 
 
 @dataclass
@@ -65,6 +67,9 @@ class Config:
     temperature: Optional[float] = None
     #: Skip approvals for share / open_url / shortcut_run / network sends.
     yolo: bool = False
+    #: Allow ``run_program`` when the run has no interactive approver (Shortcut/headless).
+    #: Narrower than ``yolo``: everything else that needs a human stays denied.
+    allow_unattended_programs: bool = False
     #: Trim the session log when it approaches the iOS memory budget.
     compact: bool = True
     #: Extra request headers (e.g. a proxy or an OpenRouter referer).
@@ -76,12 +81,30 @@ class Config:
     #: Sources that actually contributed a value, for ``--dry-run`` reporting.
     sources: Dict[str, str] = field(default_factory=dict)
 
+    def __post_init__(self) -> None:
+        # Register the key (and any credential-shaped header value) with the scrubber, so
+        # every runtime path that logs, prints or spills text removes it by *value* as
+        # well as by shape — see harness.security.scrub_secrets.
+        register_secret(self.api_key)
+        for name, value in (self.extra_headers or {}).items():
+            if is_secret_header(str(name)):
+                register_secret(str(value))
+
     # -- derived -------------------------------------------------------------------
 
     @property
     def chat_completions_url(self) -> str:
         """The URL a request would be POSTed to (no key material in it)."""
         return self.api_base.rstrip("/") + "/chat/completions"
+
+    @property
+    def redacted_api_base(self) -> str:
+        """``api_base`` with any ``user:password@`` userinfo removed, for display."""
+        return redact_url_userinfo(self.api_base)
+
+    @property
+    def redacted_chat_completions_url(self) -> str:
+        return redact_url_userinfo(self.chat_completions_url)
 
     @property
     def has_api_key(self) -> bool:
@@ -216,7 +239,15 @@ def _apply(target: Config, values: Mapping[str, Any], origin: str, sources: Dict
             merged = dict(target.extra_headers)
             merged.update({str(k): str(v) for k, v in value.items()})
             value = merged
+            for header_name, header_value in merged.items():
+                if is_secret_header(header_name):
+                    register_secret(header_value)
         setattr(target, key, value)
+        if key == "api_key":
+            # Registering here (not only in ``Config.__post_init__``) matters: the file and
+            # environment paths set the attribute directly, and that is how a real run gets
+            # its key.
+            register_secret(value if isinstance(value, str) else None)
         sources[key] = origin
 
 
@@ -271,8 +302,8 @@ def describe(config: Config) -> str:
     """Multi-line human summary used by ``--dry-run`` and the startup banner."""
     key = "set" if config.has_api_key else "MISSING"
     lines = [
-        "api_base   : {}".format(config.api_base),
-        "endpoint   : {}".format(config.chat_completions_url),
+        "api_base   : {}".format(config.redacted_api_base),
+        "endpoint   : {}".format(config.redacted_chat_completions_url),
         "model      : {}".format(config.model),
         "api_key    : {} {}".format(key, redact_key(config.api_key)),
         "workspace  : {}".format(config.workspace),
@@ -289,10 +320,16 @@ def describe(config: Config) -> str:
 
 
 def ensure_workspace(config: Config) -> str:
-    """Create the workspace directory if needed and return its absolute path."""
+    """Create the workspace directory if needed and return its absolute path.
+
+    Created ``0700``: the workspace holds the user's programs, the memory store and the
+    spill files, and it is the one directory the agent writes freely.
+    """
     path = os.path.abspath(os.path.expanduser(config.workspace))
     try:
-        os.makedirs(path, exist_ok=True)
+        from .security import mkdir_private
+
+        mkdir_private(path)
     except OSError as exc:
         raise ConfigError("workspace {} could not be created: {}".format(path, exc)) from exc
     if not os.path.isdir(path):
@@ -300,10 +337,18 @@ def ensure_workspace(config: Config) -> str:
     return path
 
 
-def write_sample_config(path: Optional[str] = None, *, api_key: str = "sk-REPLACE-ME") -> str:
-    """Write a commented-ish starter config; returns the path.  Used by ``--init``."""
+def write_sample_config(
+    path: Optional[str] = None, *, api_key: str = "sk-REPLACE-ME", force: bool = False
+) -> str:
+    """Write a commented-ish starter config; returns the path.  Used by ``--init``.
+
+    The file is created ``O_CREAT|O_EXCL`` at ``0600`` so there is never a window in
+    which it exists with a looser mode, and an existing config is **never** overwritten
+    silently — it may hold the user's only copy of the key.  ``force=True`` is the
+    explicit opt-in.  The returned path is the real one; the caller prints the mode it
+    actually has (``config_file_mode``), never an assumed ``0600``.
+    """
     resolved = os.path.expanduser(path) if path else default_config_path()
-    os.makedirs(os.path.dirname(resolved) or ".", exist_ok=True)
     payload: List[str] = [
         "{",
         '  "api_base": "{}",'.format(DEFAULT_API_BASE),
@@ -315,10 +360,34 @@ def write_sample_config(path: Optional[str] = None, *, api_key: str = "sk-REPLAC
         "}",
         "",
     ]
-    with open(resolved, "w", encoding="utf-8") as handle:
-        handle.write("\n".join(payload))
     try:
-        os.chmod(resolved, 0o600)
-    except OSError:  # pragma: no cover - filesystem dependent
-        pass
+        handle = open_private(resolved, exclusive=not force, truncate=True)
+    except FileExistsError:
+        raise ConfigError(
+            "{} already exists; refusing to overwrite it (it may hold your only copy of the "
+            "API key). Move it aside, or re-run with --force.".format(resolved)
+        ) from None
+    with handle:
+        handle.write("\n".join(payload))
     return resolved
+
+
+def config_file_mode(path: str) -> Optional[str]:
+    """The octal mode of ``path``, or ``None`` when it cannot be stat'ed."""
+    try:
+        return oct(stat_module.S_IMODE(os.stat(path).st_mode))
+    except OSError:
+        return None
+
+
+def enforce_config_mode(path: str, mode: int = 0o600) -> str:
+    """Make ``path`` owner-only and return the mode it actually has.
+
+    A ``chmod`` that fails is reported, not swallowed: printing "mode 0600" over a file
+    that is still world-readable is exactly the lie this closes.
+    """
+    try:
+        chmod_private(path, mode)
+    except OSError:
+        pass
+    return config_file_mode(path) or "unknown"

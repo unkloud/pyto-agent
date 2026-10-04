@@ -13,6 +13,8 @@ import time
 from dataclasses import dataclass
 from typing import Optional
 
+from .security import mkdir_private, scrub_secrets, write_private
+
 #: Loop-level default budget for a single tool result, in characters.
 DEFAULT_MAX_CHARS = 12000
 #: Fraction of the budget given to the head; the tail gets the rest.
@@ -44,7 +46,12 @@ def truncate_middle(
     When ``spill_dir`` is given (and writable) the *complete* text is written there and
     the notice tells the model the path.  When it is not, the notice says so instead of
     pretending a path exists.
+
+    The text is scrubbed **before** it is clamped, so neither the model-visible copy nor
+    the spill file (which is the whole, untruncated body) can carry a credential that a
+    program or a provider error echoed back.
     """
+    text = scrub_secrets(text)
     if limit <= 0 or len(text) <= limit:
         return Truncated(text=text, truncated=False, full_chars=len(text))
 
@@ -71,14 +78,15 @@ def _spill(text: str, spill_dir: str, spill_name: str) -> Optional[str]:
     """Best-effort write of the full text; returns the path or ``None``.
 
     Spilling must never break a turn: a full disk or a read-only container turns into a
-    missing path in the notice, not an exception out of the tool layer.
+    missing path in the notice, not an exception out of the tool layer.  The spill file is
+    created ``0600`` in a ``0700`` directory: it holds the complete output the model was
+    not allowed to see, which is exactly the material a hostile app would want.
     """
     safe = "".join(ch if ch.isalnum() or ch in "-_." else "_" for ch in spill_name)[:60] or "output"
     try:
-        os.makedirs(spill_dir, exist_ok=True)
+        mkdir_private(spill_dir)
         path = os.path.join(spill_dir, "{}-{}.txt".format(safe, int(time.time() * 1000)))
-        with open(path, "w", encoding="utf-8") as handle:
-            handle.write(text)
+        write_private(path, scrub_secrets(text))
         return path
     except OSError:  # pragma: no cover - depends on the host filesystem
         return None

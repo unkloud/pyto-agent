@@ -40,6 +40,7 @@ from harness.config import (  # noqa: E402
     default_sessions_dir,
     default_workspace,
     describe,
+    enforce_config_mode,
     ensure_workspace,
     load_config,
     redact_key,
@@ -51,6 +52,7 @@ from harness.loop import (  # noqa: E402
     build_system_prompt,
     client_from_config,
     make_policy,
+    prompter_is_interactive,
     run_turn,
 )
 from harness.session import SessionLog  # noqa: E402
@@ -111,6 +113,7 @@ def resolve_config_lenient(args: argparse.Namespace) -> Tuple[Config, str]:
         config.stream = not args.no_stream
         config.yolo = bool(args.yolo)
         config.compact = not args.no_compact
+        config.allow_unattended_programs = bool(getattr(args, "allow_unattended_programs", False))
         config.workspace = config.workspace or default_workspace()
         config.sessions_dir = environ.get("PYTO_HARNESS_SESSIONS_DIR") or default_sessions_dir()
         config.spill_dir = os.path.join(config.workspace, "tool-output")
@@ -187,6 +190,7 @@ def run_repair_command(args: argparse.Namespace) -> int:
     config, config_error = resolve_config_lenient(args)
     if config_error:
         print("configuration error: {} (repairing anyway)".format(config_error), file=sys.stderr)
+    warn_about_plain_http(config)
     if not config.has_api_key:
         print(
             "No API key found, and --repair asks the model for the change.\n"
@@ -208,7 +212,10 @@ def run_repair_command(args: argparse.Namespace) -> int:
         yolo=config.yolo,
         prompter=None if config.yolo else TerminalApprover(),
         allow=REPAIR_ALLOWED_TOOLS,
+        unattended_programs=bool(getattr(config, "allow_unattended_programs", False)),
+        workspace=workspace,
     )
+    registry.lock_policy()
     system_prompt = build_system_prompt(config, workspace, extra=repair.REPAIR_INSTRUCTIONS)
     client = client_from_config(config)
     printer = RepairPrinter(verbose=args.verbose)
@@ -326,9 +333,19 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--resume", metavar="SESSION", help="session .jsonl file (or a directory of them)")
     parser.add_argument("--model", help="override the model name")
     parser.add_argument("--api-base", help="override the API base URL")
-    parser.add_argument("--api-key", help="override the API key (prefer the environment variable)")
+    parser.add_argument(
+        "--api-key",
+        help="override the API key; WARNING: it is visible in `ps` and your shell history "
+        "(prefer the config file or DEEPSEEK_API_KEY)",
+    )
     parser.add_argument(
         "--yolo", action="store_true", help="skip approval for sharing, URLs, Shortcuts and the like"
+    )
+    parser.add_argument(
+        "--allow-unattended-programs",
+        action="store_true",
+        help="allow run_program in a run with no interactive approver (Shortcut/headless); "
+        "narrower than --yolo",
     )
     parser.add_argument("--dry-run", action="store_true", help="print the request that would be sent, contact nothing")
     parser.add_argument("--ui", action="store_true", help="open the Pyto chat window instead of the terminal")
@@ -344,6 +361,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--capabilities", action="store_true", help="print the device capability report and exit")
     parser.add_argument("--tools", action="store_true", help="list the tools and exit")
     parser.add_argument("--init", action="store_true", help="write a starter config file and exit")
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="with --init: overwrite an existing config file (refused by default)",
+    )
     parser.add_argument(
         "--doctor",
         action="store_true",
@@ -383,7 +405,31 @@ def resolve_config(args: argparse.Namespace, *, use_env: bool = True) -> Config:
         overrides["yolo"] = True
     if args.no_compact:
         overrides["compact"] = False
+    if getattr(args, "allow_unattended_programs", False):
+        overrides["allow_unattended_programs"] = True
     return load_config(overrides=overrides, use_env=use_env)
+
+
+def warn_about_argv_key(args: argparse.Namespace) -> None:
+    """``--api-key`` puts the credential in ``ps`` and the shell history.  Say so, once."""
+    if not getattr(args, "api_key", None):
+        return
+    print(
+        "[warning] --api-key is visible in `ps` and your shell history. Prefer the config file "
+        "(mode 0600) or the DEEPSEEK_API_KEY environment variable.",
+        file=sys.stderr,
+    )
+
+
+def warn_about_plain_http(config: Config) -> None:
+    """A plain ``http://`` base sends the key and every prompt in cleartext."""
+    if not config.api_base.lower().startswith("http://") or not config.has_api_key:
+        return
+    print(
+        "[warning] api_base uses plain http:// -- the API key and everything you send travel in "
+        "cleartext on this network. Use https:// unless this is a local server you control.",
+        file=sys.stderr,
+    )
 
 
 def print_request_preview(config: Config, system_prompt: str, task: str) -> int:
@@ -431,12 +477,26 @@ def print_request_preview(config: Config, system_prompt: str, task: str) -> int:
     return 0
 
 
-def make_options_factory(config: Config, *, prompter: Any, verbose: bool) -> Any:
-    """Build the callable that turns a session into loop options."""
+def make_options_factory(config: Config, *, prompter: Any, verbose: bool, ui: bool = False) -> Any:
+    """Build the callable that turns a session into loop options.
+
+    ``ui=True`` marks a Pyto-window session as interactive even when stdin is not a TTY:
+    the user is in the app and can see the transcript, which is what ``run_program``'s AUTO
+    status is for.  A headless/Shortcut run has neither a TTY nor a window, so there it is
+    denied unless ``--allow-unattended-programs`` (or ``--yolo``) was asked for.
+    """
     workspace = ensure_workspace(config)
     context = default_context(workspace, config.spill_dir, config=config)
     registry = build_registry(context)
-    registry.policy = make_policy(yolo=config.yolo, prompter=prompter)
+    interactive = bool(ui) or prompter_is_interactive(prompter)
+    registry.policy = make_policy(
+        yolo=config.yolo,
+        prompter=prompter,
+        unattended_programs=bool(getattr(config, "allow_unattended_programs", False)),
+        interactive=interactive,
+        workspace=workspace,
+    )
+    registry.lock_policy()
     system_prompt = build_system_prompt(config, workspace)
     client = client_from_config(config)
 
@@ -468,13 +528,32 @@ def main(argv: Optional[List[str]] = None) -> int:
     cleaned = [item for item in raw_argv if not item.startswith("task=")]
     args = parser.parse_args(cleaned)
     url_task = task_from_environment(raw_argv) or ""
+    warn_about_argv_key(args)
 
     if args.capabilities:
         print(ios.capability_report())
         return 0
     if args.init:
-        path = write_sample_config()
-        print("Wrote {} (mode 0600). Put your key in it or export DEEPSEEK_API_KEY.".format(path))
+        try:
+            path = write_sample_config(force=bool(args.force))
+        except ConfigError as exc:
+            print("{}".format(exc), file=sys.stderr)
+            return 2
+        except OSError as exc:
+            print("could not write the config: {}: {}".format(type(exc).__name__, exc), file=sys.stderr)
+            return 2
+        # Print the mode the file *has*, never the mode it was supposed to have.  The
+        # helper chmods if it can and reports the result; a failure is not swallowed.
+        mode = enforce_config_mode(path)
+        if mode == "0o600":
+            print("Wrote {} (mode 0600). Put your key in it or export DEEPSEEK_API_KEY.".format(path))
+        else:
+            print(
+                "Wrote {} but its mode is {} -- it is readable by other accounts. "
+                "Run `chmod 600 {}` before putting a key in it.".format(path, mode, path),
+                file=sys.stderr,
+            )
+            return 1
         return 0
     if args.doctor or args.fix:
         return run_doctor_command(args)
@@ -511,6 +590,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         # A Shortcut launched us with `?task=...` or PYTO_HARNESS_TASK; that is the task.
         task = url_task
 
+    warn_about_plain_http(config)
+
     if not args.dry_run:
         # A preview writes nothing, so it must not run the first-run health pass either.
         maybe_first_run_doctor(args, config)
@@ -546,15 +627,21 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 2
 
     prompter = None if config.yolo else TerminalApprover()
-    factory = make_options_factory(config, prompter=prompter, verbose=args.verbose)
+    factory = make_options_factory(config, prompter=prompter, verbose=args.verbose, ui=bool(args.ui))
 
+    approvals_line = (
+        "bypassed (--yolo)"
+        if config.yolo
+        else "ask before sharing / URLs / Shortcuts"
+        + ("; run_program allowed unattended" if config.allow_unattended_programs else "")
+    )
     banner = (
         "pyto-harness {}\n{}\nworkspace: {}\nsession  : {}\napprovals: {}".format(
             __version__,
             ios.platform_label(),
             workspace,
             session.path,
-            "bypassed (--yolo)" if config.yolo else "ask before sharing / URLs / Shortcuts",
+            approvals_line,
         )
     )
 

@@ -6,7 +6,7 @@ week's notes", "put the thing I just copied into a note" — and the agent write
 file into a workspace on the device, runs it, and tells you what happened.
 
 * **Standard library only.** No `pip install`, no `requests`, no `pydantic`. Every claim
-  in this README is checked by `stdlib_audit.py` and 528 tests.
+  in this README is checked by `stdlib_audit.py` and 585 tests.
 * **Python 3.10**, the version Pyto ships. Verified on real CPython 3.10.22 and 3.12.
 * **OpenAI-compatible API** — DeepSeek by default (`deepseek-chat`), anything
   chat-completions-shaped otherwise.
@@ -35,7 +35,24 @@ runpy.run_path("install.py", run_name="__main__")
 
 It downloads `pyto-agent` into a folder next to where Pyto starts, checks that every file
 parses as Python 3.10 and that the package imports, then prints the exact commands to run
-next — with the absolute paths for *your* device already filled in.
+next — with the absolute paths for *your* device already filled in. Every run also prints
+the **SHA-256 of the archive it downloaded**.
+
+**Pin what you install.** The installer is the one component that runs before the harness
+exists and then holds your API key, so do not take "whatever `main` is today":
+
+```python
+import sys, runpy
+sys.argv = ["install.py", "--ref", "v1.0.0"]              # a tag, not a branch
+runpy.run_path("install.py", run_name="__main__")
+# prints:  sha256 <64 hex chars>  (… bytes, v1.0.0)
+# next update, verify the same bytes:
+sys.argv = ["install.py", "--ref", "v1.0.0", "--sha256", "<that digest>"]
+runpy.run_path("install.py", run_name="__main__")
+```
+
+A digest that does not match **refuses to install and writes nothing**: the tag moved, the
+download was modified in transit, or the pin is for a different ref.
 
 Choose where it lands by passing an argument:
 
@@ -56,8 +73,8 @@ import runpy
 runpy.run_path("install.py", run_name="__main__")
 ```
 
-The file is 290 lines and imports only `argparse`, `ast`, `io`, `os`, `shutil`, `sys`,
-`urllib` and `zipfile`.
+The file is 371 lines and imports only `argparse`, `ast`, `hashlib`, `io`, `os`, `re`,
+`shutil`, `sys`, `zipfile` and `urllib`.
 
 ### Option C — download the zip on the phone or on a computer
 
@@ -121,7 +138,7 @@ started in — `os.chdir` is only there to keep relative paths (workspace, `inst
 
 > Pyto's `sys.executable` is not a real interpreter you can spawn. That is fine — the
 > harness detects this (`harness/ios.py: has_fake_subprocess()`) and runs programs
-> in-process instead. See §6.
+> in-process instead. See §6 and [SECURITY.md](SECURITY.md).
 
 ---
 
@@ -195,6 +212,7 @@ python run.py --dry-run "..."                     # print the request, contact n
 python run.py --capabilities                      # what this device can actually do
 python run.py --tools                             # list the tools and their timeouts
 python run.py --yolo "..."                        # skip approvals (see §7)
+python run.py --allow-unattended-programs "..."     # headless Shortcuts: run programs, still deny sharing/URLs
 python run.py --workspace ~/Documents/agent       # somewhere else to work
 
 python run.py --doctor                            # diagnose this installation (exit 0/1/2)
@@ -329,9 +347,22 @@ or another app) can start it without stdin.
 
 **Editing Shortcuts unattended:** a Shortcut that runs a script with sharing or URL tools
 needs someone to answer the approval prompt. In a headless Shortcut there is nobody to
-answer, so the harness **denies** those calls and the summary says so. Add `--yolo` to the
-arguments if you want that Shortcut to proceed without asking — and understand that you
-are the one who decided to pre-approve it.
+answer, so the harness **denies** those calls and the summary says so.
+
+Generated programs are treated the same way: `run_program` is auto-approved while a human
+can answer, but in a headless run it is denied unless you opt in explicitly.
+
+```python
+import sys
+sys.argv = ["run.py", "--allow-unattended-programs", "rename my screenshots by date"]
+```
+
+`--allow-unattended-programs` is **narrower than `--yolo`**: it lets the agent run the
+programs it writes, while sharing, URLs and Shortcuts still fail closed with "nothing is
+attached to answer". The trade-off in one sentence: in an unattended run an injected model
+can execute code on your device without you seeing it, so use the flag only for a Shortcut
+whose task and inputs you control — but prefer it to `--yolo`, which removes every
+approval.
 
 ### (b) A Shortcut the harness runs
 
@@ -401,32 +432,50 @@ applies the repairs a machine can and prints a before/after report. `--repair "<
 lets the model change the harness's own source, subject to a path jail, an AST/stdlib
 pre-check, a snapshot with hashes, and the offline test suite as the gate: a red suite
 reverts the edit byte-for-byte and hands back the failure verbatim. A bounded gate (~3 s,
-227 tests) is the default; `--deep-tests` asks for all 528.
+227 tests) is the default; `--deep-tests` asks for all 585.
 
 **The full story — the three tiers, the guardrail list, what is deliberately not automated,
 and a worked transcript — is in [SELF-REPAIR.md](SELF-REPAIR.md).**
 
 ## 7. Safety
 
+The full model — threat model, what approvals do *not* protect against, what is enforced
+versus policy-level, key handling, data at rest and how to wipe it — is
+**[SECURITY.md](SECURITY.md)**. The short version:
+
 * **Approval is a policy function, not a prompt string.** It is evaluated *before*
-  dispatch, so no tool can take a path that skips it. Workspace file work and reads are
-  auto-approved; **sharing text, opening external URLs, running Shortcuts, writing to the
-  calendar or photo library, notifications, speech and the background keepalive all need a
-  yes** unless you pass `--yolo`.
+  dispatch, so no tool can take a path that skips it; a policy that raises or returns
+  anything but a decision denies. Workspace file work and reads are auto-approved;
+  **sharing text, opening external URLs, running Shortcuts, writing to the calendar or
+  photo library, notifications, speech and the background keepalive all need a yes** unless
+  you pass `--yolo`. The prompt shows the whole argument (up to 4 000 characters, with an
+  explicit "...(N more characters)" marker), and for `run_program` the program's path and
+  the SHA-256 of the bytes that will run.
 * With no interactive terminal (a Shortcut, a pipe, a cron-ish run) there is nobody to
-  answer, so those calls are **denied**, not allowed. Failing closed is the whole point.
-* **The workspace is a jail.** `write_program("../escape.py")`, absolute paths outside the
-  workspace, and symlinks pointing out are all refused, checked on the real path.
+  answer, so those calls are **denied**, not allowed — and so is `run_program`, unless you
+  pass `--allow-unattended-programs` (or set `allow_unattended_programs: true`). Failing
+  closed is the whole point.
+* **`run_program` is the hole in the model, and this is the honest part.** On iOS a
+  generated program runs *inside this process*, so it can read what the app can read,
+  including `~/.pyto_harness/config.json` and the session logs. The key is removed from its
+  environment and scrubbed out of logs and spills, but it is not out of reach of code
+  running in-process. Treat a program the agent wrote as code you are about to run.
+* **The workspace is a jail for the file tools.** `write_program("../escape.py")`, absolute
+  paths outside the workspace, and symlinks pointing out are all refused, checked on the
+  real path. A *program* ignores the jail — it uses plain file I/O.
 * **Nothing is deleted by the harness.** It writes files and runs programs; `run_program`
-  can of course do anything you asked the model to write, which is why you should read a
-  program before running it on data you care about.
-* `--dry-run` contacts nothing. Run it first when you are unsure what a task will do.
+  can of course do anything you asked the model to write.
+* `--dry-run` contacts nothing, and redacts credential-shaped headers and URL userinfo.
+  Run it first when you are unsure what a task will do.
 * **The self-repair gate refuses to touch `tests/`**, so an edit cannot weaken the suite that
   judges it, and `harness/repair.py` cannot be edited by the gate it implements. Source
   snapshots contain only `harness/*.py` and `run.py` — never a key, a session log or a
-  workspace file.
-* Session logs live in `~/.pyto_harness/sessions/` and contain your prompts and the
-  model's replies. Delete them when you are done with them.
+  workspace file — and their manifests are signed with a per-install key, so a snapshot
+  dropped into `backups/` by anything else is refused instead of restored.
+* Sessions, memory and spill files are **plaintext**, created `0600` in `0700` directories
+  (the doctor reports and fixes looser modes). They hold your prompts, the model's replies
+  and whatever the agent read. Delete them when you are done with them; SECURITY.md §6 has
+  the list.
 
 ---
 
@@ -465,11 +514,11 @@ harness/
   budget.py            the size limits that keep iOS from killing the process
   textbudget.py        head/tail truncation with spill-to-file
   ui.py                Pyto UI window, terminal REPL, terminal approval prompt
-  doctor.py            self-diagnosis: 19 structured checks + the fixes a machine can apply
+  doctor.py            self-diagnosis: 20 structured checks + the fixes a machine can apply
   repair.py            self-repair: path-jailed, snapshot-first, test-gated source edits
   pyto_api.py          Pyto library grounding: 25 modules / 160 members, curated + introspected
   errors.py            error taxonomy with retryability
-tests/                 528 offline tests against a stdlib mock OpenAI server
+tests/                 585 offline tests against a stdlib mock OpenAI server
 examples/              three programs the agent is expected to be able to write
 stdlib_audit.py        proves "stdlib only" and "parses as Python 3.10"
 ```
@@ -477,7 +526,7 @@ stdlib_audit.py        proves "stdlib only" and "parses as Python 3.10"
 ## 10. Verifying it yourself
 
 ```bash
-python3 -m unittest discover -s tests -t .     # 528 tests, offline, no network (~20 s)
+python3 -m unittest discover -s tests -t .     # 585 tests, offline, no network (~22 s)
 python3 stdlib_audit.py                        # third_party_modules: [], 16 files parse at (3,10)
 python3 run.py --dry-run "hello"               # prints the request, sends nothing
 python3 run.py --doctor                        # health report, exit 0 healthy / 1 fixable / 2 human

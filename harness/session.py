@@ -31,6 +31,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from .errors import SessionFormatError
+from .security import mkdir_private, open_private, scrub_value
 
 CURRENT_VERSION = 1
 HEADER_KIND = "header"
@@ -72,7 +73,11 @@ def now_ms() -> int:
 
 
 def redact(payload: Mapping[str, Any]) -> Dict[str, Any]:
-    """Recursively replace credential-looking values.  Applied before anything hits disk."""
+    """Recursively replace credential-looking values.  Applied before anything hits disk.
+
+    Key-name based (``api_key``, ``token``, …) *and* value-shape based, so a bare secret
+    that arrived under an innocent key name is scrubbed too.
+    """
     out: Dict[str, Any] = {}
     for key, value in payload.items():
         if any(marker in str(key).lower() for marker in _SECRET_MARKERS):
@@ -80,9 +85,9 @@ def redact(payload: Mapping[str, Any]) -> Dict[str, Any]:
         elif isinstance(value, Mapping):
             out[key] = redact(value)
         elif isinstance(value, list):
-            out[key] = [redact(v) if isinstance(v, Mapping) else v for v in value]
+            out[key] = [redact(v) if isinstance(v, Mapping) else scrub_value(v) for v in value]
         else:
-            out[key] = value
+            out[key] = scrub_value(value)
     return out
 
 
@@ -263,9 +268,9 @@ class SessionLog:
         header = header or SessionHeader(workspace=workspace)
         if config:
             header.config.update(config)
-        os.makedirs(os.path.dirname(resolved) or ".", exist_ok=True)
+        mkdir_private(os.path.dirname(resolved) or ".")
         log = cls(header, path=resolved)
-        log._handle = open(resolved, "a", encoding="utf-8")
+        log._handle = open_private(resolved, append=True)
         log._append_row(header.to_wire())
         log._flush(sync=True)
         return log
@@ -279,7 +284,10 @@ class SessionLog:
         log = cls(header, events, path=resolved)
         log.warnings.extend(warnings)
         if writable:
-            log._handle = open(resolved, "a", encoding="utf-8")
+            # 0600 at creation and tightened if an older run (or another tool) left the
+            # log group-readable.  A chmod that cannot happen raises instead of leaving
+            # the session readable by everything on the device.
+            log._handle = open_private(resolved, append=True)
         return log
 
     @classmethod
@@ -328,7 +336,12 @@ class SessionLog:
             raise SessionFormatError("session log is not open for writing")
         seq = self._next_seq
         event = SessionEvent(
-            seq=seq, type=type, time=now_ms() if time is None else int(time), data=dict(data or {})
+            seq=seq,
+            type=type,
+            time=now_ms() if time is None else int(time),
+            # Every row is scrubbed by shape on the way in: a tool result that echoed the
+            # key, or a provider error body that quoted it, must not become durable state.
+            data=scrub_value(dict(data or {})),
         )
         self._append_row(event.to_wire())
         self._flush(sync=True)
@@ -416,7 +429,7 @@ class SessionLog:
             return None
         temporary = path + ".compact"
         try:
-            with open(temporary, "w", encoding="utf-8") as handle:
+            with open_private(temporary, truncate=True) as handle:
                 handle.write(
                     json.dumps(self.header.to_wire(), separators=(",", ":"), ensure_ascii=False, sort_keys=False)
                     + "\n"
@@ -436,7 +449,7 @@ class SessionLog:
                 self._handle.close()
             os.replace(temporary, path)
             if self._handle is not None:
-                self._handle = open(path, "a", encoding="utf-8")
+                self._handle = open_private(path, append=True)
         except OSError:
             try:
                 os.unlink(temporary)

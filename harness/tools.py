@@ -24,7 +24,9 @@ The contract, and why each part exists:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import inspect
+import json
 import queue
 import threading
 import time
@@ -119,15 +121,31 @@ class ToolDef:
 
 
 class ToolRegistry:
-    """Name -> :class:`ToolDef`, plus validation, approval and concurrent dispatch."""
+    """Name -> :class:`ToolDef`, plus validation, approval and concurrent dispatch.
+
+    **The approval policy is sealed state.**  It is held in a name-mangled attribute and,
+    once :meth:`lock_policy` has been called (``LoopOptions`` does it at construction), the
+    authoritative reference is a *second* private slot that the public ``policy`` property
+    can no longer move.  This is not a security boundary — code running in this process
+    through ``run_program`` can read the mangled attribute too, and no in-process trick
+    changes that.  It removes the easy, accidental and copy-paste attacks (rebinding the
+    obvious public attribute, ``registry.policy = None``, ``registry.policy = lambda: True``)
+    and it makes an attempt *loud*: the check denies and says the policy was replaced.
+    """
 
     def __init__(self, *, policy: Optional[PolicyFn] = None) -> None:
         self._tools: Dict[str, ToolDef] = {}
-        self.policy = policy
+        # Mangled so a caller cannot reach it by name without knowing the class.
+        self.__policy = policy
+        #: The reference the dispatcher actually uses once the policy is sealed.
+        self.__sealed = None
+        self._policy_locked = False
         #: name -> invocation count, for diagnostics.
         self.invocations: Dict[str, int] = {}
         #: Every approval decision, in order: ``(tool, allowed, reason)``.
         self.approvals: List[Tuple[str, bool, str]] = []
+        #: Deny memory: ``(tool, argument digest) -> times denied`` (see :meth:`check`).
+        self.denials: Dict[Tuple[str, str], int] = {}
 
     # -- registration --------------------------------------------------------------
 
@@ -199,22 +217,94 @@ class ToolRegistry:
 
     # -- approval ------------------------------------------------------------------
 
-    def check(self, name: str, arguments: Mapping[str, Any]) -> Decision:
-        """Run the policy.  A policy that raises denies the call: fail closed."""
-        if self.policy is None:
-            return Decision.allow()
+    @property
+    def policy(self) -> Optional[PolicyFn]:
+        """The configured policy.  Read-only once :meth:`lock_policy` has run."""
+        return self.__policy
+
+    @policy.setter
+    def policy(self, value: Optional[PolicyFn]) -> None:
+        if self._policy_locked:
+            raise AttributeError(
+                "the approval policy of this registry is sealed for the session and cannot be rebound"
+            )
+        self.__policy = value
+
+    def lock_policy(self) -> None:
+        """Capture the current policy as the authoritative one for this session.
+
+        Called by ``LoopOptions.__post_init__``, so a turn always approves against the
+        policy the options were built with, not against whatever the attribute says later.
+        """
+        self.__sealed = self.__policy
+        self._policy_locked = True
+
+    @property
+    def policy_locked(self) -> bool:
+        return self._policy_locked
+
+    def _active_policy(self) -> Any:
+        return self.__sealed if self._policy_locked else self.__policy
+
+    @staticmethod
+    def _argument_digest(arguments: Mapping[str, Any]) -> str:
         try:
-            outcome = self.policy(name, arguments)
+            payload = json.dumps(arguments, sort_keys=True, default=repr)
+        except (TypeError, ValueError):  # pragma: no cover - default=repr makes this rare
+            payload = repr(arguments)
+        return hashlib.sha256(payload.encode("utf-8", "replace")).hexdigest()[:16]
+
+    def check(self, name: str, arguments: Mapping[str, Any]) -> Decision:
+        """Run the policy.  Everything that is not an explicit allow denies.
+
+        Fail-closed rules: a policy that raises, returns ``None``, or returns anything
+        that is not a ``bool`` or a :class:`Decision` denies.  A deny is remembered per
+        ``(tool, arguments)`` so a model that repeats the same call is refused without the
+        user being asked again — the retry storm moves the human from "decides" to
+        "dismisses".
+        """
+        policy = self._active_policy()
+        if self._policy_locked and self.__policy is not self.__sealed:
+            decision = Decision.deny("the approval policy was replaced after this session started")
+            self.approvals.append((name, False, decision.reason))
+            return decision
+        if policy is None:
+            # No approval policy was ever attached: a bare registry in a unit test or a
+            # standalone call.  The CLI always attaches one (and locks it), and a locked
+            # registry cannot be walked back to this state — the guard above catches even a
+            # direct write to the private slot.
+            return Decision.allow()
+        key = (name, self._argument_digest(arguments))
+        denial = self.denials.get(key)
+        if denial:
+            self.denials[key] = denial + 1
+            decision = Decision.deny(
+                "this exact {} call was already denied in this session; it will not be approved again".format(name)
+            )
+            self.approvals.append((name, False, decision.reason))
+            return decision
+        try:
+            outcome = policy(name, arguments)
         except Exception as exc:  # noqa: BLE001 - a broken policy must not open the gate
-            return Decision.deny("approval policy raised {}: {}".format(type(exc).__name__, exc))
-        if isinstance(outcome, Decision):
-            decision = outcome
-        elif isinstance(outcome, bool):
-            decision = Decision.allow() if outcome else Decision.deny("policy returned False")
-        elif outcome is None:
-            decision = Decision.allow()
+            decision = Decision.deny("approval policy raised {}: {}".format(type(exc).__name__, exc))
         else:
-            decision = Decision.allow() if outcome else Decision.deny("policy returned {!r}".format(outcome))
+            if isinstance(outcome, Decision):
+                decision = outcome
+            elif isinstance(outcome, bool):
+                decision = Decision.allow() if outcome else Decision.deny("policy returned False")
+            else:
+                # None, a string, a truthy object: all of it is "the policy did not say yes".
+                decision = Decision.deny(
+                    "the approval policy returned {!r}, which is not a decision; denying".format(outcome)
+                )
+        if not decision.allowed:
+            # The model is told once, on the first denial, that repeats are final.
+            self.denials[key] = 1
+            decision = Decision.deny(
+                "{} (repeating this exact call will be denied without asking again)".format(
+                    decision.reason or "no reason given"
+                )
+            )
         self.approvals.append((name, decision.allowed, decision.reason))
         return decision
 

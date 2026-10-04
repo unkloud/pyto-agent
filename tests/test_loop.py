@@ -68,7 +68,10 @@ class TestSystemPrompt(TempDirTestCase):
 
 class TestApprovalPolicy(unittest.TestCase):
     def test_workspace_and_read_tools_are_auto_approved(self) -> None:
-        policy = make_policy()
+        # `interactive=True` is what the CLI passes when a human can answer (a TTY, or
+        # --ui); run_program stays AUTO there.  With nothing attached it is denied and
+        # needs the explicit opt-in — see TestUnattendedPrograms in test_hardening.py.
+        policy = make_policy(interactive=True)
         for name in ("write_program", "run_program", "read_file", "list_files", "memory_read", "finish"):
             self.assertTrue(policy(name, {}).allowed, name)
 

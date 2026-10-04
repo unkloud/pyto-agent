@@ -136,13 +136,19 @@ class Printer:
 
 
 def _brief_args(arguments: Any, limit: int = 120) -> str:
+    """The one-line status summary shown *before* the approval prompt.
+
+    Deliberately short — the prompt itself (``ApprovalRequest.describe``) is what the user
+    decides on, and that one shows the whole value up to a few thousand characters.  A cut
+    here is still marked explicitly rather than trailing off into a bare "...".
+    """
     if not isinstance(arguments, dict):
         return ""
     parts = []
     for key, value in arguments.items():
         rendered = repr(value)
         if len(rendered) > 60:
-            rendered = rendered[:57] + "..."
+            rendered = "{}...(+{} chars)".format(rendered[:40], len(rendered) - 40)
         parts.append("{}={}".format(key, rendered))
     joined = ", ".join(parts)
     return joined if len(joined) <= limit else joined[: limit - 3] + "..."

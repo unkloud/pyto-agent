@@ -31,6 +31,7 @@ from __future__ import annotations
 import ast
 import difflib
 import hashlib
+import hmac
 import json
 import os
 import posixpath
@@ -45,6 +46,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from . import doctor
 from .config import Config
+from .security import mkdir_private, open_private, write_private
 
 #: Writable paths, relative to the harness root.  Everything else is refused.
 ALLOWED_PREFIXES = ("harness/",)
@@ -295,6 +297,119 @@ def _sha256(path: str) -> str:
     return digest.hexdigest()
 
 
+# --------------------------------------------------------------------------------------
+# Manifest signing
+# --------------------------------------------------------------------------------------
+#
+# A snapshot used to be an ordinary writable directory plus a manifest whose hashes were
+# computed by whoever wrote it — so anything that could create a directory under
+# ``backups/`` could have ``restore_backup`` write an arbitrary ``harness/*.py`` (including
+# this file, which the edit gate refuses).  The manifest is now authenticated with an HMAC
+# keyed by a per-install secret that lives **outside** the backup tree, at 0600:
+#
+#   <state>/backup.key      the key (32 random bytes, hex)
+#   <state>/backups/<id>/   the signed snapshot
+#
+# The honest limit: on iOS the same process holds the key in memory while it runs, so a
+# program running in-process could read it.  A key the process cannot reach needs the
+# iOS Keychain, which this harness does not use.  What signing does buy is that a backup
+# *directory* dropped into ``backups/`` by another app, a Shortcut, a sync conflict or a
+# stale copy is refused instead of restored, and that any tampering with a payload is a
+# hard refusal instead of a warning.
+
+#: Manifest signature algorithm, recorded so a future change can migrate.
+SIGNATURE_ALG = "hmac-sha256"
+#: Name of the signing key inside the state dir (never inside a backup directory).
+BACKUP_KEY_NAME = "backup.key"
+#: Random key size.
+BACKUP_KEY_BYTES = 32
+
+
+def _backups_dir_for(root: str, backups_dir: Optional[str]) -> str:
+    """The backups directory a snapshot/restore actually uses for ``root``."""
+    return backups_dir or os.path.join(_state_for(root), "backups")
+
+
+def backup_key_path(backups_dir: str) -> str:
+    """Where the signing key lives: beside ``backups/``, never inside it."""
+    return os.path.join(os.path.dirname(os.path.abspath(backups_dir)), BACKUP_KEY_NAME)
+
+
+def _load_key(key_path: str, *, create: bool) -> bytes:
+    """Read (or create) the per-install signing key.  Raises OSError when unusable."""
+    try:
+        with open(key_path, "rb") as handle:
+            data = handle.read().strip()
+        if len(data) >= 32:
+            return data
+    except OSError:
+        if not create:
+            raise FileNotFoundError(key_path)
+    if not create:
+        raise FileNotFoundError(key_path)
+    mkdir_private(os.path.dirname(key_path) or ".")
+    fresh = os.urandom(BACKUP_KEY_BYTES).hex().encode("ascii")
+    try:
+        write_private(key_path, fresh, exclusive=True)
+    except FileExistsError:  # pragma: no cover - a concurrent snapshot won the race
+        with open(key_path, "rb") as handle:
+            return handle.read().strip()
+    return fresh
+
+
+def _manifest_payload(manifest: Mapping[str, Any]) -> bytes:
+    """The canonical bytes the signature covers: identity + every file hash."""
+    files = manifest.get("files") or {}
+    canonical = {
+        "version": manifest.get("version"),
+        "id": manifest.get("id"),
+        "label": manifest.get("label"),
+        "created_at": manifest.get("created_at"),
+        "root": manifest.get("root"),
+        "files": {
+            str(rel): {"sha256": (item or {}).get("sha256"), "size": (item or {}).get("size")}
+            for rel, item in sorted(files.items())
+        },
+    }
+    return json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+def sign_manifest(manifest: Dict[str, Any], backups_dir: str) -> Dict[str, Any]:
+    """Attach an HMAC over the manifest's file hashes.  Creates the key if needed."""
+    key = _load_key(backup_key_path(backups_dir), create=True)
+    manifest["signature"] = {
+        "alg": SIGNATURE_ALG,
+        "value": hmac.new(key, _manifest_payload(manifest), hashlib.sha256).hexdigest(),
+    }
+    return manifest
+
+
+def verify_manifest(manifest: Mapping[str, Any], backups_dir: str) -> str:
+    """``""`` when the manifest is signed by this installation, else the reason it is not."""
+    signature = manifest.get("signature")
+    if not isinstance(signature, Mapping) or not signature.get("value"):
+        return (
+            "the snapshot manifest is not signed, so this installation cannot tell who wrote it; "
+            "refusing to restore it (snapshots taken by an older build must be re-created)"
+        )
+    if signature.get("alg") not in (None, SIGNATURE_ALG):
+        return "the snapshot manifest uses an unsupported signature ({!r})".format(signature.get("alg"))
+    try:
+        key = _load_key(backup_key_path(backups_dir), create=False)
+    except OSError:
+        return (
+            "the backup signing key {!r} is missing, so the manifest cannot be verified; "
+            "refusing to restore".format(backup_key_path(backups_dir))
+        )
+    expected = hmac.new(key, _manifest_payload(manifest), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(expected, str(signature.get("value"))):
+        return (
+            "the snapshot manifest signature does not match this installation's key: the manifest "
+            "was modified (or written by another installation). Refusing to restore it."
+        )
+    return ""
+
+
 def _snapshot_into(backup_dir: str, root: str, label: str, relative: Optional[Sequence[str]] = None) -> Dict[str, Any]:
     files = list(relative) if relative is not None else _iter_sources(root)
     manifest: Dict[str, Any] = {
@@ -312,7 +427,7 @@ def _snapshot_into(backup_dir: str, root: str, label: str, relative: Optional[Se
         if not os.path.isfile(source):
             continue
         destination = os.path.join(backup_dir, *rel.split("/"))
-        os.makedirs(os.path.dirname(destination), exist_ok=True)
+        mkdir_private(os.path.dirname(destination))
         shutil.copyfile(source, destination)
         mode = stat.S_IMODE(os.stat(source).st_mode)
         try:
@@ -324,8 +439,11 @@ def _snapshot_into(backup_dir: str, root: str, label: str, relative: Optional[Se
             "size": os.path.getsize(destination),
             "mode": oct(mode),
         }
-    with open(os.path.join(backup_dir, "manifest.json"), "w", encoding="utf-8") as handle:
-        json.dump(manifest, handle, indent=2, sort_keys=True)
+    sign_manifest(manifest, os.path.dirname(backup_dir))
+    write_private(
+        os.path.join(backup_dir, "manifest.json"),
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+    )
     return manifest
 
 
@@ -354,6 +472,7 @@ def snapshot(
     backup_id = "{}-{}-{}".format(time.strftime("%Y%m%d-%H%M%S"), safe_label or "manual", uuid.uuid4().hex[:6])
     backup_dir = os.path.join(target_dir, backup_id)
     try:
+        mkdir_private(target_dir)
         os.makedirs(backup_dir, exist_ok=False)
         manifest = _snapshot_into(backup_dir, resolved_root, safe_label or "manual")
     except OSError as exc:
@@ -373,12 +492,18 @@ def snapshot(
     )
 
 
-def load_manifest(backup_id: str, *, backups_dir: Optional[str] = None) -> Dict[str, Any]:
+def load_manifest(
+    backup_id: str, *, backups_dir: Optional[str] = None, verify: bool = False
+) -> Dict[str, Any]:
     directory = _backup_path(backup_id, backups_dir)
     with open(os.path.join(directory, "manifest.json"), "r", encoding="utf-8") as handle:
         payload = json.load(handle)
     if not isinstance(payload, dict):
         raise RepairRefused("refused", "{} has a malformed manifest".format(backup_id))
+    if verify:
+        problem = verify_manifest(payload, backups_dir or os.path.dirname(directory))
+        if problem:
+            raise RepairRefused("refused", problem)
     return payload
 
 
@@ -420,6 +545,10 @@ def list_backups(*, backups_dir: Optional[str] = None) -> List[Dict[str, Any]]:
             bytes=sum(int(item.get("size") or 0) for item in files.values()),
             harness_version=str(manifest.get("harness_version") or "?"),
         )
+        signature_problem = verify_manifest(manifest, directory)
+        entry["verified"] = not signature_problem
+        if signature_problem:
+            entry["unverified"] = signature_problem
         entries.append(entry)
     entries.sort(key=lambda item: (item.get("created_at") or 0, item["id"]), reverse=True)
     return entries
@@ -826,10 +955,13 @@ def restore(
 ) -> RepairResult:
     """Put a snapshot back, then run the same test gate.
 
-    A restore is not silently trusted: the current tree is snapshotted first (so the
-    restore itself is undoable), every file's hash is checked against the manifest, and
-    the suite runs afterwards.  If it fails, the result says so loudly — that is a real
-    possibility when tests or the config changed after the snapshot was taken.
+    A restore is not trusted at all before it writes: the manifest must carry a valid HMAC
+    for this installation, every payload is read and hashed, every target path must pass
+    the repair jail, and **only then** is anything written.  A missing signature, a
+    modified manifest or a single mismatched byte is a refusal that names what it found —
+    the old behaviour (warn about the mismatch and restore the tampered bytes anyway) made
+    ``restore_backup`` a write primitive for whatever could create a directory under
+    ``backups/``.
     """
     if getattr(_ACTIVE, "repairing", False):
         return RepairResult(
@@ -848,9 +980,57 @@ def restore(
         return RepairResult(
             False, "refused", path=backup_id, reason="cannot read the manifest: {}: {}".format(type(exc).__name__, exc)
         )
+    signing_dir = backups_dir or os.path.dirname(directory)
+    try:
+        signature_problem = verify_manifest(manifest, signing_dir)
+    except OSError as exc:  # pragma: no cover - unreadable key file
+        signature_problem = "the backup signing key could not be read: {}: {}".format(type(exc).__name__, exc)
+    if signature_problem:
+        return RepairResult(False, "refused", path=backup_id, reason=signature_problem)
     files = manifest.get("files") or {}
     if not files:
         return RepairResult(False, "refused", path=backup_id, reason="the snapshot is empty")
+
+    # Phase 1: read and verify *everything* before writing anything.  A refusal must not
+    # leave the tree half-restored.
+    payloads: List[Tuple[str, str, bytes]] = []
+    for relative, item in sorted(files.items()):
+        try:
+            target = _resolve_target(resolved_root, relative, allow_protected=True)
+        except RepairRefused as refusal:
+            return RepairResult(
+                False,
+                refusal.decision,
+                path=relative,
+                reason="the snapshot names a path outside the restorable set: {}".format(refusal.reason),
+            )
+        source = os.path.join(directory, *relative.split("/"))
+        try:
+            with open(source, "rb") as handle:
+                payload = handle.read()
+        except OSError as exc:
+            return RepairResult(
+                False,
+                "refused",
+                path=backup_id,
+                reason="the snapshot is missing {}: {}: {}".format(relative, type(exc).__name__, exc),
+            )
+        digest = hashlib.sha256(payload).hexdigest()
+        if digest != item.get("sha256"):
+            return RepairResult(
+                False,
+                "refused",
+                path=relative,
+                reason=(
+                    "REFUSING TO RESTORE: {} in snapshot {} does not match its signed manifest hash "
+                    "(expected {}, found {}). The snapshot has been modified; nothing was written.".format(
+                        relative, backup_id, item.get("sha256"), digest
+                    )
+                ),
+                warnings=["the backup directory was tampered with; re-create the snapshot before restoring"],
+            )
+        payloads.append((relative, target, payload))
+
     _ACTIVE.repairing = True
     try:
         warnings: List[str] = []
@@ -860,28 +1040,9 @@ def restore(
         else:
             warnings.append("could not snapshot the current tree before restoring: {}".format(pre.reason))
         restored: List[str] = []
-        mismatched: List[str] = []
-        for relative, item in sorted(files.items()):
-            source = os.path.join(directory, *relative.split("/"))
+        for relative, target, payload in payloads:
             try:
-                with open(source, "rb") as handle:
-                    payload = handle.read()
-            except OSError as exc:
-                return RepairResult(
-                    False,
-                    "refused",
-                    path=backup_id,
-                    reason="the snapshot is missing {}: {}: {}".format(relative, type(exc).__name__, exc),
-                    warnings=warnings,
-                )
-            digest = hashlib.sha256(payload).hexdigest()
-            if digest != item.get("sha256"):
-                mismatched.append(relative)
-            try:
-                target = _resolve_target(resolved_root, relative, allow_protected=True)
                 _write_bytes(target, payload)
-            except RepairRefused as refusal:
-                return RepairResult(False, refusal.decision, path=relative, reason=refusal.reason, warnings=warnings)
             except OSError as exc:
                 return RepairResult(
                     False,
@@ -891,10 +1052,6 @@ def restore(
                     warnings=warnings,
                 )
             restored.append(relative)
-        if mismatched:
-            warnings.append(
-                "these snapshot files did not match their manifest hash: {}".format(", ".join(mismatched))
-            )
         present = set(_iter_sources(resolved_root))
         extra = sorted(present - set(files))
         if extra:

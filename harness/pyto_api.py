@@ -39,6 +39,8 @@ import re
 import types
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
+from .security import mkdir_private, write_private
+
 #: Bumped whenever the catalogue below changes in a way that should refresh ``PYTO_LIBS.md``.
 CATALOGUE_VERSION = 1
 
@@ -2215,11 +2217,12 @@ def save_cache(modules: Dict[str, Any], state_dir: Optional[str] = None) -> bool
         "modules": modules,
     }
     try:
-        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        mkdir_private(os.path.dirname(path) or ".")
         temporary = path + ".tmp"
-        with open(temporary, "w", encoding="utf-8") as handle:
-            json.dump(payload, handle, indent=2, sort_keys=True)
+        write_private(temporary, json.dumps(payload, indent=2, sort_keys=True) + "\n")
         os.replace(temporary, path)
+        if os.name == "posix":
+            os.chmod(path, 0o600)
         return True
     except OSError:
         return False

@@ -31,6 +31,15 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 from . import budget, doctor, ios, pyto_api, repair
 from .config import Config, ConfigError, load_config
 from .errors import ToolError
+from .security import (
+    chmod_private as security_chmod,
+    mkdir_private,
+    open_private,
+    scrub_secrets,
+    scrubbed_environ,
+    temporary_environ_scrub,
+    write_private,
+)
 from .tools import ToolDef, ToolRegistry, ToolResult
 
 #: Never read more than this into the conversation from one file.
@@ -83,7 +92,10 @@ class Workspace:
 
     def __init__(self, root: str) -> None:
         self.root = os.path.abspath(os.path.expanduser(root))
-        os.makedirs(self.root, exist_ok=True)
+        # 0700: the workspace holds the user's programs, the memory store and every spill
+        # file (the complete output the model was not shown).  Created private, not
+        # chmod'ed later.
+        mkdir_private(self.root)
 
     def resolve(self, relative: str, *, must_exist: bool = False) -> str:
         """Map a model-supplied path to an absolute path inside the workspace."""
@@ -293,6 +305,9 @@ def build_registry(context: ToolContext) -> ToolRegistry:
         sections = [header]
         if outcome.get("note"):
             sections.append(outcome["note"])
+        if not outcome.get("timeout_enforced", True):
+            # Never claim a bound that did not hold.
+            sections.append("timeout enforced: false (the program removed the cooperative timeout)")
         sections.append("--- stdout ---\n{}".format(outcome["stdout"].rstrip() or "<empty>"))
         if outcome["stderr"].strip():
             sections.append("--- stderr ---\n{}".format(outcome["stderr"].rstrip()))
@@ -306,6 +321,7 @@ def build_registry(context: ToolContext) -> ToolRegistry:
             metadata={
                 "returncode": outcome["returncode"],
                 "timed_out": outcome["timed_out"],
+                "timeout_enforced": bool(outcome.get("timeout_enforced", True)),
                 "mode": outcome["mode"],
                 "capture_path": outcome.get("capture_path"),
                 "stdout_chars": len(outcome["stdout"]),
@@ -1273,7 +1289,8 @@ def _load_memory(context: ToolContext) -> Dict[str, Any]:
     except (OSError, ValueError):
         # A corrupt memory file must not break the turn; keep the bad copy for the user.
         try:
-            shutil.copyfile(path, path + ".corrupt")
+            with open(path, "rb") as handle:
+                write_private(path + ".corrupt", handle.read())
         except OSError:  # pragma: no cover - filesystem dependent
             pass
         return {}
@@ -1302,12 +1319,15 @@ def _save_memory(context: ToolContext, facts: Mapping[str, Any]) -> None:
         "updated_at": int(time.time()),
         "facts": {str(k): v for k, v in facts.items()},
     }
-    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    mkdir_private(os.path.dirname(path) or ".")
     temporary = path + ".tmp"
-    with open(temporary, "w", encoding="utf-8") as handle:
+    with open_private(temporary, truncate=True) as handle:
         json.dump(payload, handle, indent=2, ensure_ascii=False, sort_keys=True)
         handle.write("\n")
     os.replace(temporary, path)  # atomic: an iOS kill cannot leave half a memory file
+    if os.name == "posix":
+        # os.replace keeps the mode of the temporary; make the final name owner-only too.
+        security_chmod(path)
 
 
 def _render_fact(value: Any) -> str:
@@ -1370,6 +1390,10 @@ def _run_subprocess_file(
         "stderr": subprocess.PIPE,
         "stdin": subprocess.DEVNULL,
         "cwd": cwd,
+        # The child is a program the model wrote: it gets no API key and no
+        # PYTO_HARNESS_* configuration.  A real process boundary is the only place the
+        # harness can enforce that, which is exactly why it is enforced here.
+        "env": scrubbed_environ(),
     }
     if hasattr(os, "setsid"):
         # Its own session/process group, so a timeout can kill the whole tree rather
@@ -1416,6 +1440,7 @@ def _run_subprocess_file(
         "stderr": _decode(streams["stderr"]),
         "returncode": returncode,
         "timed_out": timed_out,
+        "timeout_enforced": True,  # a real process group was killed at the deadline
         "duration_s": time.monotonic() - started,
         "note": note,
         "capture_path": capture_path,
@@ -1490,16 +1515,71 @@ def _spill_capture(cwd: str, target: Optional[str], streams: Mapping[str, Mappin
     name = os.path.basename(target) if target else "inline"
     directory = os.path.join(cwd, "tool-output")
     try:
-        os.makedirs(directory, exist_ok=True)
+        mkdir_private(directory)
         path = os.path.join(directory, "run-{}-{}.log".format(name.replace(".py", ""), int(time.time() * 1000)))
-        with open(path, "w", encoding="utf-8") as handle:
-            handle.write("### stdout\n")
-            handle.write(_decode(streams["stdout"]))
-            handle.write("\n### stderr\n")
-            handle.write(_decode(streams["stderr"]))
+        body = "### stdout\n{}\n### stderr\n{}".format(
+            _decode(streams["stdout"]), _decode(streams["stderr"])
+        )
+        write_private(path, scrub_secrets(body))
         return path
     except OSError:  # pragma: no cover - filesystem dependent
         return None
+
+
+class _BoundedTextSink(io.TextIOBase):
+    """A write-through stdout/stderr sink that keeps at most ``limit`` characters.
+
+    The previous shape was an unbounded :class:`io.StringIO` truncated *after* the program
+    finished, so a program printing 64 MiB grew the process by 64 MiB before the
+    20 000-character cap applied — on a phone with a ~500 MB watchdog that is exactly the
+    crash the cap is documented to prevent.  This sink counts what it drops instead of
+    keeping it, so peak memory is O(cap) rather than O(output).
+    """
+
+    def __init__(self, limit: int) -> None:
+        super().__init__()
+        self._limit = max(0, int(limit))
+        self._chunks: List[str] = []
+        self._kept = 0
+        self._dropped = 0
+
+    # -- io.TextIOBase surface a program (or `print`) may touch ---------------------
+
+    def writable(self) -> bool:
+        return True
+
+    def isatty(self) -> bool:
+        return False
+
+    def flush(self) -> None:  # nothing is buffered outside the process
+        return None
+
+    @property  # type: ignore[override]
+    def encoding(self) -> str:
+        return "utf-8"
+
+    def write(self, text: Any) -> int:
+        if not isinstance(text, str):
+            text = str(text)
+        room = self._limit - self._kept
+        if room > 0:
+            kept = text[:room]
+            self._chunks.append(kept)
+            self._kept += len(kept)
+        if len(text) > room:
+            self._dropped += len(text) - max(room, 0)
+        return len(text)
+
+    def value(self) -> str:
+        """The kept prefix plus the same marker ``_cap`` used to append."""
+        text = "".join(self._chunks)
+        if self._dropped:
+            text += "\n... [{} more characters]".format(self._dropped)
+        return text
+
+    @property
+    def dropped_chars(self) -> int:
+        return self._dropped
 
 
 def _run_in_process(
@@ -1516,11 +1596,15 @@ def _run_in_process(
     The timeout is enforced by a trace function that raises between bytecode boundaries.
     That means it **does** interrupt a pure-Python loop (the common case for a runaway
     script) and it **cannot** interrupt a program blocked inside a C call — DNS, a socket
-    read, a large decode.  The honest consequence is documented in the result and in the
-    tool description, and the output cap bounds the damage a chatty program can do.
+    read, a large decode.  It is also opt-out: ``sys.settrace(None)`` from inside the
+    program removes it, and no in-process mechanism can prevent that.  When it happens the
+    result says ``timeout enforced: false`` instead of claiming the program was bounded.
+
+    The program does not see the harness's credentials: ``os.environ`` is scrubbed for the
+    duration of the run (and restored afterwards, whatever happens).
     """
-    stdout_buffer = io.StringIO()
-    stderr_buffer = io.StringIO()
+    stdout_sink = _BoundedTextSink(RUN_CAPTURE_CHARS)
+    stderr_sink = _BoundedTextSink(RUN_CAPTURE_CHARS)
     outcome: Dict[str, Any] = {}
     deadline = time.monotonic() + timeout
 
@@ -1529,15 +1613,24 @@ def _run_in_process(
             raise _ProgramTimeout("timed out after {:.1f}s".format(timeout))
         return timeout_tracer
 
-    def run() -> None:
-        saved_stdout, saved_stderr, saved_argv = sys.stdout, sys.stderr, sys.argv
-        saved_trace = sys.gettrace()
-        sys.stdout, sys.stderr = stdout_buffer, stderr_buffer
-        sys.argv = ([] if target is None else [target]) + list(argv)
-        original_cwd = os.getcwd()
+    def body() -> None:
+        """Run the program; every failure mode becomes an ``outcome`` entry."""
         try:
             os.chdir(cwd)
-            sys.settrace(timeout_tracer)
+        except OSError as exc:
+            # A deleted or unreadable workspace used to escape as a FileNotFoundError
+            # traceback from outside the try: it is a clean, actionable tool error now.
+            outcome["returncode"] = 1
+            outcome["error"] = "the workspace {} is not usable: {}: {}".format(cwd, type(exc).__name__, exc)
+            outcome["workspace_error"] = True
+            stderr_sink.write(
+                "[pyto-harness] {}\nRe-create the workspace (run.py does it automatically) and try again.\n".format(
+                    outcome["error"]
+                )
+            )
+            return
+        sys.settrace(timeout_tracer)
+        try:
             if target is not None:
                 runpy.run_path(target, run_name="__main__")
             else:
@@ -1550,51 +1643,86 @@ def _run_in_process(
             outcome["returncode"] = 124
             outcome["timed_out"] = True
             outcome["error"] = str(exc)
-            stdout_buffer.write("\n[pyto-harness] program stopped: {}\n".format(exc))
+            stdout_sink.write("\n[pyto-harness] program stopped: {}\n".format(exc))
         except SystemExit as exc:
             code = exc.code
             outcome["returncode"] = 0 if code is None else (code if isinstance(code, int) else 1)
         except BaseException as exc:  # noqa: BLE001 - report it the way a traceback would
             import traceback
 
-            traceback.print_exc(file=stderr_buffer)
+            traceback.print_exc(file=stderr_sink)
             outcome["returncode"] = 1
             outcome["error"] = "{}: {}".format(type(exc).__name__, exc)
         finally:
-            sys.settrace(saved_trace)
-            sys.stdout, sys.stderr, sys.argv = saved_stdout, saved_stderr, saved_argv
+            # If the program cleared or replaced the tracer, the deadline did not apply to
+            # it and the result must not imply that it did.
+            outcome["tracer_intact"] = sys.gettrace() is timeout_tracer
+
+    def run() -> None:
+        saved_stdout, saved_stderr, saved_argv = sys.stdout, sys.stderr, sys.argv
+        saved_trace = sys.gettrace()
+        sys.stdout, sys.stderr = stdout_sink, stderr_sink
+        sys.argv = ([] if target is None else [target]) + list(argv)
+        original_cwd: Optional[str] = None
+        try:
+            original_cwd = os.getcwd()
+        except OSError as exc:
+            outcome["returncode"] = 1
+            outcome["error"] = "the current directory no longer exists: {}: {}".format(type(exc).__name__, exc)
+            outcome["workspace_error"] = True
+            stderr_sink.write("[pyto-harness] {}\n".format(outcome["error"]))
+        if original_cwd is not None:
             try:
-                os.chdir(original_cwd)
-            except OSError:  # pragma: no cover
-                pass
+                # The in-process path *is* the program's environment: remove the
+                # credential-shaped variables for the duration and put them back in a
+                # `finally`, so a program that raises cannot strip the harness's own key.
+                with temporary_environ_scrub():
+                    body()
+            finally:
+                try:
+                    os.chdir(original_cwd)
+                except OSError:  # pragma: no cover - the cwd was removed under us
+                    pass
+        sys.settrace(saved_trace)
+        sys.stdout, sys.stderr, sys.argv = saved_stdout, saved_stderr, saved_argv
 
     worker = threading.Thread(target=run, name="pyto-runpy", daemon=True)
     worker.start()
     worker.join(timeout=timeout + 2.0)
     timed_out = worker.is_alive()
-    note = ""
+    notes: List[str] = []
+    timeout_enforced = bool(outcome.get("tracer_intact", False))
     if outcome.get("timed_out"):
-        note = (
+        timeout_enforced = True
+        notes.append(
             "The program was stopped cooperatively after {:.0f}s. A program blocked inside a C "
             "call (DNS, socket, a large decode) cannot be interrupted this way; keep programs "
             "short, bounded and non-blocking.".format(timeout)
         )
     elif timed_out:
-        note = (
+        timeout_enforced = False
+        notes.append(
             "The program was still running after {:.0f}s and could not be interrupted: it is "
-            "blocked in a C call that Python cannot break into. It keeps running in the "
-            "background until the app is suspended.".format(timeout)
+            "either blocked in a C call that Python cannot break into or it removed the "
+            "cooperative timeout. It keeps running in the background until the app is "
+            "suspended.".format(timeout)
         )
         outcome["timed_out"] = True
         outcome["returncode"] = 124
+    if not timeout_enforced:
+        notes.append(
+            "timeout enforced: false - the program disabled the cooperative timeout "
+            "(sys.settrace(None)); the {:.0f}s limit did NOT bound it".format(timeout)
+        )
     return {
         "mode": "runpy",
-        "stdout": _cap(stdout_buffer.getvalue()),
-        "stderr": _cap(stderr_buffer.getvalue()),
+        "stdout": stdout_sink.value(),
+        "stderr": stderr_sink.value(),
         "returncode": outcome.get("returncode", 1),
         "timed_out": bool(outcome.get("timed_out")),
+        "timeout_enforced": timeout_enforced,
         "duration_s": time.monotonic() - started,
-        "note": note,
+        "note": " ".join(notes),
         "capture_path": None,
     }
 

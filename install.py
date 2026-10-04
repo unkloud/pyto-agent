@@ -22,8 +22,10 @@ from __future__ import annotations
 
 import argparse
 import ast
+import hashlib
 import io
 import os
+import re
 import shutil
 import sys
 import zipfile
@@ -41,6 +43,21 @@ SKIP_SUFFIXES = (".pyc", ".pyo")
 
 class InstallError(Exception):
     """Anything that stops the install, with a message meant for the user."""
+
+
+#: A SHA-256 in hex, the form ``--sha256`` accepts.
+SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
+
+
+def archive_digest(payload: bytes) -> str:
+    """The SHA-256 of the archive bytes — the value a user pins with ``--sha256``.
+
+    The installer is the one component that runs *before* the harness exists and then
+    holds the API key, so "whatever GitHub served" was the whole trust model.  Every run
+    now prints this digest (pin it, then verify the next install against it), and
+    ``--sha256`` refuses a mismatch instead of installing the bytes anyway.
+    """
+    return hashlib.sha256(payload).hexdigest()
 
 
 # --------------------------------------------------------------------------------------
@@ -249,11 +266,27 @@ def main(argv=None) -> int:
         description="Download and install pyto-agent with the Python standard library only.",
     )
     parser.add_argument("--ref", default=DEFAULT_REF, help="branch or tag to install (default: %(default)s)")
+    parser.add_argument(
+        "--sha256",
+        dest="sha256",
+        default=None,
+        help="expected SHA-256 of the archive; the install is refused when it does not match "
+        "(pin the digest a previous run printed, and use --ref <tag> so the bytes cannot move)",
+    )
     parser.add_argument("--into", default=DEFAULT_TARGET, help="destination directory (default: ./%(default)s)")
     parser.add_argument("--zip", dest="zip_path", default=None, help="install from a local .zip instead of the network")
     parser.add_argument("--force", action="store_true", help="install even if the destination is not a pyto-agent checkout")
     parser.add_argument("--no-verify", action="store_true", help="skip the post-install parse and import check")
     args = parser.parse_args(argv)
+
+    expected = (args.sha256 or "").strip().lower() or None
+    if expected is not None and not SHA256_RE.match(expected):
+        print(
+            "--sha256 must be 64 hexadecimal characters (the digest printed by an earlier run); "
+            "got {!r}".format(args.sha256),
+            file=sys.stderr,
+        )
+        return 2
 
     target = os.path.abspath(os.path.expanduser(args.into))
 
@@ -293,6 +326,19 @@ def main(argv=None) -> int:
                 file=sys.stderr,
             )
             return 1
+
+    digest = archive_digest(payload)
+    print("sha256 {}  ({} bytes{})".format(digest, len(payload), ", " + args.ref if not args.zip_path else ""))
+    if expected is not None and digest != expected:
+        print(
+            "REFUSING TO INSTALL: the archive digest does not match --sha256.\n"
+            "  expected: {}\n"
+            "  actual  : {}\n"
+            "The download was modified in transit, the tag was moved, or the expected digest is "
+            "for a different ref. Nothing was written to {}.".format(expected, digest, target),
+            file=sys.stderr,
+        )
+        return 1
 
     try:
         with zipfile.ZipFile(io.BytesIO(payload)) as archive:

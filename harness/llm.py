@@ -48,6 +48,8 @@ from .errors import (
     TransportError,
     error_for_status,
 )
+from .security import redact_headers as _redact_headers_pattern
+from .security import redact_url_userinfo
 
 # --------------------------------------------------------------------------------------
 # SSE framing
@@ -592,8 +594,10 @@ class LLMClient:
         payload = json.dumps(body).encode("utf-8")
         headers = self.build_headers(payload, stream=stream)
         return {
-            "url": self.candidate_urls()[0],
-            "fallback_urls": self.candidate_urls()[1:],
+            # Credentials embedded in api_base userinfo (`https://user:pw@host/`) are not
+            # key material but they are a password, and this dictionary is printed.
+            "url": redact_url_userinfo(self.candidate_urls()[0]),
+            "fallback_urls": [redact_url_userinfo(url) for url in self.candidate_urls()[1:]],
             "method": "POST",
             "headers": redact_headers(headers),
             "body": body,
@@ -683,7 +687,9 @@ class LLMClient:
                 return
             finally:
                 self._release(response, conn)
-        raise TransportError("no usable endpoint; tried: {}".format("; ".join(errors) or ", ".join(urls)))
+        raise TransportError(
+            "no usable endpoint; tried: {}".format("; ".join(errors) or ", ".join(redact_url_userinfo(u) for u in urls))
+        )
 
     def _send(
         self,
@@ -926,14 +932,14 @@ def _read_error_body(response: http.client.HTTPResponse) -> str:
 
 
 def redact_headers(headers: Mapping[str, str]) -> Dict[str, str]:
-    """Header copy safe to print or log."""
-    out: Dict[str, str] = {}
-    for key, value in headers.items():
-        if key.lower() in ("authorization", "api-key", "x-api-key", "cookie"):
-            out[key] = "<redacted>"
-        else:
-            out[key] = value
-    return out
+    """Header copy safe to print or log.
+
+    Redaction is by *pattern*, not by a fixed list of four names: a provider-specific
+    header such as ``x-goog-api-key`` was printed verbatim by ``--dry-run`` while
+    ``api-key`` was redacted, and the dry-run dump is exactly what a user pastes into a
+    bug report.
+    """
+    return _redact_headers_pattern(headers)
 
 
 def _close_quietly(conn: http.client.HTTPConnection) -> None:

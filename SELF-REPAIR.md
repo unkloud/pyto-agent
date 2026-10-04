@@ -13,6 +13,10 @@ python run.py --backups           # what can I go back to?
 python run.py --restore <id>      # go back
 ```
 
+The security model this gate sits inside — what is enforced versus what is only
+policy-level, and why a program the harness runs can defeat the path jail — is in
+[SECURITY.md](SECURITY.md). Read §4 of that file before relying on the gate on a phone.
+
 ---
 
 ## 1. The three tiers
@@ -33,7 +37,8 @@ first-run pass applies on its own, without being asked.
 | `config_present` | config file exists | `config.create` (starter file, mode 0600, **no key**) | |
 | `config_parses` | the file is valid JSON | — (never rewritten: it may hold the key) | |
 | `config_schema` | expected keys, unknown keys, value types | `config.schema_repair` (bad value → the value the harness would use) | |
-| `config_permissions` | mode is `0600` on POSIX | `config.chmod` | ✅ |
+| `config_permissions` | mode is `0600` on POSIX, **including `config.json.bak` and every other copy** | `config.chmod` | ✅ |
+| `file_permissions` | sessions dir/logs, `memory.json`, spill files, `capabilities.json`, the state and workspace directories are owner-only | `permissions.tighten` | |
 | `api_key_present` | a key is set | — **human only** | |
 | `api_key_shape` | not a placeholder, plausible length | — **human only** | |
 | `network_reachable` | DNS → TCP → TLS to the api_base host | — (names the failing layer) | |
@@ -78,7 +83,10 @@ What the gate does, in order:
    is caught on the phone, not at the next launch) and the stdlib-only import scan from
    `stdlib_audit.py`. Empty sources and byte-identical sources are refused too.
 4. **Snapshot.** `harness/` + `run.py` are copied to `~/.pyto_harness/backups/<timestamp>-<label>/`
-   with a `manifest.json` of SHA-256 hashes. The previous bytes are also held in memory.
+   with a `manifest.json` of SHA-256 hashes, **signed with an HMAC keyed by a per-install
+   secret** (`~/.pyto_harness/backup.key`, mode 0600, never inside the backup). A restore
+   refuses a manifest that is missing, unsigned, modified or does not match the payload
+   hashes, and writes nothing in that case. The previous bytes are also held in memory.
 5. **Write, then run the offline test suite.**
 6. **Promote or revert.** Green suite → the edit stays and the result carries a unified
    diff, the test counts and the backup id. Red suite → the previous bytes are written back
@@ -278,6 +286,25 @@ permission — report the `human_action` instead.
   you restart.
 * It cannot be trusted to gate itself with a *weakened* suite: the gate refuses to touch
   `tests/`, and every revert tells the model not to edit tests to pass.
+* **On a real device the gate may judge modules rather than the bytes just written.** There
+  is no usable `subprocess` on Pyto, so the suite runs **in this process** with
+  `unittest.TestLoader`; the tests import `harness.*` from `sys.modules`, i.e. the
+  pre-edit code. A syntactically valid edit that only takes effect on the next launch can
+  therefore pass a gate that never loaded it — the gate is not wrong about the tests, it is
+  testing the *old* module. The gate is honest about the mode (`in-process` in the result)
+  and the promoted result always carries "restart the harness to load the change", but do
+  not read a green in-process gate as evidence about the bytes on disk.
+* **The gate suite itself assumes desktop subprocess semantics**, so on the phone it can be
+  red before any edit: the `run_program` tests in `tests/test_tools_ios.py` assert
+  `mode == "subprocess"`, which is what a laptop has and what Pyto's `subprocess` shim is
+  not. Those failures cascade (`self_edit` reverts every edit, `--repair` can never promote,
+  `--doctor --deep` reports a permanent failure) and they say nothing about the edit under
+  judgement. The suite size in the README (585) is the count on CPython 3.10/3.12 on a
+  desktop; it is not a device-proven number. Treat the on-device gate as a smoke test, not
+  as the verification story — and re-run the suite on a computer before trusting a change.
+
+The security model behind those guardrails — what is enforced, what is only policy-level,
+and why an in-process program can defeat the jail — is in [SECURITY.md](SECURITY.md).
 
 If a repair loop ever goes wrong, the escapes are `--backups` (everything is a directory
 with hashes), `--restore <id>`, and simply re-copying the folder: nothing in the harness

@@ -14,11 +14,15 @@ Approval is a single policy function evaluated before dispatch, so there is no p
 tool can take that skips it.  The default policy auto-allows workspace file work and
 reading device state, and requires a yes for anything that leaves the app: sharing,
 opening URLs, running Shortcuts, notifications, speech, photos.  ``--yolo`` bypasses it.
+An unattended run (a Shortcut, a headless invocation: nothing attached to answer) has no
+human to ask, so ``run_program`` is denied there unless the user opts in with
+``--allow-unattended-programs`` / ``allow_unattended_programs: true``.
 """
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import os
 import queue
 import threading
@@ -30,6 +34,7 @@ from . import budget, ios, pyto_api
 from .config import Config
 from .errors import HarnessError
 from .llm import AssistantStream, LLMClient, LLMConfig, RetryPolicy, ToolCall, Usage
+from .security import scrub_secrets, scrub_value
 from .session import (
     SessionLog,
     assistant_message_event,
@@ -114,6 +119,73 @@ TOOL_HAZARDS = {
 }
 
 
+#: How much of one string argument the approval prompt shows.  The old 60 characters hid
+#: the payload of exactly the tools that move data out of the app (the interesting part of
+#: an exfiltration URL is by construction *after* the prefix), so the cap is now large
+#: enough for a real URL, a real message and a real program, and anything cut is marked
+#: explicitly.  A security decision is never made from a silent preview.
+APPROVAL_ARG_CHARS = 4000
+
+#: Bytes hashed for the ``run_program`` fingerprint line.  Bigger than any program a model
+#: writes, small enough that the approval prompt cannot read a 4 GB file.
+APPROVAL_HASH_BYTES = 1024 * 1024
+
+
+def _render_argument(value: Any) -> str:
+    """One argument, in full up to :data:`APPROVAL_ARG_CHARS`, with an explicit cut."""
+    if not isinstance(value, str):
+        return repr(value)
+    if len(value) <= APPROVAL_ARG_CHARS:
+        return repr(value)
+    remaining = len(value) - APPROVAL_ARG_CHARS
+    return "{} …({} more characters)".format(repr(value[:APPROVAL_ARG_CHARS]), remaining)
+
+
+def _program_fingerprint(arguments: Mapping[str, Any], workspace: str = "") -> List[str]:
+    """Path + SHA-256 of the bytes ``run_program`` would execute, for the prompt.
+
+    For a workspace file the bytes on disk are hashed, so a user who approves sees the
+    digest of what will actually run (and can compare it against the diff they expected).
+    For inline source the digest is of the source text itself.  ``workspace`` is the
+    resolved workspace the tool will resolve a relative path against, so the prompt shows
+    the absolute path the human can go and read.
+    """
+    raw = arguments.get("path_or_source")
+    if not isinstance(raw, str) or not raw:
+        return []
+    looks_like_path = "\n" not in raw and raw.strip().endswith(".py")
+    if not looks_like_path:
+        return [
+            "  program: <inline source>",
+            "  sha256 : {}".format(hashlib.sha256(raw.encode("utf-8")).hexdigest()),
+        ]
+    stripped = raw.strip()
+    candidates = []
+    if os.path.isabs(stripped):
+        candidates.append(stripped)
+    else:
+        if workspace:
+            candidates.append(os.path.join(workspace, stripped))
+        candidates.append(os.path.abspath(os.path.expanduser(stripped)))
+    for candidate in candidates:
+        try:
+            size = os.path.getsize(candidate)
+            with open(candidate, "rb") as handle:
+                data = handle.read(APPROVAL_HASH_BYTES)
+        except OSError:
+            continue
+        digest = hashlib.sha256(data).hexdigest()
+        if size > APPROVAL_HASH_BYTES:
+            digest += " (first {} bytes of {})".format(APPROVAL_HASH_BYTES, size)
+        return [
+            "  program: {} ({} bytes on disk)".format(os.path.abspath(candidate), size),
+            "  sha256 : {}".format(digest),
+        ]
+    return [
+        "  program: {} (not readable from this process; it is resolved inside the workspace)".format(stripped)
+    ]
+
+
 @dataclass
 class ApprovalRequest:
     """What the UI is asked to confirm."""
@@ -121,17 +193,44 @@ class ApprovalRequest:
     tool: str
     arguments: Mapping[str, Any]
     reason: str
+    #: The resolved workspace, so a relative program path can be shown in full.
+    workspace: str = ""
 
     def describe(self) -> str:
         rendered = ", ".join(
-            "{}={!r}".format(k, (v[:60] + "...") if isinstance(v, str) and len(v) > 60 else v)
-            for k, v in sorted(self.arguments.items())
+            "{}={}".format(key, _render_argument(value)) for key, value in sorted(self.arguments.items())
         )
-        return "{}({})\n  why: {}".format(self.tool, rendered, self.reason)
+        lines = ["{}({})".format(self.tool, rendered), "  why: {}".format(self.reason)]
+        if self.tool == "run_program":
+            lines.extend(_program_fingerprint(self.arguments, self.workspace))
+        return "\n".join(lines)
 
 
 #: ``(request) -> bool``.  Called from whatever thread dispatches the tool.
 Prompter = Callable[[ApprovalRequest], bool]
+
+
+def prompter_is_interactive(prompter: Optional[Prompter]) -> bool:
+    """True when a human is attached who can actually answer an approval prompt.
+
+    ``TerminalApprover`` carries an ``interactive`` flag (it is false when stdin is a pipe,
+    which is the Shortcut/headless case).  A prompter without the flag is a caller-supplied
+    one — a test double or a UI — and is taken at its word.
+    """
+    if prompter is None:
+        return False
+    flag = getattr(prompter, "interactive", None)
+    return True if flag is None else bool(flag)
+
+
+#: Why ``run_program`` is refused when nothing can approve it.  Kept in one place because
+#: the sentence is the whole mitigation: the user has to know the trade they are making.
+UNATTENDED_PROGRAM_REASON = (
+    "run_program executes a program with this app's own authority (the files it can read, "
+    "the network, this process's memory) and nothing is attached to approve it. If this "
+    "unattended run is trusted, re-run with --allow-unattended-programs or set "
+    "\"allow_unattended_programs\": true in the config file."
+)
 
 
 def make_policy(
@@ -140,21 +239,32 @@ def make_policy(
     prompter: Optional[Prompter] = None,
     allow: Sequence[str] = (),
     deny: Sequence[str] = (),
+    unattended_programs: bool = False,
+    interactive: Optional[bool] = None,
+    workspace: str = "",
 ) -> PolicyFn:
     """Build the approval policy.
 
     Order: explicit deny, explicit allow, ``--yolo``, the auto-approved set, then the
     prompter.  A tool in none of those categories is **denied** rather than allowed: an
     unrecognised tool is exactly the case where a wrong guess is expensive.
+
+    ``run_program`` is one deliberate exception to the auto-approved set: it stays AUTO
+    while a human is attached (that is the product — the model writes a program and runs
+    it without a prompt), but in an unattended run there is nobody to ask, so it fails
+    closed unless ``unattended_programs`` (or ``--yolo``) says the user meant it.
     """
     deny_set = set(deny)
     allow_set = set(allow)
+    interactive_session = prompter_is_interactive(prompter) if interactive is None else bool(interactive)
 
     def policy(name: str, arguments: Mapping[str, Any]) -> Decision:
         if name in deny_set:
             return Decision.deny("{} is on the deny list".format(name))
         if name in allow_set:
             return Decision.allow()
+        if name == "run_program" and not yolo and not unattended_programs and not interactive_session:
+            return Decision.deny(UNATTENDED_PROGRAM_REASON)
         if yolo:
             return Decision.allow()
         if name in AUTO_APPROVED_TOOLS:
@@ -168,7 +278,7 @@ def make_policy(
                     )
                 )
             return Decision.deny("{} is not on the allow list".format(name))
-        request = ApprovalRequest(tool=name, arguments=arguments, reason=reason)
+        request = ApprovalRequest(tool=name, arguments=arguments, reason=reason, workspace=workspace)
         try:
             granted = prompter(request)
         except Exception as exc:  # noqa: BLE001 - a broken prompter must not open the gate
@@ -233,7 +343,10 @@ manual step that replaces it. Do not pretend an action happened.
 Asking permission
 - Ask before anything that shares data or spends money: the share sheet, opening external URLs, \
 running Shortcuts, notifications, speech, writing to the photo library.
-- Reading files in the workspace and running the programs you just wrote need no permission.
+- Reading files in the workspace and running the programs you just wrote need no permission while \
+the user is there to answer. In an unattended run (a Shortcut, a headless invocation) nothing is \
+attached to approve, so `run_program` is denied unless the user allowed unattended programs; do \
+not try to work around that, say what you would have run.
 
 Fixing yourself
 - When something fails twice for the same reason, call `diagnose` before improvising. It reports \
@@ -343,6 +456,15 @@ class LoopOptions:
     #: Checked between turns and between socket reads.
     stop: Optional[threading.Event] = None
 
+    def __post_init__(self) -> None:
+        # Capture the approval policy here, at construction, and freeze it for the run.
+        # A program running in this process can still reach into the object graph (see
+        # SECURITY.md); what this stops is the easy rebinding of the public attribute and
+        # makes such an attempt deny loudly instead of silently opening the gate.
+        lock = getattr(self.registry, "lock_policy", None)
+        if callable(lock):
+            lock()
+
 
 # --------------------------------------------------------------------------------------
 # The loop
@@ -402,6 +524,9 @@ async def run_turn(options: LoopOptions, prompt: str) -> Any:
                 message = "{}: {}".format(failure.code, failure.message)
             else:
                 message = "{}: {}".format(type(failure).__name__, failure)
+            # A provider error body is foreign text: scrub it before it reaches the log,
+            # the model and the console.
+            message = scrub_secrets(message)
             session.append("turn.failed", {"turn": turns, "message": message})
             result.errors.append(message)
             result.stop = "error"
@@ -429,8 +554,8 @@ async def run_turn(options: LoopOptions, prompt: str) -> Any:
                 "message.completed",
                 {
                     "turn": turns,
-                    "content": stream.text,
-                    "reasoning": stream.reasoning_text,
+                    "content": scrub_secrets(stream.text),
+                    "reasoning": scrub_secrets(stream.reasoning_text),
                     "tool_calls": len(stream.tool_calls),
                     "finish_reason": stream.finish_reason,
                 },
@@ -544,10 +669,8 @@ async def _stream_assistant(
             yield payload
             return
         else:
-            session.append(
-                "turn.failed",
-                {"turn": turn, "message": "{}: {}".format(type(payload).__name__, payload)},
-            )
+            failed = "{}: {}".format(type(payload).__name__, payload)
+            session.append("turn.failed", {"turn": turn, "message": scrub_secrets(failed)})
             yield payload
             return
     if deltas == 0:
@@ -604,7 +727,10 @@ async def _dispatch(
             )
 
     for call_id, name, arguments in runnable:
-        yield Event("tool.started", {"turn": turn, "id": call_id, "name": name, "arguments": _short(arguments)})
+        yield Event(
+            "tool.started",
+            {"turn": turn, "id": call_id, "name": name, "arguments": scrub_value(_short(arguments))},
+        )
 
     if runnable:
         semaphore = asyncio.Semaphore(max(1, options.max_parallel_tools))
@@ -631,7 +757,7 @@ async def _dispatch(
     for call in calls:
         call_id, name, _arguments = call
         result = results.get(call_id) or ToolResult.error("the tool call was never dispatched")
-        result = _apply_budget(options, name, result)
+        result = _scrub_result(_apply_budget(options, name, result))
         options.session.append(
             "tool.completed",
             {
@@ -659,6 +785,27 @@ async def _dispatch(
         )
         ordered.append((call, result))
     yield ordered
+
+
+def _scrub_result(result: ToolResult) -> ToolResult:
+    """Remove credentials by shape from a tool result before it goes anywhere.
+
+    Everything downstream of this point is a copy of the same string: the tool message in
+    the session log, the tool message sent to the provider, and the text the printer writes
+    to the console.  Scrubbing once, here, is what makes "the key is never printed" true for
+    a program that printed it.
+    """
+    content = scrub_secrets(result.content if isinstance(result.content, str) else str(result.content))
+    metadata = scrub_value(dict(result.metadata)) if result.metadata else result.metadata
+    if content == result.content and metadata == result.metadata:
+        return result
+    return ToolResult(
+        content=content,
+        is_error=result.is_error,
+        metadata=metadata if isinstance(metadata, dict) else dict(result.metadata),
+        duration_ms=result.duration_ms,
+        tool=result.tool,
+    )
 
 
 def _apply_budget(options: LoopOptions, name: str, result: ToolResult) -> ToolResult:

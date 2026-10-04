@@ -64,6 +64,8 @@ from .config import (
     redact_key,
 )
 from .errors import HarnessError
+from . import security
+from .security import PRIVATE_DIR_MODE, PRIVATE_FILE_MODE, mkdir_private, open_private, scrubbed_environ, write_private
 
 #: Canonical status vocabulary.  Anything else is a bug in a check.
 STATUSES = ("ok", "warn", "fail", "fixed", "skipped", "unfixable")
@@ -157,6 +159,26 @@ MODEL_FALLBACKS = (
 
 #: Keys the config file is expected to carry.
 EXPECTED_CONFIG_KEYS = ("api_base", "model", "api_key", "max_turns", "timeout", "workspace")
+
+#: Every key a config file may carry.  ``EXPECTED_CONFIG_KEYS`` is the *required* subset;
+#: this is the whole vocabulary, so a real optional key is not reported as a typo.
+KNOWN_CONFIG_KEYS = tuple(
+    sorted(
+        set(EXPECTED_CONFIG_KEYS)
+        | {
+            "headers",
+            "extra_headers",
+            "sessions_dir",
+            "spill_dir",
+            "stream",
+            "max_tokens",
+            "temperature",
+            "yolo",
+            "compact",
+            "allow_unattended_programs",
+        }
+    )
+)
 
 #: How much of a session log the integrity scan will read before it gives up.
 MAX_SESSION_SCAN_BYTES = 8 * 1024 * 1024
@@ -439,19 +461,21 @@ def secret_values(ctx: DoctorContext) -> List[str]:
         value = ctx.env.get(name)
         if isinstance(value, str) and len(value) >= 6:
             values.append(value)
+    values.extend(security.secret_values_from_headers(getattr(ctx.config, "extra_headers", None)))
     values.sort(key=len, reverse=True)
     return values
 
 
 def scrub_secrets(text: str, ctx: Optional[DoctorContext] = None) -> str:
-    """Replace any known credential with ``<redacted>``.  Applied to all foreign text."""
+    """Replace any known credential with ``<redacted>``.  Applied to all foreign text.
+
+    Delegates to :func:`harness.security.scrub_secrets`, so the doctor and the runtime
+    scrub identically: the configured values verbatim *and* the credential shapes
+    (``sk-…``, ``Bearer …``, ``"api_key": …``) a gateway or debug page might echo.
+    """
     if not text:
         return ""
-    if ctx is not None:
-        for value in secret_values(ctx):
-            if value in text:
-                text = text.replace(value, "<redacted>")
-    return re.sub(r"\bsk-[A-Za-z0-9_\-]{12,}\b", "<redacted>", text)
+    return security.scrub_secrets(text, secret_values(ctx) if ctx is not None else ())
 
 
 def _snippet(text: str, limit: int = 240, ctx: Optional[DoctorContext] = None) -> str:
@@ -1032,10 +1056,19 @@ def check_config_schema(ctx: DoctorContext) -> CheckResult:
     assert payload is not None
     from . import config as config_module
 
-    unknown = sorted(key for key in payload if key not in EXPECTED_CONFIG_KEYS and key != "headers")
+    unknown = sorted(key for key in payload if key not in KNOWN_CONFIG_KEYS and key != "headers")
     missing = sorted(key for key in EXPECTED_CONFIG_KEYS if key not in payload)
     invalid: List[Dict[str, str]] = []
-    for key in ("max_turns", "max_tokens", "timeout", "temperature", "stream", "yolo", "compact"):
+    for key in (
+        "max_turns",
+        "max_tokens",
+        "timeout",
+        "temperature",
+        "stream",
+        "yolo",
+        "compact",
+        "allow_unattended_programs",
+    ):
         if key in payload and payload[key] is not None:
             try:
                 config_module._coerce_field(key, payload[key], "file")
@@ -1081,6 +1114,27 @@ def check_config_schema(ctx: DoctorContext) -> CheckResult:
     )
 
 
+def config_copies(ctx: DoctorContext) -> List[str]:
+    """The config file and every sibling copy of it (``.bak``, ``.doctor-tmp``, …).
+
+    ``config.json.bak`` is a full copy of the file that holds the API key: checking only
+    the live path reported "mode 0600" while a world-readable duplicate sat next to it.
+    """
+    directory = os.path.dirname(os.path.abspath(ctx.config_path)) or "."
+    base = os.path.basename(ctx.config_path)
+    found = [ctx.config_path]
+    try:
+        names = sorted(os.listdir(directory))
+    except OSError:
+        return found
+    for name in names:
+        if name != base and name.startswith(base + "."):
+            candidate = os.path.join(directory, name)
+            if os.path.isfile(candidate):
+                found.append(candidate)
+    return found
+
+
 def check_config_permissions(ctx: DoctorContext) -> CheckResult:
     if os.name != "posix":
         return result(
@@ -1091,33 +1145,151 @@ def check_config_permissions(ctx: DoctorContext) -> CheckResult:
         )
     if not os.path.exists(ctx.config_path):
         return result("config_permissions", "Config file mode is 0600", "skipped", "no config file")
-    try:
-        mode = stat.S_IMODE(os.stat(ctx.config_path).st_mode)
-    except OSError as exc:
+    loose: List[Tuple[str, int]] = []
+    for path in config_copies(ctx):
+        try:
+            mode = stat.S_IMODE(os.stat(path).st_mode)
+        except OSError as exc:
+            return result(
+                "config_permissions",
+                "Config file mode is 0600",
+                "warn",
+                "could not stat {}: {}: {}".format(path, type(exc).__name__, exc),
+            )
+        if mode & 0o077:
+            loose.append((path, mode))
+    evidence = {"path": ctx.config_path, "copies": list(config_copies(ctx))}
+    if loose:
+        detail = "; ".join("{} is mode {}".format(path, oct(mode)) for path, mode in loose)
         return result(
             "config_permissions",
             "Config file mode is 0600",
             "warn",
-            "could not stat the config file: {}: {}".format(type(exc).__name__, exc),
-        )
-    evidence = {"path": ctx.config_path, "mode": oct(mode)}
-    if mode & 0o077:
-        return result(
-            "config_permissions",
-            "Config file mode is 0600",
-            "warn",
-            "{} is mode {} -- readable by other accounts on this device".format(ctx.config_path, oct(mode)),
+            "{} -- readable by other accounts on this device".format(detail),
             fixable=True,
             fix_id="config.chmod",
-            human_action="run `--doctor --fix` (or `chmod 600 {}`).".format(ctx.config_path),
-            evidence=evidence,
+            human_action="run `--doctor --fix` (or `chmod 600` each of: {}).".format(
+                ", ".join(path for path, _mode in loose)
+            ),
+            evidence={**evidence, "loose": {path: oct(mode) for path, mode in loose}},
         )
     return result(
         "config_permissions",
         "Config file mode is 0600",
         "ok",
-        "mode {}".format(oct(mode)),
+        "mode {} ({} copy/copies checked)".format(oct(stat.S_IMODE(os.stat(ctx.config_path).st_mode)), len(evidence["copies"])),
         evidence=evidence,
+    )
+
+
+def _private_state_targets(ctx: DoctorContext) -> List[Tuple[str, int]]:
+    """``(path, wanted mode)`` for every file and directory the harness creates itself."""
+    targets: List[Tuple[str, int]] = [
+        (ctx.state, PRIVATE_DIR_MODE),
+        (ctx.config_path, PRIVATE_FILE_MODE),
+        (ctx.workspace, PRIVATE_DIR_MODE),
+        (ctx.sessions_dir, PRIVATE_DIR_MODE),
+        (os.path.join(ctx.state, "capabilities.json"), PRIVATE_FILE_MODE),
+        (os.path.join(ctx.state, "health.json"), PRIVATE_FILE_MODE),
+        (os.path.join(ctx.workspace, "memory.json"), PRIVATE_FILE_MODE),
+        (os.path.join(ctx.workspace, "tool-output"), PRIVATE_DIR_MODE),
+    ]
+    # The session logs themselves: the newest few are the ones a run just wrote.
+    try:
+        names = sorted(
+            (name for name in os.listdir(ctx.sessions_dir) if name.endswith(".jsonl")),
+            key=lambda name: os.path.getmtime(os.path.join(ctx.sessions_dir, name)),
+            reverse=True,
+        )
+    except OSError:
+        names = []
+    targets.extend((os.path.join(ctx.sessions_dir, name), PRIVATE_FILE_MODE) for name in names[:10])
+    targets.extend((path, PRIVATE_FILE_MODE) for path in config_copies(ctx))
+    return targets
+
+
+def check_file_permissions(ctx: DoctorContext) -> CheckResult:
+    """Everything the harness creates for itself is owner-only.
+
+    Data at rest is plaintext by design (see ``SECURITY.md``): sessions, memory and spill
+    files hold whatever the agent read.  The mode is the only thing standing between that
+    and every other app or extension that can reach the same container, iCloud Drive copy
+    or desktop sync.
+    """
+    if os.name != "posix":
+        return result(
+            "file_permissions",
+            "Harness files are private (0600/0700)",
+            "skipped",
+            "file modes are not meaningful on {}".format(os.name),
+        )
+    loose: List[str] = []
+    checked = 0
+    for path, wanted in _private_state_targets(ctx):
+        if path == ctx.config_path:
+            continue  # covered, with its copies, by config_permissions
+        try:
+            mode = stat.S_IMODE(os.stat(path).st_mode)
+        except OSError:
+            continue  # missing is not a mode problem
+        checked += 1
+        if mode & 0o077:
+            loose.append("{} is mode {} (want {})".format(path, oct(mode), oct(wanted)))
+    if not checked:
+        return result(
+            "file_permissions",
+            "Harness files are private (0600/0700)",
+            "skipped",
+            "nothing created yet",
+        )
+    if loose:
+        return result(
+            "file_permissions",
+            "Harness files are private (0600/0700)",
+            "warn",
+            "; ".join(loose),
+            fixable=True,
+            fix_id="permissions.tighten",
+            human_action="run `--doctor --fix` to make them owner-only.",
+            evidence={"loose": loose, "checked": checked},
+        )
+    return result(
+        "file_permissions",
+        "Harness files are private (0600/0700)",
+        "ok",
+        "{} file(s)/dir(s) owner-only".format(checked),
+        evidence={"checked": checked},
+    )
+
+
+def fix_permissions_tighten(ctx: DoctorContext, item: CheckResult) -> FixOutcome:
+    """chmod every loose harness file/dir back to 0600/0700.  Never silent about failures."""
+    failed: List[str] = []
+    changed: List[str] = []
+    for path, wanted in _private_state_targets(ctx):
+        if not os.path.exists(path):
+            continue
+        try:
+            mode = stat.S_IMODE(os.stat(path).st_mode)
+        except OSError as exc:
+            failed.append("{}: {}".format(path, exc))
+            continue
+        if not mode & 0o077:
+            continue
+        try:
+            os.chmod(path, wanted)
+        except OSError as exc:
+            failed.append("{}: {}: {}".format(path, type(exc).__name__, exc))
+            continue
+        changed.append(path)
+    if failed:
+        return FixOutcome("permissions.tighten", item.id, False, error="; ".join(failed), evidence={"changed": changed})
+    return FixOutcome(
+        "permissions.tighten",
+        item.id,
+        True,
+        "made {} owner-only".format(", ".join(changed) or "nothing (already private)"),
+        evidence={"changed": changed},
     )
 
 
@@ -1247,11 +1419,22 @@ def candidate_api_bases(ctx: DoctorContext) -> List[str]:
     for candidate in (base, origin, origin + "/v1"):
         if candidate and candidate not in candidates:
             candidates.append(candidate)
-    if parsed.hostname and parsed.hostname.endswith("deepseek.com"):
+    if parsed.hostname and _is_deepseek_host(parsed.hostname):
         for candidate in (DEFAULT_API_BASE, DEFAULT_API_BASE + "/v1"):
             if candidate not in candidates:
                 candidates.append(candidate)
     return candidates
+
+
+def _is_deepseek_host(host: str) -> bool:
+    """True only on a **dot boundary**: ``evil-deepseek.com`` is not DeepSeek.
+
+    ``endswith("deepseek.com")`` also matched look-alike hosts, and this function decides
+    whether the configured key is POSTed to the real vendor — an unexpected cross-host
+    credential transmission from a config the user did not write.
+    """
+    host = (host or "").lower().rstrip(".")
+    return host == "deepseek.com" or host.endswith(".deepseek.com")
 
 
 def probe_api_base_variants(ctx: DoctorContext, *, model: Optional[str] = None) -> Dict[str, Any]:
@@ -2019,10 +2202,9 @@ def check_ios_signatures(ctx: DoctorContext) -> CheckResult:
     persist_error = ""
     if ctx.persist:
         try:
-            os.makedirs(ctx.state, exist_ok=True)
+            mkdir_private(ctx.state)
             payload.update(_preserved_capability_keys(ctx.capabilities_path))
-            with open(ctx.capabilities_path, "w", encoding="utf-8") as handle:
-                json.dump(payload, handle, indent=2, sort_keys=True)
+            write_private(ctx.capabilities_path, json.dumps(payload, indent=2, sort_keys=True) + "\n")
             persisted = True
         except OSError as exc:
             persist_error = "{}: {}".format(type(exc).__name__, exc)
@@ -2255,8 +2437,11 @@ def run_offline_tests(
         command = [sys.executable, "-m", "unittest", "discover", "-s", "tests", "-t", "."]
         for module in selected:
             command.extend(["-k", module])
-        env = dict(os.environ)
-        env["PYTHONPATH"] = root + os.pathsep + env.get("PYTHONPATH", "")
+        # The suite is code the user did not write running next to the API key: it gets a
+        # scrubbed environment (no *_API_KEY/*_TOKEN/*_SECRET, no PYTO_HARNESS_*), then the
+        # three non-secret switches this specific run needs.
+        env = scrubbed_environ()
+        env["PYTHONPATH"] = root + os.pathsep + os.environ.get("PYTHONPATH", "")
         env["PYTO_HARNESS_NO_DOCTOR"] = "1"
         env["PYTHONDONTWRITEBYTECODE"] = "1"
         env[SELFTEST_DEPTH_ENV] = str(depth + 1)
@@ -2426,14 +2611,18 @@ def _write_config(ctx: DoctorContext, payload: Mapping[str, Any]) -> str:
     untouched (schema repair keeps the existing value) or deliberately absent.
     """
     path = ctx.config_path
-    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    mkdir_private(os.path.dirname(path) or ".")
     if os.path.exists(path):
+        # A byte-for-byte copy of the key at 0664 was the exposure: the copy is created
+        # 0600 like the original, at creation, not chmod'ed afterwards.
         try:
-            shutil.copyfile(path, path + ".bak")
+            with open(path, "rb") as handle:
+                payload_bytes = handle.read()
+            write_private(path + ".bak", payload_bytes)
         except OSError:  # pragma: no cover - best effort
             pass
     temporary = path + ".doctor-tmp"
-    with open(temporary, "w", encoding="utf-8") as handle:
+    with open_private(temporary, truncate=True) as handle:
         json.dump(dict(payload), handle, indent=2, ensure_ascii=False)
         handle.write("\n")
     os.replace(temporary, path)
@@ -2473,19 +2662,39 @@ def fix_config_create(ctx: DoctorContext, item: CheckResult) -> FixOutcome:
 
 
 def fix_config_chmod(ctx: DoctorContext, item: CheckResult) -> FixOutcome:
-    if not os.path.exists(ctx.config_path):
+    """Tighten the config **and every copy of it** (``.bak``, ``.doctor-tmp``, …).
+
+    Fixing only the live path was the bug: the ``.bak`` holds the same key and was left
+    world-readable forever.
+    """
+    targets = [path for path in config_copies(ctx) if os.path.exists(path)]
+    if not targets:
         return FixOutcome("config.chmod", item.id, False, error="no config file to chmod")
-    try:
-        os.chmod(ctx.config_path, 0o600)
-    except OSError as exc:
-        return FixOutcome("config.chmod", item.id, False, error="{}: {}".format(type(exc).__name__, exc))
-    mode = stat.S_IMODE(os.stat(ctx.config_path).st_mode)
+    failed: List[str] = []
+    for path in targets:
+        try:
+            os.chmod(path, 0o600)
+        except OSError as exc:
+            failed.append("{}: {}: {}".format(path, type(exc).__name__, exc))
+    remaining = [
+        "{} is mode {}".format(path, oct(stat.S_IMODE(os.stat(path).st_mode)))
+        for path in targets
+        if stat.S_IMODE(os.stat(path).st_mode) & 0o077
+    ]
+    if failed or remaining:
+        return FixOutcome(
+            "config.chmod",
+            item.id,
+            False,
+            error="; ".join(failed + remaining),
+            evidence={"paths": targets},
+        )
     return FixOutcome(
         "config.chmod",
         item.id,
-        mode == 0o600,
-        "set {} to mode {}".format(ctx.config_path, oct(mode)),
-        evidence={"path": ctx.config_path, "mode": oct(mode)},
+        True,
+        "set {} to mode 0600".format(", ".join(targets)),
+        evidence={"paths": targets, "mode": "0o600"},
     )
 
 
@@ -2509,7 +2718,16 @@ def fix_config_schema(ctx: DoctorContext, item: CheckResult) -> FixOutcome:
     dropped: List[str] = []
     replaced: List[str] = []
     for key in list(payload.keys()):
-        numeric = key in ("max_turns", "max_tokens", "timeout", "temperature", "stream", "yolo", "compact")
+        numeric = key in (
+            "max_turns",
+            "max_tokens",
+            "timeout",
+            "temperature",
+            "stream",
+            "yolo",
+            "compact",
+            "allow_unattended_programs",
+        )
         textual = key in ("api_base", "model", "api_key", "workspace", "sessions_dir", "spill_dir")
         if not (numeric or textual) or payload[key] is None:
             continue
@@ -2549,7 +2767,7 @@ def fix_config_schema(ctx: DoctorContext, item: CheckResult) -> FixOutcome:
 
 def fix_workspace_create(ctx: DoctorContext, item: CheckResult) -> FixOutcome:
     try:
-        os.makedirs(ctx.workspace, exist_ok=True)
+        mkdir_private(ctx.workspace)  # 0700: programs, memory and spill files live here
     except OSError as exc:
         return FixOutcome("workspace.create", item.id, False, error="{}: {}".format(type(exc).__name__, exc))
     return FixOutcome("workspace.create", item.id, True, "created {}".format(ctx.workspace))
@@ -2557,7 +2775,7 @@ def fix_workspace_create(ctx: DoctorContext, item: CheckResult) -> FixOutcome:
 
 def fix_sessions_create(ctx: DoctorContext, item: CheckResult) -> FixOutcome:
     try:
-        os.makedirs(ctx.sessions_dir, exist_ok=True)
+        mkdir_private(ctx.sessions_dir)  # 0700: the logs hold every prompt and result
     except OSError as exc:
         return FixOutcome("sessions.create", item.id, False, error="{}: {}".format(type(exc).__name__, exc))
     return FixOutcome("sessions.create", item.id, True, "created {}".format(ctx.sessions_dir))
@@ -2595,13 +2813,15 @@ def _truncate_torn_tail(path: str) -> Tuple[bool, str]:
         return False, "no torn final line found"
     if fragment:
         try:
-            with open(path + ".torn", "ab") as handle:
+            # The fragment is user data torn out of a session log: it gets the same 0600
+            # as the log it came from.
+            with open_private(path + ".torn", append=True, binary=True) as handle:
                 handle.write(fragment)
         except OSError:  # pragma: no cover - best effort; the fragment is expendable
             pass
     temporary = path + ".doctor-tmp"
     try:
-        with open(path, "rb") as source, open(temporary, "wb") as target:
+        with open(path, "rb") as source, open_private(temporary, truncate=True, binary=True) as target:
             remaining = keep_until
             while remaining > 0:
                 chunk = source.read(min(65536, remaining))
@@ -2783,7 +3003,7 @@ def fix_model_rewrite(ctx: DoctorContext, item: CheckResult) -> FixOutcome:
 
 def fix_shortcuts_doc(ctx: DoctorContext, item: CheckResult) -> FixOutcome:
     try:
-        os.makedirs(ctx.workspace, exist_ok=True)
+        mkdir_private(ctx.workspace)
     except OSError as exc:
         return FixOutcome("shortcuts.write_doc", item.id, False, error="{}: {}".format(type(exc).__name__, exc))
     try:
@@ -2803,7 +3023,7 @@ def fix_shortcuts_doc(ctx: DoctorContext, item: CheckResult) -> FixOutcome:
 def fix_libs_doc(ctx: DoctorContext, item: CheckResult) -> FixOutcome:
     """Write PYTO_LIBS.md from the merged catalogue, and persist the probe next to it."""
     try:
-        os.makedirs(ctx.workspace, exist_ok=True)
+        mkdir_private(ctx.workspace)
     except OSError as exc:
         return FixOutcome("libs.write_doc", item.id, False, error="{}: {}".format(type(exc).__name__, exc))
     # Record what this device has first, so the document and the cache agree, then render.
@@ -2932,6 +3152,13 @@ FIXES: Dict[str, Fix] = {
     for fix in (
         Fix("config.create", "config_present", "write a starter config", False, fix_config_create),
         Fix("config.chmod", "config_permissions", "tighten the config file mode to 0600", True, fix_config_chmod),
+        Fix(
+            "permissions.tighten",
+            "file_permissions",
+            "make sessions, memory, spill files and state owner-only (0600/0700)",
+            False,
+            fix_permissions_tighten,
+        ),
         Fix("config.schema_repair", "config_schema", "drop invalid config values so defaults apply", False, fix_config_schema),
         Fix("workspace.create", "workspace", "create the workspace directory", True, fix_workspace_create),
         Fix("sessions.create", "sessions", "create the sessions directory", True, fix_sessions_create),
@@ -2958,6 +3185,7 @@ CHECKS: Tuple[Tuple[str, Callable[[DoctorContext], CheckResult]], ...] = (
     ("config_parses", check_config_parses),
     ("config_schema", check_config_schema),
     ("config_permissions", check_config_permissions),
+    ("file_permissions", check_file_permissions),
     ("api_key_present", check_api_key_present),
     ("api_key_shape", check_api_key_shape),
     ("network_reachable", check_network_reachable),
@@ -2983,6 +3211,7 @@ CHECK_TITLES: Dict[str, str] = {
     "config_parses": "Config file is valid JSON",
     "config_schema": "Config keys are known and well-typed",
     "config_permissions": "Config file mode is 0600",
+    "file_permissions": "Harness files are private (0600/0700)",
     "api_key_present": "API key is set",
     "api_key_shape": "API key looks like a credential",
     "network_reachable": "API host is reachable",
@@ -3271,14 +3500,9 @@ def save_health(ctx: DoctorContext, results: Sequence[CheckResult]) -> Optional[
     }
     path = ctx.health_path
     try:
-        os.makedirs(ctx.state, exist_ok=True)
+        mkdir_private(ctx.state)
         temporary = path + ".tmp"
-        with open(temporary, "w", encoding="utf-8") as handle:
-            json.dump(payload, handle, indent=2, sort_keys=True)
-        try:
-            os.chmod(temporary, 0o600)
-        except OSError:  # pragma: no cover - non-POSIX
-            pass
+        write_private(temporary, json.dumps(payload, indent=2, sort_keys=True) + "\n")
         os.replace(temporary, path)
     except OSError:
         return None
