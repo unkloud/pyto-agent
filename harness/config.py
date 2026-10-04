@@ -3,7 +3,7 @@
 Precedence, lowest to highest::
 
     built-in defaults
-    ~/.pyto_harness/config.json
+    ~/pyto_harness/config.json
     environment (DEEPSEEK_API_KEY, OPENAI_API_KEY, PYTO_HARNESS_MODEL, ...)
     explicit keyword arguments (CLI flags)
 
@@ -36,7 +36,9 @@ DEFAULT_API_BASE = "https://api.deepseek.com"
 DEFAULT_MODEL = "deepseek-chat"
 DEFAULT_MAX_TURNS = 8
 
-#: Config file location.  Overridable for tests with PYTO_HARNESS_CONFIG.
+#: Config file location.  Overridable for tests with PYTO_HARNESS_CONFIG.  The directory
+#: name is the harness's one state-directory constant (``harness.home.STATE_DIR_NAME``):
+#: no module spells it out a second time.
 CONFIG_DIR_NAME = STATE_DIR_NAME
 CONFIG_FILE_NAME = "config.json"
 
@@ -189,7 +191,7 @@ def default_state_dir() -> str:
 
     Precedence: ``PYTO_HARNESS_STATE_DIR``, then the directory of ``PYTO_HARNESS_CONFIG``
     (so a portable install or a test keeps its state next to its config), then
-    ``~/.pyto_harness`` (resolved, never a literal tilde).
+    ``~/pyto_harness`` (resolved, never a literal tilde).
     """
     override = os.environ.get(ENV_STATE_DIR)
     if override:

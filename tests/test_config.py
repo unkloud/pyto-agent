@@ -225,11 +225,20 @@ class TestHomeDerivedPaths(TempDirTestCase):
             {"PYTO_HARNESS_HOME": hatch, "PYTO_HARNESS_CONFIG": "", "PYTO_HARNESS_STATE_DIR": ""},
         ):
             self.assertEqual(default_home(), hatch)
-            self.assertEqual(default_config_path(), os.path.join(hatch, ".pyto_harness", "config.json"))
-            self.assertEqual(default_state_dir(), os.path.join(hatch, ".pyto_harness"))
-            self.assertEqual(default_sessions_dir(), os.path.join(hatch, ".pyto_harness", "sessions"))
+            derived = {
+                "config": default_config_path(),
+                "state": default_state_dir(),
+                "sessions": default_sessions_dir(),
+            }
+            self.assertEqual(derived["config"], os.path.join(hatch, home.STATE_DIR_NAME, "config.json"))
+            self.assertEqual(derived["state"], os.path.join(hatch, home.STATE_DIR_NAME))
+            self.assertEqual(derived["sessions"], os.path.join(hatch, home.STATE_DIR_NAME, "sessions"))
             self.assertEqual(default_workspace(), os.path.join(hatch, "pyto_harness_workspace"))
             self.assertEqual(default_spill_dir(), os.path.join(hatch, "pyto_harness_workspace", "tool-output"))
+            # Nothing the Files app has to show may be hidden: no dot-prefixed segment.
+            for label, path in derived.items():
+                for part in os.path.relpath(path, hatch).split(os.sep):
+                    self.assertFalse(part.startswith("."), "{} is hidden: {}".format(label, path))
         self.assertTrue(os.path.isdir(hatch), "the escape hatch is created before it is used")
 
     def test_state_dir_follows_a_portable_config_file(self) -> None:

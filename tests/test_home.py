@@ -1,17 +1,19 @@
 """The home resolver: a writable, absolute ``~`` even where Pyto has none.
 
-The bug these tests pin down was reported from a real iPhone:
-
-    [Errno 1] Operation not permitted: '~/.pyto_harness'
-
-Pyto has no usable home directory, so ``os.path.expanduser("~")`` returns the string
-``"~"`` and every derived path became a *relative* path with a literal tilde.  The first
-write tried to create a directory literally called ``~`` and iOS refused it.
+The bug these tests pin down was reported from a real iPhone: iOS refused to create the
+harness's state directory because the path still carried a literal tilde and the folder
+name began with a dot.  Pyto has no usable home directory, so
+``os.path.expanduser("~")`` returns the string ``"~"`` and every derived path became a
+*relative* path with a literal tilde.  The first write tried to create a directory
+literally called ``~`` and iOS refused it.
 
 The simulation used everywhere here is the honest one: ``os.path.expanduser`` is
 monkeypatched to return its argument unchanged for a leading ``~`` — exactly what Pyto
 effectively does — and the candidate directories are made genuinely unwritable with a
 mode change, so the resolver's write probe really fails.  No device, no network.
+
+:class:`TestLegacyStateMigration` is the only place in the tests that spells the old,
+hidden folder name out in full: that is the spelling it exists to move.
 """
 
 from __future__ import annotations
@@ -134,7 +136,7 @@ class TestBrokenExpanduser(HomeTestCase):
             home.resolve_home()
         self.assertTrue(
             os.path.isdir(os.path.join(opened, home.STATE_DIR_NAME)),
-            "the resolver must prove it can create .pyto_harness where it will live",
+            "the resolver must prove it can create {} where it will live".format(home.STATE_DIR_NAME),
         )
 
     def test_the_note_names_the_winner_and_the_reason(self) -> None:
@@ -263,7 +265,7 @@ class TestPytoFallback(HomeTestCase):
         self.assertTrue(no_tilde(resolved))
         self.assertTrue(
             os.path.isdir(os.path.join(cwd, home.STATE_DIR_NAME)),
-            ".pyto_harness must be created in the folder Pyto opened",
+            "{} must be created in the folder Pyto opened".format(home.STATE_DIR_NAME),
         )
         self.assertEqual(choice.source, "cwd")
         self.assertIn("Pyto", choice.note)
@@ -301,7 +303,7 @@ class TestNothingWritable(HomeTestCase):
                 home.resolve_home()
         message = str(caught.exception)
         self.assertIn("PYTO_HARNESS_HOME", message)
-        self.assertIn("~/.pyto_harness", message)
+        self.assertIn("~/{}".format(home.STATE_DIR_NAME), message)
         self.assertIn(os.getcwd(), message, "the message must name the folder Pyto opened")
         self.assertIn("os.getcwd()", message)
         self.assertEqual(caught.exception.code, "CONFIG_ERROR")
@@ -403,7 +405,7 @@ class TestUserSuppliedPaths(HomeTestCase):
         self.assertIn("~", str(caught.exception))
         self.assertIn("absolute path", str(caught.exception))
         self.assertFalse(os.path.exists(os.path.join(cwd, "~")), "a directory named '~' was created")
-        self.assertFalse(os.path.exists(os.path.join(cwd, ".pyto_harness")))
+        self.assertFalse(os.path.exists(os.path.join(cwd, home.STATE_DIR_NAME)))
 
     def test_session_paths_with_a_literal_tilde_are_rejected(self) -> None:
         os.chdir(self.make_dir("Documents"))
@@ -434,6 +436,140 @@ class TestUserSuppliedPaths(HomeTestCase):
             expanded = default_home()
             self.assertEqual(expanded, hatch)
             self.assertEqual(default_config_path(), os.path.join(expanded, home.STATE_DIR_NAME, "config.json"))
+
+
+class TestVisibleStateDirectory(HomeTestCase):
+    """The state folder is ``pyto_harness`` — no leading dot, so the Files app shows it."""
+
+    def test_a_fresh_home_resolves_to_the_visible_state_directory(self) -> None:
+        home_dir = self.make_dir("home")
+        with self.unset_env(PYTO_HARNESS_HOME=home_dir, PYTO_HARNESS_CONFIG="", PYTO_HARNESS_STATE_DIR=""):
+            home.reset_home_cache()
+            resolved = {
+                "home": default_home(),
+                "state": default_state_dir(),
+                "config": default_config_path(),
+                "sessions": default_sessions_dir(),
+                "workspace": default_workspace(),
+                "spill": default_spill_dir(),
+            }
+        self.assertEqual(resolved["home"], home_dir)
+        self.assertEqual(resolved["state"], os.path.join(home_dir, home.STATE_DIR_NAME))
+        self.assertEqual(resolved["config"], os.path.join(home_dir, home.STATE_DIR_NAME, "config.json"))
+        self.assertEqual(resolved["sessions"], os.path.join(home_dir, home.STATE_DIR_NAME, "sessions"))
+        self.assertEqual(resolved["workspace"], os.path.join(home_dir, "pyto_harness_workspace"))
+        self.assertEqual(resolved["spill"], os.path.join(home_dir, "pyto_harness_workspace", "tool-output"))
+        for label, value in resolved.items():
+            if label == "home":
+                continue
+            self.assertTrue(os.path.isabs(value), value)
+            self.assertTrue(no_tilde(value), value)
+            for part in os.path.relpath(value, home_dir).split(os.sep):
+                self.assertFalse(part.startswith("."), "{} is hidden from Files: {}".format(label, value))
+
+
+class TestLegacyStateMigration(HomeTestCase):
+    """The one-time move of ``.pyto_harness`` to ``pyto_harness``.
+
+    This is the only test module that spells the old name out: the rules below exist so
+    the move can never lose data, never merge, and never touch the new directory.
+    """
+
+    LEGACY = ".pyto_harness"
+    MESSAGE = "moved the old ~/.pyto_harness to ~/pyto_harness so the Files app can see it"
+
+    def write(self, path: str, text: str = "{}\n") -> str:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        return path
+
+    def read(self, path: str) -> str:
+        with open(path, encoding="utf-8") as handle:
+            return handle.read()
+
+    def test_the_move_keeps_every_file_and_returns_the_users_message(self) -> None:
+        home_dir = self.make_dir("home")
+        self.write(os.path.join(home_dir, self.LEGACY, "config.json"), '{"api_key": "sk-not-real"}')
+        self.write(os.path.join(home_dir, self.LEGACY, "sessions", "s.jsonl"), '{"kind": "header"}\n')
+
+        message = home.migrate_legacy_state(home_dir)
+
+        self.assertEqual(message, self.MESSAGE)
+        self.assertEqual(message, home.MIGRATED_MESSAGE)
+        self.assertFalse(os.path.lexists(os.path.join(home_dir, self.LEGACY)), "the hidden folder must be gone")
+        moved = os.path.join(home_dir, home.STATE_DIR_NAME)
+        self.assertEqual(self.read(os.path.join(moved, "config.json")), '{"api_key": "sk-not-real"}')
+        self.assertEqual(self.read(os.path.join(moved, "sessions", "s.jsonl")), '{"kind": "header"}\n')
+        self.assertEqual(home.state_dir_in(home_dir), moved)
+        self.assertEqual(home.legacy_state_dir_in(home_dir), os.path.join(home_dir, self.LEGACY))
+
+    def test_the_move_is_idempotent(self) -> None:
+        home_dir = self.make_dir("home")
+        self.write(os.path.join(home_dir, self.LEGACY, "config.json"), "{}")
+        self.assertEqual(home.migrate_legacy_state(home_dir), self.MESSAGE)
+        self.assertEqual(home.migrate_legacy_state(home_dir), "", "the second call must do nothing")
+        self.assertTrue(os.path.isfile(os.path.join(home_dir, home.STATE_DIR_NAME, "config.json")))
+
+    def test_nothing_to_do_when_neither_directory_exists(self) -> None:
+        home_dir = self.make_dir("home")
+        self.assertEqual(home.migrate_legacy_state(home_dir), "")
+        self.assertEqual(os.listdir(home_dir), [], "nothing may be created by a no-op")
+
+    def test_the_new_directory_is_never_touched_or_merged_into(self) -> None:
+        home_dir = self.make_dir("home")
+        new_marker = self.write(os.path.join(home_dir, home.STATE_DIR_NAME, "mine.txt"), "keep me\n")
+        self.write(os.path.join(home_dir, self.LEGACY, "old.txt"), "old\n")
+
+        message = home.migrate_legacy_state(home_dir)
+
+        self.assertEqual(message, "", "both present: the new directory wins, silently")
+        self.assertEqual(self.read(new_marker), "keep me\n")
+        self.assertFalse(os.path.exists(os.path.join(home_dir, home.STATE_DIR_NAME, "old.txt")), "never merge")
+        self.assertTrue(os.path.isfile(os.path.join(home_dir, self.LEGACY, "old.txt")), "left alone")
+
+    def test_a_regular_file_is_refused_reported_and_left_alone(self) -> None:
+        home_dir = self.make_dir("home")
+        legacy = self.write(os.path.join(home_dir, self.LEGACY), "not a directory\n")
+
+        message = home.migrate_legacy_state(home_dir)
+
+        self.assertIn("is a file, not a folder", message)
+        self.assertIn(legacy, message)
+        self.assertEqual(self.read(legacy), "not a directory\n", "the file must be untouched")
+        self.assertFalse(os.path.lexists(os.path.join(home_dir, home.STATE_DIR_NAME)))
+
+    def test_a_symlink_is_refused_reported_and_left_alone(self) -> None:
+        home_dir = self.make_dir("home")
+        elsewhere = self.make_dir("elsewhere")
+        self.write(os.path.join(elsewhere, "precious.txt"), "somebody else's data\n")
+        os.symlink(elsewhere, os.path.join(home_dir, self.LEGACY))
+
+        message = home.migrate_legacy_state(home_dir)
+
+        self.assertIn("symbolic link", message)
+        self.assertTrue(os.path.islink(os.path.join(home_dir, self.LEGACY)), "the link must stay where it is")
+        self.assertTrue(os.path.isfile(os.path.join(elsewhere, "precious.txt")), "the target must not be moved")
+        self.assertFalse(os.path.lexists(os.path.join(home_dir, home.STATE_DIR_NAME)))
+
+    def test_an_unwritable_parent_is_reported_not_raised(self) -> None:
+        home_dir = self.make_dir("home")
+        legacy = os.path.join(home_dir, self.LEGACY)
+        self.write(os.path.join(legacy, "config.json"), "{}")
+        if os.geteuid() == 0:  # pragma: no cover - root can rename inside a 0500 directory
+            self.skipTest("running as root: rename succeeds regardless of the mode")
+        os.chmod(home_dir, 0o500)
+        self.addCleanup(os.chmod, home_dir, 0o700)
+
+        message = home.migrate_legacy_state(home_dir)  # must not raise
+
+        self.assertIn("could not move", message)
+        self.assertIn(legacy, message)
+        self.assertTrue(os.path.isfile(os.path.join(legacy, "config.json")), "a failed move leaves it alone")
+        self.assertFalse(os.path.lexists(os.path.join(home_dir, home.STATE_DIR_NAME)))
+
+    def test_an_empty_home_is_a_no_op(self) -> None:
+        self.assertEqual(home.migrate_legacy_state(""), "")
 
 
 if __name__ == "__main__":

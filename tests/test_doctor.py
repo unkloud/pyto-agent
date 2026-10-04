@@ -908,7 +908,7 @@ class TestHomeReporting(DoctorTestCase):
     def test_an_unresolved_home_is_printed_not_hidden(self) -> None:
         ctx = self.make_ctx()
         ctx.home = ""
-        ctx.home_error = "cannot find a writable folder for ~/.pyto_harness"
+        ctx.home_error = "cannot find a writable folder for ~/{}".format(doctor.home.STATE_DIR_NAME)
         report = doctor.format_report([doctor.result("home", "Home folder", "unfixable", "nope")], ctx=ctx)
         self.assertIn("home       : <unresolved", report)
 
@@ -933,7 +933,10 @@ class TestHomeReporting(DoctorTestCase):
     def test_home_check_reports_an_unresolvable_home_without_raising(self) -> None:
         ctx = self.make_ctx()
         ctx.home = ""
-        ctx.home_error = "cannot find a writable folder for ~/.pyto_harness\n" + doctor.home.WORKAROUND
+        ctx.home_error = (
+            "cannot find a writable folder for ~/{}\n".format(doctor.home.STATE_DIR_NAME)
+            + doctor.home.WORKAROUND
+        )
         item = doctor.run_one(ctx, "home")
         self.assertTrue(item.failed())
         self.assertIn("PYTO_HARNESS_HOME", item.human_action or "")
@@ -976,6 +979,43 @@ class TestHomeReporting(DoctorTestCase):
         self.assertIn("home", doctor.CHECK_FUNCTIONS)
         self.assertIn("home", doctor.CHECK_TITLES)
         self.assertIn("home", doctor.FIXES["home.create"].check_id)
+
+    def test_for_config_moves_a_hidden_state_directory_and_reports_it(self) -> None:
+        """``--doctor`` is a run start too: it migrates before a single check reads state."""
+        home_dir = self.path("legacy-home")
+        legacy = os.path.join(home_dir, doctor.home.LEGACY_STATE_DIR_NAME)
+        os.makedirs(os.path.join(legacy, "sessions"), exist_ok=True)
+        with open(os.path.join(legacy, "config.json"), "w", encoding="utf-8") as handle:
+            handle.write("{}")
+        with open(os.path.join(legacy, "sessions", "s.jsonl"), "w", encoding="utf-8") as handle:
+            handle.write("{}\n")
+
+        ctx = self.make_ctx(env={"PYTO_HARNESS_HOME": home_dir})
+
+        new_state = os.path.join(home_dir, doctor.home.STATE_DIR_NAME)
+        self.assertEqual(ctx.home, home_dir)
+        self.assertEqual(ctx.state_migration, doctor.home.MIGRATED_MESSAGE)
+        self.assertTrue(os.path.isfile(os.path.join(new_state, "config.json")))
+        self.assertTrue(os.path.isfile(os.path.join(new_state, "sessions", "s.jsonl")))
+        self.assertFalse(os.path.lexists(legacy), "the old hidden folder must be gone")
+        report = doctor.format_report([doctor.result("home", "Home folder", "ok", "fine")], ctx=ctx)
+        self.assertIn("migration  : {}".format(doctor.home.MIGRATED_MESSAGE), report)
+
+    def test_a_leftover_hidden_state_directory_is_reported_as_a_warning(self) -> None:
+        home_dir = self.path("both-homes")
+        new_state = os.path.join(home_dir, doctor.home.STATE_DIR_NAME)
+        legacy = os.path.join(home_dir, doctor.home.LEGACY_STATE_DIR_NAME)
+        os.makedirs(new_state, exist_ok=True)
+        os.makedirs(legacy, exist_ok=True)
+        ctx = self.make_ctx(state=new_state)
+        ctx.home = home_dir
+        item = doctor.run_one(ctx, "home")
+        self.assertEqual(item.status, "warn", item.detail)
+        self.assertIn(new_state, item.detail)
+        self.assertIn("in use", item.detail)
+        self.assertIn("untouched", item.detail)
+        self.assertIn(legacy, item.human_action or "")
+        self.assertTrue(os.path.isdir(legacy), "the doctor must never delete it")
 
 
 class TestSecretsNeverLeak(DoctorTestCase):

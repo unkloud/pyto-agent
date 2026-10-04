@@ -1,9 +1,9 @@
-"""The one place that decides where ``~/.pyto_harness`` really is.
+"""The one place that decides where ``~/pyto_harness`` really is.
 
 On iOS, inside Pyto, there is no usable home directory: ``HOME`` is unset (or points
 somewhere the sandbox refuses) and ``os.path.expanduser("~")`` returns the string ``"~"``
 because CPython cannot resolve a ``pwd`` entry.  Code that trusts it builds paths such as
-``~/.pyto_harness`` — a *relative* path with a literal tilde — and iOS answers the first
+``~/pyto_harness`` — a *relative* path with a literal tilde — and iOS answers the first
 ``mkdir`` with ``[Errno 1] Operation not permitted``.
 
 This module is the fix, in one place: :func:`resolve_home` returns an **absolute,
@@ -18,11 +18,18 @@ Precedence, first writable candidate wins:
 2. ``HOME`` from the environment, when it is absolute and writable;
 3. ``os.path.expanduser("~")``, when the result is absolute (i.e. really expanded);
 4. the folder Pyto runs scripts from — the current working directory, then the folder
-   that holds ``run.py`` — each probed through a ``.pyto_harness`` directory inside it;
+   that holds ``run.py`` — each probed through a ``pyto_harness`` directory inside it;
 5. :func:`tempfile.gettempdir` with a ``pyto_harness`` subdirectory.  This one is
    **temporary**: iOS can purge it at any time, so a loud warning is printed;
 6. nothing writable → :class:`ConfigError` naming the folder Pyto opened and the exact
    line to run.
+
+The state directory is :data:`STATE_DIR_NAME` (``pyto_harness``), deliberately without a
+leading dot: the iOS Files app hides dot-folders, so a hidden state directory could not be
+seen, saved into, backed up or deleted from the device.  Installs made before the rename
+kept it under the legacy hidden name, :data:`LEGACY_STATE_DIR_NAME`;
+:func:`migrate_legacy_state` moves that one aside exactly once, at startup, and never
+touches anything else.
 
 The winner is cached per process (one probe, not one per call) and keyed by the values
 that can change the answer, so setting ``PYTO_HARNESS_HOME`` in a running interpreter is
@@ -32,6 +39,7 @@ honoured.  :func:`reset_home_cache` clears it for tests.
 from __future__ import annotations
 
 import os
+import shutil
 import sys
 import tempfile
 from dataclasses import dataclass, field
@@ -40,15 +48,19 @@ from typing import Dict, List, Mapping, Optional, Tuple
 from .errors import ConfigError
 from .security import mkdir_private
 
-#: The directory the harness keeps its own state in, inside the resolved home.
-STATE_DIR_NAME = ".pyto_harness"
+#: The directory the harness keeps its own state in, inside the resolved home.  Visible in
+#: the iOS Files app: ``pyto_harness``, no leading dot.
+STATE_DIR_NAME = "pyto_harness"
+#: The name releases before the visible-state change used.  Read once at startup by
+#: :func:`migrate_legacy_state` and then left empty; nothing writes to it any more.
+LEGACY_STATE_DIR_NAME = ".pyto_harness"
 #: The default workspace directory, inside the resolved home.
 WORKSPACE_DIR_NAME = "pyto_harness_workspace"
 #: The subdirectory of the system temp dir used when nothing else is writable.
 TEMP_HOME_DIR_NAME = "pyto_harness"
 
 #: The escape hatch: a directory to use *as the home directory* (state goes in
-#: ``$PYTO_HARNESS_HOME/.pyto_harness``).
+#: ``$PYTO_HARNESS_HOME/pyto_harness``).
 ENV_HOME = "PYTO_HARNESS_HOME"
 #: The config-file override, honoured next to the home (kept here so one module owns
 #: every path rule; :mod:`harness.config` reads it).
@@ -57,7 +69,7 @@ ENV_CONFIG = "PYTO_HARNESS_CONFIG"
 ENV_STATE_DIR = "PYTO_HARNESS_STATE_DIR"
 
 #: Prefix of the probe file; created 0600 and deleted immediately.
-PROBE_PREFIX = ".pyto_harness-write-probe-"
+PROBE_PREFIX = STATE_DIR_NAME + "-write-probe-"
 
 #: The exact line a user can paste.  Quoted verbatim in every failure message.
 WORKAROUND = (
@@ -67,10 +79,16 @@ WORKAROUND = (
 
 #: One-line reminder printed (once per process) when the temp fallback wins.
 TEMPORARY_WARNING = (
-    "[warning] ~/.pyto_harness is not usable here; using {path} instead.\n"
+    "[warning] ~/" + STATE_DIR_NAME + " is not usable here; using {path} instead.\n"
     "[warning] That folder is temporary: iOS can purge it at any time, and the config,\n"
     "[warning] sessions, memory and backups kept in it can disappear. Set {env} to a\n"
     "[warning] folder you control (for example: {example}) to keep them."
+)
+
+#: What the user is told when the old, hidden state directory has been moved.  Plain human
+#: text (the tilde is a product name here, not a path the harness will ever open).
+MIGRATED_MESSAGE = "moved the old ~/{legacy} to ~/{state} so the Files app can see it".format(
+    legacy=LEGACY_STATE_DIR_NAME, state=STATE_DIR_NAME
 )
 
 
@@ -192,6 +210,77 @@ def _probe(directory: str, *, create: bool, subdir: str = "") -> Tuple[bool, str
     target = os.path.join(directory, subdir) if subdir else directory
     problem = writability_problem(target, create=create or bool(subdir))
     return (problem is None), (problem or "")
+
+
+# --------------------------------------------------------------------------------------
+# The visible state directory, and the one-time move out of hiding
+# --------------------------------------------------------------------------------------
+
+
+def state_dir_in(home_dir: str) -> str:
+    """``<home_dir>/pyto_harness`` — the state directory this release uses."""
+    return os.path.join(home_dir, STATE_DIR_NAME)
+
+
+def legacy_state_dir_in(home_dir: str) -> str:
+    """``<home_dir>`` + :data:`LEGACY_STATE_DIR_NAME` — the pre-rename hidden location."""
+    return os.path.join(home_dir, LEGACY_STATE_DIR_NAME)
+
+
+def migrate_legacy_state(home_dir: str) -> str:
+    """Move a hidden ``<home>/.pyto_harness`` to ``<home>/pyto_harness``, once.
+
+    Called where a run starts (``run.py``, ``install.py``, ``DoctorContext.for_config``),
+    never from a library helper in the middle of a session, so it can only ever happen
+    before anything has opened the state directory.
+
+    The rules, in order:
+
+    * ``<home>/pyto_harness`` already exists → do **nothing**.  A new directory is never
+      touched and never merged into.
+    * nothing named ``.pyto_harness`` → nothing to do.
+    * ``.pyto_harness`` is a symlink or a regular file → refuse and report it.  A symlink
+      could point anywhere, and moving through it would move somebody else's directory.
+    * otherwise rename it (``os.replace``), falling back to ``shutil.move`` for a
+      cross-device home.  Both failing leaves the old directory exactly where it was.
+
+    Returns the message to show the user, or ``""`` when there was nothing to do.  It
+    never deletes anything: a failed move leaves the old directory in place, and a
+    refusal names the path so the user can decide.
+    """
+    if not home_dir:
+        return ""
+    new = state_dir_in(home_dir)
+    legacy = legacy_state_dir_in(home_dir)
+    if os.path.lexists(new):
+        return ""
+    if not os.path.lexists(legacy):
+        return ""
+    if os.path.islink(legacy):
+        return (
+            "{} is a symbolic link, not a folder, so the old state was left alone.\n"
+            "Move it aside yourself (or delete the link) and re-run; the harness will not "
+            "follow a link out of your home.".format(legacy)
+        )
+    if not os.path.isdir(legacy):
+        return (
+            "{} is a file, not a folder, so it was left alone (it may be yours, not the\n"
+            "harness's). Move it aside and re-run if it is a leftover.".format(legacy)
+        )
+    try:
+        os.replace(legacy, new)
+    except OSError as first:
+        try:
+            shutil.move(legacy, new)
+        except OSError as second:
+            return (
+                "could not move the old {} to {} ({}; then {}).\n"
+                "Nothing was deleted: the old folder is still there, untouched. If a "
+                "partial {} was created, delete it and re-run.".format(
+                    legacy, new, _oserror_text(first), _oserror_text(second), new
+                )
+            )
+    return MIGRATED_MESSAGE
 
 
 # --------------------------------------------------------------------------------------
@@ -338,7 +427,7 @@ def describe_home(purpose: str = "state") -> str:
 
 
 def _resolve(purpose: str, environ: Mapping[str, str]) -> HomeChoice:
-    probe_subdir = STATE_DIR_NAME if purpose == "state" else ".pyto_harness_{}".format(purpose)
+    probe_subdir = STATE_DIR_NAME if purpose == "state" else "{}_{}".format(STATE_DIR_NAME, purpose)
     skipped: List[str] = []
     tried: List[str] = []
 

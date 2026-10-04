@@ -82,9 +82,9 @@ What the gate does, in order:
 3. **Static guards before any write.** `ast.parse(feature_version=(3, 10))` (so 3.11+ syntax
    is caught on the phone, not at the next launch) and the stdlib-only import scan from
    `stdlib_audit.py`. Empty sources and byte-identical sources are refused too.
-4. **Snapshot.** `harness/` + `run.py` are copied to `~/.pyto_harness/backups/<timestamp>-<label>/`
+4. **Snapshot.** `harness/` + `run.py` are copied to `~/pyto_harness/backups/<timestamp>-<label>/`
    with a `manifest.json` of SHA-256 hashes, **signed with an HMAC keyed by a per-install
-   secret** (`~/.pyto_harness/backup.key`, mode 0600, never inside the backup). A restore
+   secret** (`~/pyto_harness/backup.key`, mode 0600, never inside the backup). A restore
    refuses a manifest that is missing, unsigned, modified or does not match the payload
    hashes, and writes nothing in that case. The previous bytes are also held in memory.
 5. **Write, then run the offline test suite.**
@@ -308,4 +308,4 @@ and why an in-process program can defeat the jail — is in [SECURITY.md](SECURI
 
 If a repair loop ever goes wrong, the escapes are `--backups` (everything is a directory
 with hashes), `--restore <id>`, and simply re-copying the folder: nothing in the harness
-modifies anything outside `~/.pyto_harness/`, the workspace, and its own `harness/` + `run.py`.
+modifies anything outside `~/pyto_harness/`, the workspace, and its own `harness/` + `run.py`.

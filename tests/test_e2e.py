@@ -12,6 +12,7 @@ import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from unittest import mock
 
+from harness import home
 from harness.loop import LoopOptions, run_turn
 from harness.session import SessionLog
 from harness.tools_ios import build_registry, default_context
@@ -337,7 +338,7 @@ class TestUnexpandableWorkspace(TempDirTestCase):
         self.assertIn("configuration error", stderr.getvalue())
         self.assertIn("absolute path", stderr.getvalue())
         self.assertFalse(os.path.exists(os.path.join(cwd, "~")), "a directory named '~' was created")
-        self.assertFalse(os.path.exists(os.path.join(cwd, ".pyto_harness")))
+        self.assertFalse(os.path.exists(os.path.join(cwd, home.STATE_DIR_NAME)))
 
 
 if __name__ == "__main__":

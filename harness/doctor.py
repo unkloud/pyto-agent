@@ -207,12 +207,12 @@ def state_dir(env: Optional[Mapping[str, str]] = None, config_path: Optional[str
 
     Precedence: ``PYTO_HARNESS_STATE_DIR``, then the directory of ``PYTO_HARNESS_CONFIG``
     (so a test or a portable install keeps its state next to its config), then the
-    resolved home (``~/.pyto_harness`` — never a literal tilde, and never the temp
+    resolved home (``~/pyto_harness`` — never a literal tilde, and never the temp
     directory unless that is genuinely the only writable place).
 
     This helper is used by the repair/backup paths, which must still work *while* the
     doctor is reporting an unusable home, so a resolution failure falls back to
-    ``./.pyto_harness`` here; :func:`check_home` is what reports it as a failure.
+    ``./pyto_harness`` here; :func:`check_home` is what reports it as a failure.
     """
     environ = os.environ if env is None else env
     override = environ.get("PYTO_HARNESS_STATE_DIR")
@@ -382,6 +382,8 @@ class DoctorContext:
     state_data: Dict[str, Any] = field(default_factory=dict)
     #: Guards against a selftest that would recursively run the whole suite again.
     testing: bool = False
+    #: What the one-time move of a legacy hidden state directory did, for the header.
+    state_migration: str = ""
 
     # -- derived paths -------------------------------------------------------------
 
@@ -445,6 +447,15 @@ class DoctorContext:
         home_choice = home.resolve_home_choice(environ=environ)
         if not home_choice.ok:
             home_error = home_choice.error
+        # The state directory moved out of hiding in this release: move a legacy one now,
+        # before any check reads it, and keep the message so the report can name the move.
+        # This is the doctor's own startup hook: a normal run does it in run.py instead.
+        state_migration = ""
+        if home_choice.ok:
+            try:
+                state_migration = home.migrate_legacy_state(home_choice.path)
+            except Exception:  # noqa: BLE001 - housekeeping must never break a diagnosis
+                state_migration = ""
 
         def absolute(value: str, what: str, fallback: str) -> str:
             """Absolutise an explicit path, recording (not raising) an unexpandable ``~``."""
@@ -478,19 +489,20 @@ class DoctorContext:
             # Nothing is writable: keep the doctor alive so check_home can report the
             # actionable message instead of crashing the whole diagnostic.
             home_error = home_error or str(exc)
-            resolved_workspace = workspace or os.path.join(os.getcwd(), "pyto_harness_workspace")
+            resolved_workspace = workspace or os.path.join(os.getcwd(), home.WORKSPACE_DIR_NAME)
             resolved_sessions = sessions_dir or os.path.join(fallback_dir, "sessions")
         return cls(
             config=config,
             config_path=resolved_config_path,
             root=os.path.abspath(root or harness_root()),
             state=absolute(resolved_state, "state directory", fallback_dir),
-            workspace=absolute(resolved_workspace, "workspace", os.path.join(os.getcwd(), "pyto_harness_workspace")),
+            workspace=absolute(resolved_workspace, "workspace", os.path.join(os.getcwd(), home.WORKSPACE_DIR_NAME)),
             sessions_dir=absolute(resolved_sessions, "sessions directory", os.path.join(fallback_dir, "sessions")),
             home=home_choice.path,
             home_note=home_choice.note,
             home_source=home_choice.source,
             home_error=home_error,
+            state_migration=state_migration,
             env=environ,
             network=network,
             deep=deep,
@@ -1786,9 +1798,13 @@ def check_home(ctx: DoctorContext) -> CheckResult:
     """The resolved home directory and the state folder inside it.
 
     This is the check for the failure that broke real installs on iOS: a ``~`` that was
-    never expanded, so every path became ``~/.pyto_harness`` and the first ``mkdir`` was
+    never expanded, so every path became ``~/pyto_harness`` and the first ``mkdir`` was
     refused with ``Operation not permitted``.  It never raises: an unusable home is the
     thing it exists to report.
+
+    It also reports a leftover hidden state directory from before the rename: when both
+    the visible and the legacy folder exist, the visible one is in use and the old one is
+    untouched — the user deletes it when they are ready.
     """
     evidence: Dict[str, Any] = {"state": ctx.state}
     if ctx.home:
@@ -1851,6 +1867,36 @@ def check_home(ctx: DoctorContext) -> CheckResult:
                 "set PYTO_HARNESS_HOME to a folder you control, for example: "
                 'import os; os.environ["PYTO_HARNESS_HOME"] = os.getcwd()'
             ),
+            evidence=evidence,
+        )
+    legacy = home.legacy_state_dir_in(ctx.home)
+    if os.path.lexists(legacy):
+        evidence["legacy_state"] = legacy
+        human_action = (
+            "it is a leftover from before the state folder became visible; the harness "
+            "does not read it any more. Delete it when you are sure -- in the Files app "
+            "it is inside the Pyto folder (On My iPhone/iCloud -> Pyto), or with "
+            "`rm -rf {}`.".format(legacy)
+        )
+        if os.path.isdir(legacy) and not os.path.islink(legacy) and os.path.lexists(home.state_dir_in(ctx.home)):
+            return result(
+                "home",
+                "Home folder and state directory",
+                "warn",
+                "{} is in use; the old hidden {} is still there, untouched".format(
+                    home.state_dir_in(ctx.home), legacy
+                ),
+                human_action=human_action,
+                evidence=evidence,
+            )
+        return result(
+            "home",
+            "Home folder and state directory",
+            "warn",
+            "the old hidden state directory {} is still there, untouched ({})".format(
+                legacy, (ctx.state_migration or "the move did not happen").splitlines()[0]
+            ),
+            human_action=human_action,
             evidence=evidence,
         )
     return result(
@@ -3554,6 +3600,8 @@ def format_report(
         lines.append("workspace  : {}".format(ctx.workspace))
         lines.append("sessions   : {}".format(ctx.sessions_dir))
         lines.append("state      : {}".format(ctx.state))
+        if ctx.state_migration:
+            lines.append("migration  : {}".format(ctx.state_migration))
         lines.append("network    : {}".format("checked" if ctx.network else "not checked (fast pass / --no-network)"))
         lines.append("-" * 72)
     for status in REPORT_ORDER:

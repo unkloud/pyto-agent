@@ -20,7 +20,7 @@ multi-user system, and not a sandbox for code you do not trust.
 |---|---|---|
 | Text the model reads (a web page, a note, a calendar entry, the clipboard, a filename, a program's output, a `?task=` URL) | **Yes** | Prompt injection: instructions that steer the model into calling tools. This is the main realistic threat. |
 | Another app / extension / Shortcut on the device | Partly | Read anything inside Pyto's container that is group/world-readable, and anything in a shared location you put the workspace in (Files, iCloud Drive). This is what the `0600`/`0700` rules are for. |
-| A backup, sync conflict or a stale copy of `~/.pyto_harness` | Partly | Plant a snapshot directory, or an old config. This is what the signed snapshots are for. |
+| A backup, sync conflict or a stale copy of `~/pyto_harness` | Partly | Plant a snapshot directory, or an old config. This is what the signed snapshots are for. |
 | The model itself, when it is wrong or over-eager | **Yes** | Run a program that does something you did not intend, or ask for an approval you should refuse. |
 | A jailbroken device, a malicious Pyto build, or the vendor's own app | **No** | Everything here assumes the OS and Pyto behave. Nothing in this harness can defend against them. |
 | Someone holding your unlocked phone | **No** | They are you, as far as this app is concerned. |
@@ -48,7 +48,7 @@ the whole URL and a `why:` line, before anything happens.
   separate, poorer process: Pyto's `subprocess` is a shim, so the program runs
   **in-process** (`runpy`) with the harness's own authority — it can read this app's files,
   open sockets, reach the live object graph and read the API key out of memory or out of
-  `~/.pyto_harness/config.json`. An approval prompt for it would be a speed bump at best,
+  `~/pyto_harness/config.json`. An approval prompt for it would be a speed bump at best,
   because it would have to describe a program that has not been written yet in a language
   nobody reads at a glance.
 * **Approvals are a speed bump, not a boundary.** A prompt you click through, or a
@@ -134,7 +134,7 @@ never claims a bound it does not have — but it cannot make generated code unpr
 
 ## 5. Key handling
 
-* The key lives in **exactly one place you control**: `~/.pyto_harness/config.json`
+* The key lives in **exactly one place you control**: `~/pyto_harness/config.json`
   (mode `0600`) or the environment of the harness process. `--init` creates the file with
   `O_CREAT|O_EXCL` at `0600` and refuses to overwrite an existing config without `--force`.
 * The key is **not** in the environment of child processes or of the doctor's test
@@ -161,19 +161,25 @@ Everything the harness stores is **plaintext**:
 
 | Artifact | Where | Mode | What is in it |
 |---|---|---|---|
-| `config.json` | `~/.pyto_harness/` | `0600` | the API key |
+| `config.json` | `~/pyto_harness/` | `0600` | the API key |
 | `config.json.bak` | same | `0600` | a copy of it (created by `--doctor --fix`) |
-| `sessions/*.jsonl` | `~/.pyto_harness/sessions/` | `0600` | every prompt, tool argument and tool result, append-only |
+| `sessions/*.jsonl` | `~/pyto_harness/sessions/` | `0600` | every prompt, tool argument and tool result, append-only |
 | `memory.json` | workspace | `0600` | durable "facts", including anything you dictated |
 | `tool-output/*` | workspace | `0600` | the complete output a tool produced, including the part the model never saw |
-| `capabilities.json`, `health.json` | `~/.pyto_harness/` | `0600` | platform and check information, no secrets |
-| `backups/` | `~/.pyto_harness/` | source files | harness source only — never a key, a log or a workspace file |
+| `capabilities.json`, `health.json` | `~/pyto_harness/` | `0600` | platform and check information, no secrets |
+| `backups/` | `~/pyto_harness/` | source files | harness source only — never a key, a log or a workspace file |
+
+The state folder is named without a leading dot on purpose (`~/pyto_harness`), so the iOS
+Files app shows it and you can back it up or delete it from the device. That also means it
+is browsable, not hidden: the `0600`/`0700` modes above are what keep it private, and an
+install from an earlier release has its old `~/.pyto_harness` renamed to the visible name
+once, at the next run.
 
 **How to wipe it.** There is no `--forget` command yet, so deletion is manual, and it is
 worth doing on a schedule:
 
 1. delete the session logs you are done with: everything in
-   `~/.pyto_harness/sessions/` (that is the durable record of what the agent read and did);
+   `~/pyto_harness/sessions/` (that is the durable record of what the agent read and did);
 2. delete the workspace's `memory.json` if you told the agent personal facts;
 3. delete `workspace/tool-output/` (spilled tool output);
 4. `--doctor --fix` afterwards to restore the modes of whatever is left;

@@ -329,5 +329,34 @@ class TestRestore(RepairTestCase):
         self.assertEqual(result.tests["failures"], 0)
 
 
+class TestCopyStateDirectory(RepairTestCase):
+    """The per-copy state directory beside a clone: visible name, legacy still readable."""
+
+    def test_the_visible_name_is_used_for_a_copy(self) -> None:
+        self.assertEqual(repair.COPY_STATE_DIR_NAME, "pyto_harness_state")
+        self.assertFalse(repair.COPY_STATE_DIR_NAME.startswith("."), "the Files app must show it")
+        path = repair._state_for(self.root)
+        self.assertEqual(path, os.path.join(os.path.abspath(self.root), repair.COPY_STATE_DIR_NAME))
+        self.assertEqual(repair._backups_dir_for(self.root, None), os.path.join(path, "backups"))
+
+    def test_an_older_copy_keeps_its_hidden_state_readable(self) -> None:
+        """The legacy fallback is read-only in effect: old snapshots stay listable."""
+        legacy = os.path.join(self.root, repair.LEGACY_COPY_STATE_DIR_NAME)
+        os.makedirs(legacy)
+        with open(os.path.join(legacy, "marker.txt"), "w", encoding="utf-8") as handle:
+            handle.write("old\n")
+        self.assertEqual(repair._state_for(self.root), legacy)
+        result = repair.snapshot("after-legacy", root=self.root)
+        self.assertTrue(result.ok, result.render())
+        backups = os.path.join(legacy, "backups")
+        self.assertTrue(os.path.isdir(os.path.join(backups, result.backup_id)))
+        self.assertIn(result.backup_id, [entry["id"] for entry in repair.list_backups(backups_dir=backups)])
+
+        moved = os.path.join(self.root, repair.COPY_STATE_DIR_NAME)
+        os.makedirs(moved)
+        self.assertEqual(repair._state_for(self.root), moved, "the new name wins once it exists")
+        self.assertTrue(os.path.isfile(os.path.join(legacy, "marker.txt")), "never deleted, never merged")
+
+
 if __name__ == "__main__":
     unittest.main()

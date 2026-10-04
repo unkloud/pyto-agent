@@ -8,7 +8,7 @@ offline on Linux.
 Layering (no cycles)::
 
     errors / schema / textbudget   <- leaf helpers
-    home                           <- the one resolver for ~/.pyto_harness (no literal '~')
+    home                           <- the one resolver for ~/pyto_harness (no literal '~')
     config / session               <- persistence and settings
     llm                            <- provider transport
     tools                          <- registry + dispatch

@@ -176,12 +176,28 @@ def default_backups_dir() -> str:
     return os.path.join(doctor.state_dir(), "backups")
 
 
+#: State directory kept beside a *copy* of the tree (a repairs root that is not the
+#: installed one).  Visible, like the real state directory: no leading dot.
+COPY_STATE_DIR_NAME = "pyto_harness_state"
+#: What older copies used.  Read-only fallback: when only the legacy directory exists it
+#: is still used, so the snapshots and the gate an older copy wrote stay listable and
+#: restorable.  Nothing creates it any more.
+LEGACY_COPY_STATE_DIR_NAME = ".pyto_harness_state"
+
+
 def _state_for(root: str) -> str:
     """State dir for a repairs root: the real one for this install, a sibling for a copy."""
     real_root = doctor.harness_root()
     if os.path.abspath(root) == os.path.abspath(real_root):
         return doctor.state_dir()
-    return os.path.join(os.path.abspath(root), ".pyto_harness_state")
+    base = os.path.abspath(root)
+    current = os.path.join(base, COPY_STATE_DIR_NAME)
+    legacy = os.path.join(base, LEGACY_COPY_STATE_DIR_NAME)
+    if not os.path.isdir(current) and os.path.isdir(legacy):
+        # A copy made before the rename kept its state under the hidden name.  Keep using
+        # it instead of stranding its backups; new copies never create it.
+        return legacy
+    return current
 
 
 def can_self_repair(root: Optional[str] = None, backups_dir: Optional[str] = None) -> Tuple[bool, str]:

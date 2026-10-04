@@ -49,7 +49,7 @@ that the package imports, and then:
 
    ```
    setup: an API key is needed for model calls; local tools work without one.
-          It is not echoed, and it will be stored in /…/.pyto_harness/config.json (mode 0600).
+          It is not echoed, and it will be stored in /…/pyto_harness/config.json (mode 0600).
    API key (input hidden):
    ```
 
@@ -61,7 +61,7 @@ that the package imports, and then:
    of `api_base` and keep whichever answers; an unreachable network is reported and you are
    offered `--save-anyway` (or `--yes` to accept it) instead of being blocked. The key is
    only ever shown as `<set:35 chars, ...AB12>`.
-3. **writes `~/.pyto_harness/config.json`** through the harness's own hardened writer:
+3. **writes `~/pyto_harness/config.json`** through the harness's own hardened writer:
    mode `0600`, created `O_EXCL`, never silently replacing a config that already holds a
    working key (pass `--reconfigure` to replace it deliberately), and keeping every field
    it does not own — `workspace`, `sessions_dir`, extra headers, `max_turns`, anything else
@@ -86,10 +86,17 @@ That is the last thing you have to paste. Or **open `start.py` in Pyto's editor 
 Run**: it does the `chdir` and the `runpy` with the real path for you, forwarding any
 arguments, so you never copy a line at all.
 
+**The state folder is now visible in Files.** Open **Files → On My iPhone/iCloud → Pyto →
+`pyto_harness`** to see `config.json` (your API key, mode 0600), `sessions/` (the
+transcripts), `backups/` (source snapshots) and `health.json`/`capabilities.json` — so you
+can back it up, copy it to another device or delete it from the app UI. (Releases before
+this one kept it hidden as `.pyto_harness`; the first run renames it to the visible name,
+once, and never touches the new folder if it already exists.)
+
 > **If Pyto has no home directory.** Some Pyto installs cannot resolve `~`: there is no
-> usable `HOME` and `os.path.expanduser("~")` returns the string `"~"`, so `~/.pyto_harness`
+> usable `HOME` and `os.path.expanduser("~")` returns the string `"~"`, so `~/pyto_harness`
 > is a *relative* path with a literal tilde and iOS refuses to create it —
-> `[Errno 1] Operation not permitted: '~/.pyto_harness'`. The harness does not trust `~`:
+> `[Errno 1] Operation not permitted: '~/pyto_harness'`. The harness does not trust `~`:
 > it picks the first folder it can really write to (`PYTO_HARNESS_HOME`, then a usable
 > `HOME`, then the folder Pyto runs scripts from, then — with a loud warning — the
 > temporary directory), and `--doctor` prints which one won. If the installer tells you it
@@ -100,7 +107,7 @@ arguments, so you never copy a line at all.
 > import os; os.environ["PYTO_HARNESS_HOME"] = os.getcwd()
 > ```
 >
-> Everything (`config.json`, sessions, memory, backups) then lives in `./.pyto_harness`
+> Everything (`config.json`, sessions, memory, backups) then lives in `./pyto_harness`
 > next to `run.py` — see `PYTO_HARNESS_HOME` in §2.
 
 If you would rather the installer started the agent immediately, ask it to:
@@ -204,7 +211,7 @@ runpy.run_path("install.py", run_name="__main__")
 ```
 
 An update replaces the code and nothing else. Your API key, sessions, memory and backups
-live in `~/.pyto_harness`, and the programs the agent writes live in the workspace
+live in `~/pyto_harness`, and the programs the agent writes live in the workspace
 (`~/pyto_harness_workspace` by default) — neither is inside the code directory, so
 updating cannot lose them. A working key already in the config is kept and re-checked, not
 rewritten. The installer refuses to touch a directory that is not a `pyto-agent` checkout
@@ -257,7 +264,7 @@ export OPENAI_API_KEY=sk-...        # used if DEEPSEEK_API_KEY is unset
 
 # 2. a config file (persists across launches) -- written for you by install.py,
 #    or by hand with:
-python run.py --init                # writes ~/.pyto_harness/config.json, mode 0600
+python run.py --init                # writes ~/pyto_harness/config.json, mode 0600
 ```
 
 `install.py` (see §1) already does this one: it asks for the key once, proves it with one
@@ -283,7 +290,7 @@ Environment variables: `PYTO_HARNESS_MODEL`, `PYTO_HARNESS_API_BASE`,
 `PYTO_HARNESS_STREAM` — plus the three path overrides:
 
 * **`PYTO_HARNESS_HOME`** — the directory the harness treats as your home: state, config
-  and sessions live in `$PYTO_HARNESS_HOME/.pyto_harness`. Set it when the device has no
+  and sessions live in `$PYTO_HARNESS_HOME/pyto_harness`. Set it when the device has no
   usable `~` (see §1); it is the documented escape hatch and always wins when it is
   writable.
 * **`PYTO_HARNESS_CONFIG`** — the config file itself (its directory becomes the state
@@ -302,7 +309,7 @@ contains `api_key`, `token`, `secret`, `password` or `authorization`.
 > **About storing the key on iOS.** Pyto's `userkeys` / `NSUserDefaults` is convenient
 > but it is **not secure storage** — it is a plist inside the app container, readable by
 > anything that can read the container, and it is included in unencrypted backups. Keep
-> the key in `~/.pyto_harness/config.json` (chmod 600) and treat the device passcode plus
+> the key in `~/pyto_harness/config.json` (chmod 600) and treat the device passcode plus
 > FileVault-style iOS data protection as your actual protection. If that is not good
 > enough for your threat model, do not put a key on the phone: run the harness against a
 > local model on your network instead, with `--api-base http://your-box:8080/v1`.
@@ -579,7 +586,7 @@ versus policy-level, key handling, data at rest and how to wipe it — is
   closed is the whole point.
 * **`run_program` is the hole in the model, and this is the honest part.** On iOS a
   generated program runs *inside this process*, so it can read what the app can read,
-  including `~/.pyto_harness/config.json` and the session logs. The key is removed from its
+  including `~/pyto_harness/config.json` and the session logs. The key is removed from its
   environment and scrubbed out of logs and spills, but it is not out of reach of code
   running in-process. Treat a program the agent wrote as code you are about to run.
 * **The workspace is a jail for the file tools.** `write_program("../escape.py")`, absolute
@@ -634,7 +641,7 @@ harness/
   loop.py              agent loop, system prompt, approval policy, result truncation
   session.py           append-only JSONL log: append, resume, projection, compaction
   config.py            defaults + config.json + environment + CLI flags
-  home.py              the one resolver for ~/.pyto_harness (never a literal '~')
+  home.py              the one resolver for ~/pyto_harness (never a literal '~')
   budget.py            the size limits that keep iOS from killing the process
   textbudget.py        head/tail truncation with spill-to-file
   ui.py                Pyto UI window, terminal REPL, terminal approval prompt
@@ -646,6 +653,21 @@ tests/                 664 offline tests against a stdlib mock OpenAI server
 examples/              three programs the agent is expected to be able to write
 stdlib_audit.py        proves "stdlib only" and "parses as Python 3.10"
 ```
+
+What the harness keeps, in folders you can see (Files → On My iPhone/iCloud → Pyto):
+
+```
+pyto_harness/                     the state directory (no leading dot: Files shows it)
+  config.json                     the API key (mode 0600) and your settings
+  sessions/*.jsonl                one append-only log per conversation
+  backups/                        signed source snapshots (harness/ + run.py only)
+  health.json, capabilities.json  the last health pass, and what this device can do
+pyto_harness_workspace/           the agent's own files: programs, memory.json, tool-output/
+```
+
+A copy of the tree made by the self-repair tests keeps its state beside itself, in
+`pyto_harness_state/` — older copies used a hidden `.pyto_harness_state/`, which is still
+read so their snapshots stay restorable.
 
 ## 10. Verifying it yourself
 

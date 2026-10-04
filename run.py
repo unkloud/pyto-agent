@@ -33,7 +33,7 @@ from typing import Any, Dict, List, Optional, Tuple
 # Allow `python run.py` from anywhere: the harness package sits next to this file.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from harness import __version__, doctor, ios, repair  # noqa: E402
+from harness import __version__, doctor, home, ios, repair  # noqa: E402
 from harness.config import (  # noqa: E402
     Config,
     ConfigError,
@@ -329,7 +329,7 @@ def build_parser() -> argparse.ArgumentParser:
             "examples:\n"
             "  python run.py \"write a script that renames my screenshots by date\"\n"
             "  python run.py --dry-run \"summarise my notes folder\"\n"
-            "  python run.py --resume ~/.pyto_harness/sessions/latest.jsonl \"do the same for July\"\n"
+            "  python run.py --resume ~/pyto_harness/sessions/latest.jsonl \"do the same for July\"\n"
             "  python run.py --doctor --fix\n"
             "  python run.py --repair \"the api_base keeps 404ing\"\n"
             "  python run.py --ui\n"
@@ -395,6 +395,25 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--restore", metavar="BACKUP_ID", help="put a source snapshot back and exit")
     parser.add_argument("--version", action="version", version="pyto-harness {}".format(__version__))
     return parser
+
+
+def migrate_state_directory() -> str:
+    """Move a legacy hidden state directory into the open, once, before anything reads it.
+
+    The state directory dropped its leading dot so the iOS Files app can show it.  An
+    install from a previous release still has the hidden one: rename it here, at the top
+    of a run, and hand the message to the caller so the user knows where their config and
+    sessions went.  Returns ``""`` when there was nothing to do (the usual case, and the
+    only case after the first run).  ``--doctor`` does this inside
+    :meth:`harness.doctor.DoctorContext.for_config` instead, so its report can name it.
+    """
+    try:
+        choice = home.resolve_home_choice()
+        if not choice.ok:
+            return ""
+        return home.migrate_legacy_state(choice.path)
+    except Exception:  # noqa: BLE001 - housekeeping must never stop a run
+        return ""
 
 
 def resolve_config(args: argparse.Namespace, *, use_env: bool = True) -> Config:
@@ -535,6 +554,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     args = parser.parse_args(cleaned)
     url_task = task_from_environment(raw_argv) or ""
     warn_about_argv_key(args)
+
+    # The state directory is visible now; a hidden one from an older release is renamed
+    # before anything resolves a path (--doctor does it inside DoctorContext.for_config so
+    # its report can name the move).  On stderr: it is a notice, not agent output.
+    if not (args.doctor or args.fix):
+        migration = migrate_state_directory()
+        if migration:
+            print(migration, file=sys.stderr)
 
     if args.capabilities:
         print(ios.capability_report())

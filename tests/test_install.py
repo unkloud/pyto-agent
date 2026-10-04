@@ -2,7 +2,7 @@
 
 Everything here is offline: the network path is exercised through ``--zip`` and through
 an injected opener, and the setup phase talks to ``tests/mock_provider.py`` on
-127.0.0.1 only.  The real ``~/.pyto_harness`` is never touched: every setup test points
+127.0.0.1 only.  The real ``~/pyto_harness`` is never touched: every setup test points
 ``PYTO_HARNESS_CONFIG``/``PYTO_HARNESS_STATE_DIR``/``PYTO_HARNESS_WORKSPACE`` at a
 private temp directory.
 """
@@ -302,7 +302,7 @@ class TestDefaults(unittest.TestCase):
 
     def test_next_steps_mention_the_state_directory(self):
         text = install.next_steps("pyto-agent")
-        self.assertIn("~/.pyto_harness", text)
+        self.assertIn("~/pyto_harness", text)
         self.assertIn("never touched by an update", text)
 
     def test_start_line_names_the_absolute_directory_and_one_command(self):
@@ -446,6 +446,23 @@ class TestSetup(SetupTestCase):
     """The one-stop setup flow, end to end (helpers live in :class:`SetupTestCase`)."""
 
     # -- the tests -----------------------------------------------------------------
+
+    def test_a_hidden_state_directory_is_moved_and_the_move_is_printed(self):
+        """A state directory from the previous release is renamed before the config is read."""
+        from harness import home as home_module
+
+        home_dir = os.path.join(self.tmp, "legacy-home")
+        legacy = os.path.join(home_dir, home_module.LEGACY_STATE_DIR_NAME)
+        os.makedirs(os.path.join(legacy, "sessions"))
+        with open(os.path.join(legacy, "sessions", "old.jsonl"), "w", encoding="utf-8") as handle:
+            handle.write("{}\n")
+        with mock.patch.dict(os.environ, {"PYTO_HARNESS_HOME": home_dir}):
+            code, out, err = self.run_install(*self.base_args("--yes"), expect=0)
+        self.assertIn(home_module.MIGRATED_MESSAGE, out, "the user must be told where state went")
+        moved = os.path.join(home_dir, home_module.STATE_DIR_NAME)
+        self.assertTrue(os.path.isfile(os.path.join(moved, "sessions", "old.jsonl")))
+        self.assertFalse(os.path.lexists(legacy), "the hidden folder must be gone after the move")
+        self.assertNotIn("Traceback", out + err)
 
     def test_no_key_without_a_tty_finishes_with_the_single_command(self):
         code, out, err = self.run_install(*self.base_args(), expect=0)
@@ -715,7 +732,7 @@ class TestSetup(SetupTestCase):
 
 
 class TestInstallWithoutAHome(SetupTestCase):
-    """The device that reported ``[Errno 1] Operation not permitted: '~/.pyto_harness'``.
+    """The device that refused the old hidden state path with ``Operation not permitted``.
 
     ``os.path.expanduser`` is broken the way Pyto breaks it and there is no writable home
     anywhere: the install must still finish, write ``start.py``, print the

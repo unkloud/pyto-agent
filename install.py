@@ -14,10 +14,12 @@ over HTTPS and extracts it with the standard library alone.
 One run does what the four "paste this next" one-liners used to do, in order:
 
 1. download, verify the archive (``--sha256``) and unpack it;
-2. find the API key -- keep a working one already in ``~/.pyto_harness/config.json``,
+2. find the API key -- keep a working one already in ``~/pyto_harness/config.json``,
    else use ``--api-key``/``--key-file``/``DEEPSEEK_API_KEY``, else ask (hidden input,
    plain ``input()`` where the platform cannot hide it) -- and prove it with one
    minimal chat request through the doctor's own probe before anything is written;
+   a hidden state directory left by an older release is renamed first, so the key
+   that release stored is found again;
 3. write the config through the harness's hardened writer (0600, never a silent
    overwrite, unrelated fields preserved);
 4. run the doctor's checks and apply the safe fixes, printing one compact line;
@@ -29,7 +31,7 @@ Nothing here blocks: with no terminal and no key the install finishes, prints th
 command to run later and exits 0.  The key is never printed and never echoed.
 
 Updating is the same command: it replaces the code and leaves your state alone.
-Your API key, sessions, memory and backups live in ``~/.pyto_harness`` and your
+Your API key, sessions, memory and backups live in ``~/pyto_harness`` and your
 programs live in the workspace (``~/pyto_harness_workspace`` by default), never
 inside the code directory, so re-installing cannot lose them.
 
@@ -107,13 +109,21 @@ class SetupError(Exception):
     """A setup step that must stop the run (a key the provider rejects, a write that fails)."""
 
 
+#: The state directory's *display* name, kept in step with ``harness/home.py``'s
+#: ``STATE_DIR_NAME`` (the one place that owns the path rule).  The installer deliberately
+#: does not import the harness before the files are on disk, so the text it can print
+#: before then has to spell the name out; every path the installer actually reads or writes
+#: is built by the loaded ``harness.home`` / ``harness.config`` modules, never from this
+#: string.  No leading dot: the folder is visible in the Files app.
+STATE_DIR_NAME = "pyto_harness"
+
 #: Printed whenever a write fails because the device has no usable home directory.
 #: This is the Pyto case: ``os.path.expanduser("~")`` returns ``"~"``, so every path
-#: becomes ``~/.pyto_harness`` and iOS refuses to create a directory literally named
+#: becomes ``~/pyto_harness`` and iOS refuses to create a directory literally named
 #: ``~`` with ``[Errno 1] Operation not permitted``.  The installer prints this and keeps
 #: going: the files are installed, only the config has to wait for the escape hatch.
 HOME_WORKAROUND = (
-    "This device has no home directory, so ~/.pyto_harness cannot be created\n"
+    "This device has no home directory, so ~/" + STATE_DIR_NAME + " cannot be created\n"
     "(iOS answers Operation not permitted). Set the escape hatch to a folder you can\n"
     "write to, then re-run the installer:\n"
     '  import os; os.environ["PYTO_HARNESS_HOME"] = os.getcwd()\n'
@@ -377,7 +387,7 @@ def next_steps(target: str) -> str:
         "Next, in this order (paste one line at a time into the Pyto console):\n"
         "\n"
         "  1. Give it your API key (once), then paste the key into\n"
-        "     ~/.pyto_harness/config.json and save:\n"
+        "     ~/" + STATE_DIR_NAME + "/config.json and save:\n"
         "       {one}\n"
         "\n"
         "  2. Check the device and repair what a machine can repair:\n"
@@ -390,9 +400,9 @@ def next_steps(target: str) -> str:
         "       {four}\n"
         "\n"
         "Full instructions: {target}/README.md\n"
-        "Your key, sessions and memory live in ~/.pyto_harness and are never touched by an update.\n"
+        "Your key, sessions and memory live in ~/" + STATE_DIR_NAME + " and are never touched by an update.\n"
         "\n"
-        "If Pyto has no home directory (an error mentioning `~/.pyto_harness` and\n"
+        "If Pyto has no home directory (an error mentioning `~/" + STATE_DIR_NAME + "` and\n"
         "`Operation not permitted`), set the escape hatch first and run step 1 again:\n"
         '  import os; os.environ["PYTO_HARNESS_HOME"] = os.getcwd()'
     ).format(
@@ -498,6 +508,7 @@ def load_harness(target: str):
             config = importlib.import_module(PRIVATE_PACKAGE + ".config")
             security = importlib.import_module(PRIVATE_PACKAGE + ".security")
             ios = importlib.import_module(PRIVATE_PACKAGE + ".ios")
+            home = importlib.import_module(PRIVATE_PACKAGE + ".home")
         except BaseException as exc:  # noqa: BLE001 - any failure means "try the next tree"
             _drop_private_modules()
             problems.append("{}: {}: {}".format(directory, type(exc).__name__, exc))
@@ -509,12 +520,28 @@ def load_harness(target: str):
                 "copy at {} for the setup checks".format(local)
             )
         return types.SimpleNamespace(
-            package=package, doctor=doctor, config=config, security=security, ios=ios, note=note
+            package=package, doctor=doctor, config=config, security=security, ios=ios, home=home, note=note
         )
 
     raise InstallError(
         "installed the files, but no harness to set them up with:\n  " + "\n  ".join(problems)
     )
+
+
+def harness_home_module(modules):
+    """The loaded harness's ``home`` module, whatever shape ``load_harness`` returned.
+
+    ``home`` owns the state-directory name and the one-time move out of hiding, so the
+    installer must ask *the tree it just installed*, never a copy of the rule here.  The
+    fallback keeps the tests' lighter module bundles (and an older installed tree) working.
+    """
+    module = getattr(modules, "home", None)
+    if module is not None:
+        return module
+    import importlib
+
+    package = getattr(getattr(modules, "config", None), "__package__", "") or PRIVATE_PACKAGE
+    return importlib.import_module(package + ".home")
 
 
 # --------------------------------------------------------------------------------------
@@ -1061,6 +1088,20 @@ def setup(args, target: str) -> int:
     report = Report(modules.security)
     if modules.note:
         report("setup: {}".format(modules.note))
+    # Before anything reads the state directory: move a hidden one from an older release
+    # into the open, so the key that release saved is found again and the folder is
+    # visible in Files.  Nothing is ever deleted; a refusal or failure is reported here
+    # and the install continues against the resolved (new) path.  A tree too old to have
+    # harness/home.py (or one whose home cannot be resolved here) is simply skipped: the
+    # config step below reports that condition in its own words.
+    migration = ""
+    try:
+        home_module = harness_home_module(modules)
+        migration = home_module.migrate_legacy_state(home_module.resolve_home())
+    except Exception:  # noqa: BLE001 - never let housekeeping stop the install
+        migration = ""
+    if migration:
+        report(migration)
     if args.api_key:
         # Same warning run.py gives: the credential is in the process table and the shell
         # history.  The key itself is never printed, here or anywhere else.
@@ -1074,7 +1115,7 @@ def setup(args, target: str) -> int:
     try:
         # The harness resolver: an absolute, writable path, or ConfigError with the
         # PYTO_HARNESS_HOME workaround in it (this is the path that used to be the
-        # literal "~/.pyto_harness" on a device without a home directory).
+        # literal "~/pyto_harness" on a device without a home directory).
         config_path = config_module.default_config_path()
     except config_module.ConfigError as exc:
         home_error = str(exc)
@@ -1192,7 +1233,7 @@ def setup(args, target: str) -> int:
     launcher = write_launcher(modules, target, report)
     if home_error:
         report("")
-        report("home   : no writable folder for ~/.pyto_harness (see the PYTO_HARNESS_HOME note above)")
+        report("home   : no writable folder for ~/{} (see the PYTO_HARNESS_HOME note above)".format(STATE_DIR_NAME))
     report("")
     report("Next step - one command, nothing else to paste:")
     report("  {}".format(start_line(target)))

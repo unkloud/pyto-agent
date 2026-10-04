@@ -2171,7 +2171,7 @@ def _probe(name: str) -> Tuple[bool, Dict[str, Dict[str, str]], str]:
 
 
 def capabilities_path(state_dir: Optional[str] = None) -> str:
-    """Where the doctor keeps its discovery file; ``~/.pyto_harness`` by default.
+    """Where the doctor keeps its discovery file; ``~/pyto_harness`` by default.
 
     ``state_dir`` is a path a caller (or the model) supplied, so it goes through the same
     rule as every other user path: expand the ``~`` or refuse it, never build a literal
