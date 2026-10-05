@@ -29,21 +29,22 @@ it. You do not need a computer, a cable or a Mac.
 
 ### Option A — one snippet, the whole setup (recommended)
 
-Open Pyto, tap the console, and paste. This installs the **released, digest-verified
-`v1.0.6`** — the one-stop installer — not "whatever `main` is today":
+Open Pyto, tap the console, choose a GitHub release tag or copy the full commit SHA you want,
+replace `PIN` with it, and paste. The installer itself comes from `main`; the code it installs
+comes from exactly the ref in `PIN`:
 
 ```python
 import sys, urllib.request, runpy
-open("install.py", "wb").write(urllib.request.urlopen("https://raw.githubusercontent.com/unkloud/pyto-agent/v1.0.6/install.py", timeout=120).read())
-sys.argv = ["install.py", "--ref", "v1.0.6", "--sha256", "50d21fd6a68d74518f654ba9226b844489cd81aae7df4f89425256588f13035b"]
+PIN = "PASTE_GITHUB_TAG_OR_FULL_40_CHARACTER_COMMIT_SHA_HERE"
+open("install.py", "wb").write(urllib.request.urlopen("https://raw.githubusercontent.com/unkloud/pyto-agent/main/install.py", timeout=120).read())
+sys.argv = ["install.py", "--ref", PIN]
 runpy.run_path("install.py", run_name="__main__")
 ```
 
-If the download does not match that digest, the installer **refuses and writes nothing**.
-Every run prints the **SHA-256 of the archive it downloaded**. A tag installs exactly that
-tag's bytes, including that tag's installer — so `v1.0.0` gives you the older, install-only
-installer, and its digest is in that release's notes. The *Track the latest* snippet a few
-lines down installs whatever `main` is today.
+Use a full commit SHA when you want an immutable source snapshot; tags can be moved. GitHub
+supports ZIP archives for specific commits, and the commit ID keeps the source contents fixed
+even if a tag moves. The installer prints the archive's SHA-256 on every run. To also check
+the archive bytes against a known digest, add `"--sha256", "<digest>"` to `sys.argv`.
 
 **That single run is the whole setup. There is nothing else to paste.** It unpacks
 `pyto-agent` next to where Pyto starts, checks that every file parses as Python 3.10 and
@@ -142,8 +143,7 @@ default and never prompt), `--save-anyway`, `--reconfigure`, `--skip-fixes`, and
 no key, no config, no doctor — and prints the old step-by-step instructions; that is the
 form to use from automation and CI.
 
-**Track the latest instead** (simpler, and you accept that `main` moves). Drop the
-`--sha256` line and the `v1.0.0` refs, and fetch the installer from `main`:
+To install the moving tip of `main` instead of a pinned release or commit, set `PIN = "main"`.
 
 ```python
 import urllib.request, runpy

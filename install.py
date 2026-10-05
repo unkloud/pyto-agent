@@ -8,6 +8,7 @@ over HTTPS and extracts it with the standard library alone.
     python install.py --api-key sk-...      # the same, with nothing to type
     python install.py --into ~/pyto-agent   # somewhere else
     python install.py --ref v1.0.0          # a tag or branch
+    python install.py --ref <full-commit-sha> # an immutable GitHub commit
     python install.py --zip pyto-agent.zip  # from a file (iCloud, AirDrop)
     python install.py --no-setup            # files only, old behaviour (CI, tests)
 
@@ -59,6 +60,8 @@ import zipfile
 REPO = "unkloud/pyto-agent"
 ARCHIVE = "https://github.com/{repo}/archive/refs/heads/{ref}.zip"
 ARCHIVE_TAG = "https://github.com/{repo}/archive/refs/tags/{ref}.zip"
+ARCHIVE_COMMIT = "https://github.com/{repo}/archive/{ref}.zip"
+COMMIT_SHA = re.compile(r"^[0-9a-fA-F]{40}$")
 DEFAULT_REF = "main"
 DEFAULT_TARGET = "pyto-agent"
 USER_AGENT = "pyto-agent-installer/1.0 (stdlib)"
@@ -220,9 +223,15 @@ def download(ref: str, *, timeout: float = 120.0) -> bytes:
     if os.path.sep in ref or ref.startswith("-") or ".." in ref:
         raise InstallError("refusing to use {!r} as a ref name".format(ref))
 
-    urls = [ARCHIVE.format(repo=REPO, ref=ref)]
-    if not ref.startswith("refs/"):
-        urls.append(ARCHIVE_TAG.format(repo=REPO, ref=ref))
+    if COMMIT_SHA.fullmatch(ref):
+        # GitHub serves a commit snapshot from /archive/<full-sha>.zip.  Use the
+        # commit endpoint directly so this ref can never be mistaken for a branch
+        # or tag with the same name.
+        urls = [ARCHIVE_COMMIT.format(repo=REPO, ref=ref.lower())]
+    else:
+        urls = [ARCHIVE.format(repo=REPO, ref=ref)]
+        if not ref.startswith("refs/"):
+            urls.append(ARCHIVE_TAG.format(repo=REPO, ref=ref))
 
     problems = []
     for url in urls:
@@ -1309,15 +1318,20 @@ def build_parser() -> argparse.ArgumentParser:
             "  python install.py --zip app.zip --into ~/pyto-agent\n"
             "  python install.py --reconfigure         ask for a new key, keep everything else\n"
             "  python install.py --ref v1.0.0 --sha256 <digest>\n"
+            "  python install.py --ref <full-commit-sha>\n"
         ),
     )
-    parser.add_argument("--ref", default=DEFAULT_REF, help="branch or tag to install (default: %(default)s)")
+    parser.add_argument(
+        "--ref",
+        default=DEFAULT_REF,
+        help="branch, tag, or full 40-character commit SHA to install (default: %(default)s)",
+    )
     parser.add_argument(
         "--sha256",
         dest="sha256",
         default=None,
         help="expected SHA-256 of the archive; the install is refused when it does not match "
-        "(pin the digest a previous run printed, and use --ref <tag> so the bytes cannot move)",
+        "(pin the digest a previous run printed; use a tag or full commit SHA as --ref)",
     )
     parser.add_argument("--into", default=DEFAULT_TARGET, help="destination directory (default: ./%(default)s)")
     parser.add_argument("--zip", dest="zip_path", default=None, help="install from a local .zip instead of the network")
