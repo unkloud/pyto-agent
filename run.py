@@ -753,6 +753,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         print("{}: {}".format(exc.code, exc.message), file=sys.stderr)
         return 1
     finally:
+        # In --ui mode run_ui returns only after dismissal and after its active turn
+        # worker has drained, so these resources stay valid for every callback.
         session.close()
         factory.client.close()  # type: ignore[attr-defined]
 

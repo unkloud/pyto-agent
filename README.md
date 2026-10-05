@@ -10,12 +10,15 @@ week's notes", "put the thing I just copied into a note" — and the agent write
 file into a workspace on the device, runs it, and tells you what happened.
 
 * **Standard library only.** No `pip install`, no `requests`, no `pydantic`. Every claim
-  in this README is checked by `stdlib_audit.py` and 664 tests.
+  in this README is checked by `stdlib_audit.py` and 721 tests.
 * **Python 3.10**, the version Pyto ships. Verified on real CPython 3.10.22 and 3.12.
 * **OpenAI-compatible API** — DeepSeek by default (`deepseek-chat`), anything
   chat-completions-shaped otherwise.
 * **Survives the app being killed.** Every turn is appended to a JSONL session log, so
   `--resume` picks up exactly where iOS interrupted you.
+
+**Current release: v1.0.7.** See the [release notes](RELEASE-NOTES-v1.0.7.md) for the Pyto
+chat lifecycle fix and its verification limits.
 
 ---
 
@@ -581,7 +584,7 @@ applies the repairs a machine can and prints a before/after report. `--repair "<
 lets the model change the harness's own source, subject to a path jail, an AST/stdlib
 pre-check, a snapshot with hashes, and the offline test suite as the gate: a red suite
 reverts the edit byte-for-byte and hands back the failure verbatim. A bounded gate (~3 s,
-232 tests) is the default; `--deep-tests` asks for all 664.
+232 tests) is the default; `--deep-tests` asks for all 721.
 
 **The full story — the three tiers, the guardrail list, what is deliberately not automated,
 and a worked transcript — is in [SELF-REPAIR.md](SELF-REPAIR.md).**
@@ -669,7 +672,7 @@ harness/
   repair.py            self-repair: path-jailed, snapshot-first, test-gated source edits
   pyto_api.py          Pyto library grounding: 25 modules / 160 members, curated + introspected
   errors.py            error taxonomy with retryability
-tests/                 664 offline tests against a stdlib mock OpenAI server
+tests/                 721 offline tests against localhost mock servers
 examples/              three programs the agent is expected to be able to write
 stdlib_audit.py        proves "stdlib only" and "parses as Python 3.10"
 ```
@@ -699,7 +702,7 @@ read so their snapshots stay restorable.
 ## 10. Verifying it yourself
 
 ```bash
-python3 -m unittest discover -s tests -t .     # 664 tests, offline, no network (~34 s)
+python3 -m unittest discover -s tests -t .     # 721 tests, offline, no external network (~40 s)
 python3 stdlib_audit.py                        # third_party_modules: [], 18 files parse at (3,10)
 python3 run.py --dry-run "hello"               # prints the request, sends nothing
 python3 run.py --paths                         # every resolved path and the rule that chose it

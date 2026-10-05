@@ -4,8 +4,8 @@ The UI is deliberately small.  The pattern that matters is not the layout — it
 **the network never runs on the UI thread**.  A Pyto button handler that calls a model
 endpoint freezes the app until the response lands, which on a phone means the watchdog
 kills it.  So the handler starts a plain ``threading.Thread`` and the thread pushes
-events back with ``pyto_ui.main_thread``, which is the one documented way to touch views
-from off the main thread.
+events through Pyto's documented ``pyto_ui`` wrappers, which can be modified from a
+worker thread. Direct UIKit calls have separate main-thread requirements and are not used here.
 
 If ``pyto_ui`` is missing (Linux, a test, a plain Pyto console session) the caller gets
 :func:`terminal_repl` instead.  :func:`run_ui` raises :class:`UnsupportedCapability` in
@@ -275,6 +275,7 @@ def run_ui(
     options_factory: Callable[[SessionLog], LoopOptions],
     session: SessionLog,
     title: str = UI_HEADER,
+    verbose: bool = False,
 ) -> None:
     """Launch the chat view.  Raises :class:`UnsupportedCapability` when pyto_ui is absent."""
     ui = pyto_ui_module()
@@ -304,91 +305,248 @@ def run_ui(
     send.background_color = ui.COLOR_SYSTEM_BLUE
     send.text_color = ui.COLOR_WHITE
 
+    stop = ui.Button()
+    stop.title = "Stop"
+    stop.text_color = ui.COLOR_WHITE
+    stop.enabled = False
+
+    close = ui.Button()
+    close.title = "Close"
+
     view.add_subview(transcript)
     view.add_subview(entry)
     view.add_subview(send)
+    view.add_subview(stop)
+    view.add_subview(close)
 
-    transcript.frame = (0, 0, view.width, max(200, view.height - 120))
-    entry.frame = (10, view.height - 110, max(120, view.width - 110), 40)
-    send.frame = (view.width - 90, view.height - 110, 80, 40)
-    view.present("fullscreen")
+    transcript.frame = (0, 0, view.width, max(200, view.height - 130))
+    entry.frame = (10, view.height - 110, max(100, view.width - 240), 40)
+    send.frame = (view.width - 220, view.height - 110, 65, 40)
+    stop.frame = (view.width - 145, view.height - 110, 65, 40)
+    close.frame = (view.width - 70, view.height - 110, 60, 40)
 
-    printer = Printer(stream=_UIStream(ui, transcript))
-    busy = threading.Event()
+    output = _UIStream(transcript)
+    printer = Printer(verbose=verbose, stream=output)
+    lifecycle = _ChatLifecycle()
+
+    def update_controls(*, busy: bool) -> None:
+        lifecycle.update_if_open(lambda: _set_chat_controls(send, stop, entry, busy=busy))
 
     def worker(prompt: str) -> None:
+        options: Optional[LoopOptions] = None
         try:
-            printer.write("\n>>> {}".format(prompt))
             options = options_factory(session)
+            # Stop cancels the shared client. Each new turn gets a fresh cancellation
+            # event before it can become the active worker.
+            options.client.reset_cancel()
+            if not lifecycle.attach(options):
+                return
+            printer.write("\n>>> {}".format(prompt))
             run_turn_sync(options, prompt, printer)
-        except Exception as exc:  # noqa: BLE001 - a UI thread must never die silently
-            printer.write("\n[error] {}: {}".format(type(exc).__name__, exc))
+        except Exception as exc:  # noqa: BLE001 - report failures instead of hiding them
+            try:
+                printer.write("[error] {}: {}".format(type(exc).__name__, exc))
+            except Exception as display_exc:  # surface a broken view through Pyto's console
+                print(
+                    "chat display failed: {}: {}".format(type(display_exc).__name__, display_exc),
+                    file=sys.stderr,
+                )
         finally:
-            busy.clear()
-            _on_main(ui, lambda: setattr(send, "enabled", True))
+            try:
+                update_controls(busy=False)
+            except Exception as exc:  # noqa: BLE001 - keep Pyto UI contract failures visible
+                print(
+                    "chat controls could not be updated: {}: {}".format(type(exc).__name__, exc),
+                    file=sys.stderr,
+                )
+            finally:
+                lifecycle.finish(options)
 
     def on_send(_sender: Any = None) -> None:
         prompt = (entry.text or "").strip()
-        if not prompt or busy.is_set():
+        if not prompt:
             return
         entry.text = ""
-        busy.set()
-        send.enabled = False
-        # The network call happens HERE, off the UI thread: a frozen UI thread on iOS
-        # gets the app killed by the watchdog long before the model answers.
-        threading.Thread(target=worker, args=(prompt,), name="pyto-ui-turn", daemon=True).start()
+        update_controls(busy=True)
+        thread = threading.Thread(target=worker, args=(prompt,), name="pyto-ui-turn", daemon=True)
+        try:
+            if not lifecycle.start(thread):
+                update_controls(busy=False)
+        except Exception as exc:  # noqa: BLE001 - thread startup errors are actionable
+            lifecycle.finish(None)
+            update_controls(busy=False)
+            printer.write("Could not start the chat worker: {}: {}".format(type(exc).__name__, exc))
 
+    def on_stop(_sender: Any = None) -> None:
+        if lifecycle.request_stop():
+            lifecycle.update_if_open(lambda: setattr(stop, "title", "Stopping…"))
+
+    def on_close(_sender: Any = None) -> None:
+        view.close()
+
+    # Register every callback before presentation so a fast first tap cannot race setup.
     send.action = on_send
     entry.action = on_send
-    printer.write("pyto-harness ready. Session: {}".format(session.path or "<memory>"))
+    stop.action = on_stop
+    close.action = on_close
+    printer.write("pyto-harness ready. Session: {}".format(getattr(session, "path", None) or "<memory>"))
     sys.stdout.flush()
 
-
-def _on_main(ui: Any, callback: Callable[[], None]) -> None:
-    """Run ``callback`` on the UI thread, tolerating a build without ``main_thread``."""
-    main_thread = getattr(ui, "main_thread", None)
-    if callable(main_thread):
-        try:
-            main_thread(callback)
-            return
-        except Exception:  # noqa: BLE001 - fall through to a direct call
-            pass
     try:
-        callback()
-    except Exception:  # pragma: no cover - nothing sensible left to do
-        pass
+        # The documented API blocks this Python script until dismissal. Model calls run
+        # on the dedicated worker, and this wrapper does not call UIKit directly.
+        ui.show_view(view)
+    finally:
+        worker_thread, active_options = lifecycle.close()
+        # Quiesce output before cancellation wakes a provider worker with its final error
+        # event. No assignment can reach the dismissed TextView after this barrier.
+        output.close()
+        try:
+            lifecycle.cancel(active_options)
+        finally:
+            if worker_thread is not None and worker_thread is not threading.current_thread():
+                # run.py closes the session and model client only after this returns.
+                # Drain the worker so no final event can write to closed resources.
+                worker_thread.join()
+
+
+class _ChatLifecycle:
+    """Serialize chat turns and make stop/close safe against worker callbacks."""
+
+    def __init__(self) -> None:
+        self._lock = threading.RLock()
+        self._closed = False
+        self._busy = False
+        self._stop_requested = False
+        self._options: Optional[LoopOptions] = None
+        self._worker: Optional[threading.Thread] = None
+
+    def start(self, worker: threading.Thread) -> bool:
+        """Reserve and start one worker atomically with respect to close."""
+        with self._lock:
+            if self._closed or self._busy:
+                return False
+            self._busy = True
+            self._stop_requested = False
+            self._worker = worker
+            try:
+                worker.start()
+            except BaseException:
+                self._busy = False
+                self._worker = None
+                raise
+            return True
+
+    def attach(self, options: LoopOptions) -> bool:
+        """Register resources, cancelling immediately if stop/close already won."""
+        if options.stop is None:
+            options.stop = threading.Event()
+        with self._lock:
+            closed = self._closed
+            stop_requested = self._stop_requested
+            if not closed:
+                self._options = options
+            if closed or stop_requested:
+                options.stop.set()
+        if closed or stop_requested:
+            options.client.cancel()
+        return not closed
+
+    def request_stop(self) -> bool:
+        with self._lock:
+            if self._closed or not self._busy:
+                return False
+            self._stop_requested = True
+            options = self._options
+            if options is not None and options.stop is not None:
+                options.stop.set()
+        if options is not None:
+            options.client.cancel()
+        return True
+
+    def finish(self, options: Optional[LoopOptions]) -> None:
+        with self._lock:
+            if options is None or self._options is options or self._options is None:
+                self._options = None
+                self._busy = False
+                self._stop_requested = False
+                self._worker = None
+
+    def close(self) -> tuple:
+        """Mark the window closed and return its worker/resources for teardown."""
+        with self._lock:
+            self._closed = True
+            self._stop_requested = True
+            options = self._options
+            worker = self._worker
+        return worker, options
+
+    def cancel(self, options: Optional[LoopOptions]) -> None:
+        if options is not None:
+            if options.stop is not None:
+                options.stop.set()
+            options.client.cancel()
+
+    def update_if_open(self, callback: Callable[[], None]) -> bool:
+        with self._lock:
+            if self._closed:
+                return False
+            callback()
+            return True
+
+
+def _set_chat_controls(send: Any, stop: Any, entry: Any, *, busy: bool) -> None:
+    send.enabled = not busy
+    stop.enabled = busy
+    stop.title = "Stop"
+    entry.enabled = not busy
 
 
 class _UIStream:
-    """File-like object that appends to a Pyto ``TextView`` from any thread."""
+    """File-like output for a Pyto ``TextView``; writes stop when the view closes.
 
-    def __init__(self, ui: Any, view: Any) -> None:
-        self._ui = ui
+    Pyto documents that ``show_view`` permits another thread to modify its PytoUI views.
+    Keep the lock while assigning ``TextView.text`` so ``close`` forms a barrier: once it
+    returns, no earlier or later worker write can touch the dismissed view.
+    """
+
+    def __init__(self, view: Any) -> None:
         self._view = view
         self._pending: List[str] = []
         self._lock = threading.Lock()
+        self._text = ""
+        self._closed = False
 
     def write(self, text: str) -> int:
         if not text:
             return 0
         with self._lock:
+            if self._closed:
+                return len(text)
             self._pending.append(text)
-        _on_main(self._ui, self._flush)
+            self._flush_locked()
         return len(text)
 
     def flush(self) -> None:
-        _on_main(self._ui, self._flush)
-
-    def _flush(self) -> None:
         with self._lock:
-            if not self._pending:
-                return
-            text = "".join(self._pending)
+            if not self._closed:
+                self._flush_locked()
+
+    def close(self) -> None:
+        """Prevent further view writes and wait for any current assignment to finish."""
+        with self._lock:
+            self._closed = True
             self._pending = []
-        try:
-            self._view.text = (self._view.text or "") + text
-        except Exception:  # pragma: no cover - the view may be gone
-            pass
+
+    def _flush_locked(self) -> None:
+        if not self._pending:
+            return
+        text = "".join(self._pending)
+        self._pending = []
+        self._text = (self._text + text)[-TRANSCRIPT_LIMIT_CHARS:]
+        # Do not suppress errors here. A broken Pyto view update must reach the worker's
+        # error path instead of silently leaving the chat frozen or stale.
+        self._view.text = self._text
 
     def isatty(self) -> bool:
         return False
