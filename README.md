@@ -22,251 +22,130 @@ chat lifecycle fix and its verification limits.
 
 ---
 
-## 1. Installing on the device, from GitHub
+## 1. Installing Pyto on iPhone or iPad
 
-Source: **https://github.com/unkloud/pyto-agent**
+Choose one option. Each Python block is a complete script: copy the whole block into a new script in Pyto, then tap Run. Do not replace a version number, file name or path.
 
-Pyto has **no `git`, no `unzip` and no `pip`** — but it has Python, so the installer uses
-nothing but the standard library: it downloads the repository archive over HTTPS and unpacks
-it. You do not need a computer, a cable or a Mac.
+### Option A — Install the latest release (recommended)
 
-### Option A — one snippet, the whole setup (recommended)
-
-Open Pyto, tap the console, choose a GitHub release tag or copy the full commit SHA you want,
-replace `PIN` with it, and paste. The installer itself comes from `main`; the code it installs
-comes from exactly the ref in `PIN`:
+This automatically finds the newest stable release on GitHub. It currently installs v1.0.7, and the same script will keep working for later releases.
 
 ```python
-import sys, urllib.request, runpy
-PIN = "PASTE_GITHUB_TAG_OR_FULL_40_CHARACTER_COMMIT_SHA_HERE"
-open("install.py", "wb").write(urllib.request.urlopen("https://raw.githubusercontent.com/unkloud/pyto-agent/main/install.py", timeout=120).read())
-sys.argv = ["install.py", "--ref", PIN]
-runpy.run_path("install.py", run_name="__main__")
-```
-
-Use a full commit SHA when you want an immutable source snapshot; tags can be moved. GitHub
-supports ZIP archives for specific commits, and the commit ID keeps the source contents fixed
-even if a tag moves. The installer prints the archive's SHA-256 on every run. To also check
-the archive bytes against a known digest, add `"--sha256", "<digest>"` to `sys.argv`.
-
-**That single run is the whole setup. There is nothing else to paste.** It unpacks
-`pyto-agent` next to where Pyto starts, checks that every file parses as Python 3.10 and
-that the package imports, and then:
-
-1. **asks for your API key**, once:
-
-   ```
-   setup: an API key is needed for model calls; local tools work without one.
-          It is not echoed, and it will be stored in /…/pyto_harness/config.json (mode 0600).
-   API key (input hidden):
-   ```
-
-   The key is read with `getpass` where the platform can hide it, and with a plain line
-   (saying so) where it cannot. The installer never echoes it and never logs it.
-2. **proves the key before saving it**, with one minimal chat request through the
-   harness's own doctor probe. `401`/`403` means the key is wrong and you are asked again
-   (three tries, then it stops without saving anything); `404` makes it try the `/v1` form
-   of `api_base` and keep whichever answers; an unreachable network is reported and you are
-   offered `--save-anyway` (or `--yes` to accept it) instead of being blocked. The key is
-   only ever shown as `<set:35 chars, ...AB12>`.
-3. **writes `~/pyto_harness/config.json`** through the harness's own hardened writer:
-   mode `0600`, created `O_EXCL`, never silently replacing a config that already holds a
-   working key (pass `--reconfigure` to replace it deliberately), and keeping every field
-   it does not own — `workspace`, `sessions_dir`, extra headers, `max_turns`, anything else
-   you put there.
-4. **health-checks and repairs**, printing one compact line instead of the whole report:
-
-   ```
-   doctor: 17 ok, 4 fixed, 0 need you
-   ```
-
-   Only fixes nobody can object to are applied: create the workspace and session
-   directories, tighten file modes, cut a torn session line, write the `PYTO_LIBS.md` and
-   `SHORTCUTS.md` references into the workspace. `--skip-fixes` runs the checks without
-   changing anything.
-5. **writes `start.py`** next to `run.py` and prints **exactly one** command:
-
-   ```python
-   import os, runpy, sys; os.chdir('/…/pyto-agent'); sys.argv = ['run.py']; runpy.run_path('run.py', run_name='__main__')
-   ```
-
-That is the last thing you have to paste. Or **open `start.py` in Pyto's editor and press
-Run**: it does the `chdir` and the `runpy` with the real path for you, forwarding any
-arguments, so you never copy a line at all.
-
-**The state folder is now visible in Files.** Open **Files → On My iPhone/iCloud → Pyto →
-`pyto_harness`** to see `config.json` (your API key, mode 0600), `sessions/` (the
-transcripts), `backups/` (source snapshots) and `health.json`/`capabilities.json` — so you
-can back it up, copy it to another device or delete it from the app UI. (Releases before
-this one kept it hidden as `.pyto_harness`; the next run moves it out of hiding — before
-anything can create the new folder — and when `pyto_harness` is already there without a
-`config.json`, the old entries are moved in one by one and nothing already in the new
-folder is ever overwritten. If the new folder already has a `config.json`, the old one is
-left exactly where it is and named, with the command that deletes it.)
-
-> **If Pyto has no home directory.** Some Pyto installs cannot resolve `~`: there is no
-> usable `HOME` and `os.path.expanduser("~")` returns the string `"~"`, so `~/pyto_harness`
-> is a *relative* path with a literal tilde and iOS refuses to create it —
-> `[Errno 1] Operation not permitted: '~/pyto_harness'`. The harness does not trust `~`, and
-> it does not trust the working directory either: the state is **anchored to the install**.
-> In order it uses `PYTO_HARNESS_HOME`, then `PYTO_HARNESS_STATE_DIR`/`PYTO_HARNESS_CONFIG`,
-> then the folder remembered in `<install>/pyto_harness_home.txt`, then the one candidate
-> folder that already holds a `pyto_harness/config.json` (nothing is ever moved or merged),
-> then a usable `HOME`, then a really-expanded `~`, then the folder **above the install**
-> (the default: it survives replacing the install folder), then the install folder, then the
-> folder Pyto runs scripts from, and finally — with a loud warning — the temporary
-> directory. `python run.py --paths` prints every resolved path and the rule that chose the
-> home; `--doctor` prints the same block. If two folders hold a `config.json`, or a
-> `pyto_harness 2` copy appears beside the one in use, the harness names all of them and
-> never merges or deletes anything. If the installer tells you it cannot find a writable
-> folder, paste this once in the same console and re-run the installer:
->
-> ```python
-> import os; os.environ["PYTO_HARNESS_HOME"] = os.getcwd()
-> ```
->
-> Everything (`config.json`, sessions, memory, backups) then lives in `./pyto_harness`
-> next to `run.py` — see `PYTO_HARNESS_HOME` in §2.
-
-If you would rather the installer started the agent immediately, ask it to:
-
-```python
-sys.argv = ["install.py", "--chat"]                    # terminal chat REPL
-sys.argv = ["install.py", "--ui"]                      # Pyto chat window
-sys.argv = ["install.py", "--task", "rename my screenshots by date"]
-```
-
-**No terminal and no key? Nothing blocks.** The installer finishes, prints the one command
-above, and exits 0 with a line telling you how to add the key later
-(`python install.py --api-key sk-...`, or `export DEEPSEEK_API_KEY=…`).
-
-Other flags: `--api-key`, `--key-file`, `--api-base`, `--model`, `--yes` (accept every
-default and never prompt), `--save-anyway`, `--reconfigure`, `--skip-fixes`, and
-`--no-network` (make no network request at all). **`--no-setup` installs the files only** —
-no key, no config, no doctor — and prints the old step-by-step instructions; that is the
-form to use from automation and CI.
-
-To install the moving tip of `main` instead of a pinned release or commit, set `PIN = "main"`.
-
-```python
-import urllib.request, runpy
-open("install.py", "wb").write(urllib.request.urlopen("https://raw.githubusercontent.com/unkloud/pyto-agent/main/install.py", timeout=120).read())
-runpy.run_path("install.py", run_name="__main__")
-```
-
-**Updating is the same command.** Re-run the snippet above and it replaces the code in
-place. To move to a newer release later, take that release's digest from its GitHub release
-page and pass it as `--sha256` — the installer will refuse anything that does not match.
-
-A digest that does not match **refuses to install and writes nothing**: the tag moved, the
-download was modified in transit, or the pin is for a different ref.
-
-Choose where it lands by passing an argument:
-
-```python
-import sys; sys.argv = ["install.py", "--into", "pyto-agent"]   # default
-import sys; sys.argv = ["install.py", "--into", "~/Documents/pyto-agent"]
-```
-
-### Option B — the same thing without pasting a URL
-
-If you would rather read the installer before running it (a good habit), fetch it with
-`curl`, which Pyto ships, and run it:
-
-```python
-import os
-os.system("curl -L -o install.py https://raw.githubusercontent.com/unkloud/pyto-agent/main/install.py")
+import json
 import runpy
+import sys
+import urllib.request
+
+repo = "unkloud/pyto-agent"
+request = urllib.request.Request(
+    "https://api.github.com/repos/" + repo + "/releases/latest",
+    headers={"User-Agent": "pyto-harness"}
+)
+with urllib.request.urlopen(request, timeout=60) as response:
+    tag = json.load(response)["tag_name"]
+
+installer_url = "https://raw.githubusercontent.com/" + repo + "/" + tag + "/install.py"
+with urllib.request.urlopen(installer_url, timeout=120) as response:
+    with open("install.py", "wb") as installer:
+        installer.write(response.read())
+
+sys.argv = ["install.py", "--ref", tag]
 runpy.run_path("install.py", run_name="__main__")
 ```
 
-The file is one self-contained script (no package, no imports beyond the standard library:
-`argparse`, `ast`, `getpass`, `hashlib`, `importlib`, `io`, `json`, `os`, `re`, `runpy`,
-`shutil`, `sys`, `types`, `urllib`, `zipfile`).
+### Option B — Install v1.0.7 exactly
 
-### Option C — download the zip on the phone or on a computer
-
-1. Download **https://github.com/unkloud/pyto-agent/archive/refs/heads/main.zip**
-   (in Safari, or on a computer and AirDrop/iCloud it across).
-2. Put `pyto-agent-main.zip` somewhere Pyto can read — On My iPhone → Pyto, or iCloud Drive.
-3. In the Pyto console, install from that file — the same one-stop setup, from local bytes
-   instead of a download:
+Use this if you want this specific release, even after a newer one is available.
 
 ```python
-import sys, runpy
-sys.argv = ["install.py", "--zip", "pyto-agent-main.zip"]
+import runpy
+import sys
+import urllib.request
+
+tag = "v1.0.7"
+installer_url = "https://raw.githubusercontent.com/unkloud/pyto-agent/" + tag + "/install.py"
+with urllib.request.urlopen(installer_url, timeout=120) as response:
+    with open("install.py", "wb") as installer:
+        installer.write(response.read())
+
+sys.argv = ["install.py", "--ref", tag]
 runpy.run_path("install.py", run_name="__main__")
 ```
 
-…or unzip it yourself, which is what the installer does anyway:
+### Option C — Install from files in Files or AirDrop
+
+Use this if you downloaded the files in Safari or received them from someone else. Download both files to Files, then run the script below. Pyto will ask you to choose the installer first and the ZIP file second. You do not need to rename either file or type a path.
+
+- [Download the v1.0.7 installer](https://raw.githubusercontent.com/unkloud/pyto-agent/v1.0.7/install.py)
+- [Download the v1.0.7 source ZIP](https://github.com/unkloud/pyto-agent/archive/refs/tags/v1.0.7.zip)
 
 ```python
-import zipfile, os
-zipfile.ZipFile("pyto-agent-main.zip").extractall(".")
-os.rename("pyto-agent-main", "pyto-agent")
+import file_system as fs
+import runpy
+import sys
+
+installer_path = fs.import_file()
+archive_path = fs.import_file()
+sys.argv = [installer_path, "--zip", archive_path]
+runpy.run_path(installer_path, run_name="__main__")
 ```
 
-### Option D — from a computer, over Files or a cable
+### Option D — Try the latest in-development version
 
-Copy the `pyto-agent` folder into Pyto's documents directory (Files → On My iPhone → Pyto),
-then confirm where it landed:
-
-```python
-import os
-print(os.getcwd())          # where Pyto starts
-os.chdir("pyto-agent")      # or the full path you copied it to
-```
-
-### Updating later
-
-Re-run the **same** Option A lines, or from inside the folder:
+This installs the current work on GitHub. It may change before the next release.
 
 ```python
-import runpy, sys
-sys.argv = ["install.py", "--into", "."]
+import runpy
+import sys
+import urllib.request
+
+installer_url = "https://raw.githubusercontent.com/unkloud/pyto-agent/main/install.py"
+with urllib.request.urlopen(installer_url, timeout=120) as response:
+    with open("install.py", "wb") as installer:
+        installer.write(response.read())
+
+sys.argv = ["install.py", "--ref", "main"]
 runpy.run_path("install.py", run_name="__main__")
 ```
 
-An update replaces the code and nothing else. Your API key, sessions, memory and backups
-live in `~/pyto_harness`, and the programs the agent writes live in the workspace
-(`~/pyto_harness_workspace` by default) — neither is inside the code directory, so
-updating cannot lose them. A working key already in the config is kept and re-checked, not
-rewritten. The installer refuses to touch a directory that is not a `pyto-agent` checkout
-unless you pass `--force`.
+### Finish setup
 
-### Checking it worked
+The installer asks for your API key. Paste it at the prompt; it will not be shown back to you. If you do not have a key yet, leave it blank and finish setup. Local device tools can still be used.
 
-The install already told you: the last line it printed is the command that starts the
-agent, and `doctor: … 0 need you` means the checks passed. To look closer:
+When setup finishes, open the new start.py file in Pyto and tap Run to start the agent. You do not need to copy a printed command.
+
+Your settings, chat history and programs stay in their own folders when you update the app.
+
+### Update an existing installation
+
+Paste this complete script into Pyto. When the folder picker opens, choose your existing pyto-agent folder. The installer updates that folder and keeps your settings and programs.
 
 ```python
-import os, runpy, sys
-os.chdir("pyto-agent")                                    # or just open start.py and press Run
-sys.argv = ["run.py", "--version"]; runpy.run_path("run.py", run_name="__main__")
-sys.argv = ["run.py", "--tools"];   runpy.run_path("run.py", run_name="__main__")   # 34 tools
+import file_system as fs
+import json
+import runpy
+import sys
+import urllib.request
+
+with fs.open_directory():
+    repo = "unkloud/pyto-agent"
+    request = urllib.request.Request(
+        "https://api.github.com/repos/" + repo + "/releases/latest",
+        headers={"User-Agent": "pyto-harness"}
+    )
+    with urllib.request.urlopen(request, timeout=60) as response:
+        tag = json.load(response)["tag_name"]
+
+    installer_url = "https://raw.githubusercontent.com/" + repo + "/" + tag + "/install.py"
+    with urllib.request.urlopen(installer_url, timeout=120) as response:
+        with open("install.py", "wb") as installer:
+            installer.write(response.read())
+
+    sys.argv = ["install.py", "--into", "."]
+    runpy.run_path("install.py", run_name="__main__")
 ```
 
-`run.py` adds its own directory to `sys.path`, so it does not matter which directory Pyto
-started in — `os.chdir` is only there to keep relative paths (workspace, `start.py`) sane.
-
-### What still needs you
-
-The installer does these last three things for you only where it can, and says so when it
-cannot:
-
-* **The Shortcut automation** — starting the harness from the Home screen, the Share sheet
-  or Siri is a Shortcut you build once, in the Shortcuts app, following §5a. The doctor
-  writes `SHORTCUTS.md` into the workspace with the exact URL scheme and task variable, so
-  you are copying from a document, not guessing.
-* **iOS permissions** — the first time a generated program touches the photo library, the
-  calendar, notifications or speech, iOS shows *its* prompt. Grant it then; a denial is
-  reported and never retried silently (§6).
-* **The account behind the key** — the installer proves the key is accepted with one
-  minimal request. It cannot buy credit, lift a rate limit or un-suspend an account.
-
-> Pyto's `sys.executable` is not a real interpreter you can spawn. That is fine — the
-> harness detects this (`harness/ios.py: has_fake_subprocess()`) and runs programs
-> in-process instead. See §6 and [SECURITY.md](SECURITY.md).
+If Pyto asks for permission to open a folder or file, choose the Pyto folder or the file you downloaded. Pyto's file picker lets you select these without typing their full locations.
 
 ---
 
