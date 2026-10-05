@@ -1,5 +1,9 @@
 # pyto-harness
 
+**Free for noncommercial use** under the [PolyForm Noncommercial License 1.0.0](LICENSE).
+Commercial uses outside the license's permitted purposes require a separate paid
+commercial agreement. See [Licensing](#licensing).
+
 An LLM agent that runs **inside Pyto on an iPhone or iPad** and writes small Python
 programs for you. You describe a chore — "rename my screenshots by date", "summarise this
 week's notes", "put the thing I just copied into a note" — and the agent writes a `.py`
@@ -709,3 +713,26 @@ The installer is covered the same way (`python3 -m unittest tests.test_install -
 installs from an in-memory zip of this repository, points `--api-base` at the mock, and
 asserts the key is validated before it is written, that a rejected key is never saved, and
 that a run with no terminal finishes instead of blocking.
+
+## Licensing
+
+This project is source-available under the
+[PolyForm Noncommercial License 1.0.0](LICENSE)
+(`SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0`).
+
+**Noncommercial use is 100% free of license fees.** You may use, modify, and
+redistribute the software for the purposes permitted by the license, subject to
+its terms, including preservation of the required license information and notices.
+The license also expressly permits use by charitable organizations, educational
+institutions, public research organizations, public safety or health organizations,
+environmental protection organizations, and government institutions, regardless of
+their funding sources or obligations resulting from that funding.
+
+Commercial uses outside those permissions, including commercial repackaging or
+resale outside the permitted purposes, require a separate paid commercial agreement
+before use. Contact the maintainer through the
+[project repository](https://github.com/unkloud/pyto-agent) to discuss commercial
+licensing. No commercial license is granted by this README.
+
+Free use refers to this project's license fee; Pyto and model-provider charges are
+separate. This summary does not replace or modify the [license terms](LICENSE).
