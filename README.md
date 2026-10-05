@@ -9,16 +9,17 @@ programs for you. You describe a chore — "rename my screenshots by date", "sum
 week's notes", "put the thing I just copied into a note" — and the agent writes a `.py`
 file into a workspace on the device, runs it, and tells you what happened.
 
-* **Standard library only.** No `pip install`, no `requests`, no `pydantic`. Every claim
-  in this README is checked by `stdlib_audit.py` and 721 tests.
+* **The harness uses only Python's standard library.** Pyto may include extra libraries on
+  a particular device; the agent can check before it depends on one. Every claim in this
+  README is checked by `stdlib_audit.py` and the offline test suite.
 * **Python 3.10**, the version Pyto ships. Verified on real CPython 3.10.22 and 3.12.
 * **OpenAI-compatible API** — DeepSeek by default (`deepseek-chat`), anything
   chat-completions-shaped otherwise.
 * **Survives the app being killed.** Every turn is appended to a JSONL session log, so
   `--resume` picks up exactly where iOS interrupted you.
 
-**Current release: v1.0.7.** See the [release notes](RELEASE-NOTES-v1.0.7.md) for the Pyto
-chat lifecycle fix and its verification limits.
+**Current release: v1.0.8.** See the [release notes](RELEASE-NOTES-v1.0.8.md) for Pyto-aware
+Unix commands, optional library discovery, and persistent custom tools.
 
 ---
 
@@ -28,7 +29,7 @@ Choose one option. Each Python block is a complete script: copy the whole block 
 
 ### Option A — Install the latest release (recommended)
 
-This automatically finds the newest stable release on GitHub. It currently installs v1.0.7, and the same script will keep working for later releases.
+This automatically finds the newest stable release on GitHub. It currently installs v1.0.8, and the same script will keep working for later releases.
 
 ```python
 import json
@@ -53,7 +54,7 @@ sys.argv = ["install.py", "--ref", tag]
 runpy.run_path("install.py", run_name="__main__")
 ```
 
-### Option B — Install v1.0.7 exactly
+### Option B — Install v1.0.8 exactly
 
 Use this if you want this specific release, even after a newer one is available.
 
@@ -62,7 +63,7 @@ import runpy
 import sys
 import urllib.request
 
-tag = "v1.0.7"
+tag = "v1.0.8"
 installer_url = "https://raw.githubusercontent.com/unkloud/pyto-agent/" + tag + "/install.py"
 with urllib.request.urlopen(installer_url, timeout=120) as response:
     with open("install.py", "wb") as installer:
@@ -76,8 +77,8 @@ runpy.run_path("install.py", run_name="__main__")
 
 Use this if you downloaded the files in Safari or received them from someone else. Download both files to Files, then run the script below. Pyto will ask you to choose the installer first and the ZIP file second. You do not need to rename either file or type a path.
 
-- [Download the v1.0.7 installer](https://raw.githubusercontent.com/unkloud/pyto-agent/v1.0.7/install.py)
-- [Download the v1.0.7 source ZIP](https://github.com/unkloud/pyto-agent/archive/refs/tags/v1.0.7.zip)
+- [Download the v1.0.8 installer](https://raw.githubusercontent.com/unkloud/pyto-agent/v1.0.8/install.py)
+- [Download the v1.0.8 source ZIP](https://github.com/unkloud/pyto-agent/archive/refs/tags/v1.0.8.zip)
 
 ```python
 import file_system as fs
@@ -220,9 +221,10 @@ contains `api_key`, `token`, `secret`, `password` or `authorization`.
 
 ## 3. Running it
 
-**On the device there is no shell to type `python run.py` into.** Pyto runs a script, so the
-easiest thing is to open **`start.py`** — the launcher the installer wrote next to `run.py` —
-and press Run. For flags and arguments, use the one-line form the installer prints:
+**On the device, start this harness by running a Pyto script.** Pyto has an embedded shell,
+but there is no separate terminal app session where you type `python run.py`. Open
+**`start.py`** — the launcher the installer wrote next to `run.py` — and press Run. For flags
+and arguments, use the one-line form the installer prints:
 
 ```python
 import os, runpy, sys
@@ -298,6 +300,7 @@ ask  ->  pyto_api(module="pasteboard")  ->  write_program  ->  run_program  ->  
 | Tool | What it gives the model |
 |---|---|
 | `pyto_api` | The grounding call. With no argument: the Pyto modules that import on **this** device plus the list of what Pyto does not have (Reminders, HealthKit, Bluetooth, speech recognition, `pip install` of C extensions, a daemon, a PTY, real `subprocess`, git/ffmpeg/wget/make). With `module=` : that module's real members, signatures, a minimal snippet, caveats and an `unverified` mark on anything the catalogue could not confirm from Pyto's docs or source. `member=` narrows further. Read-only, no approval needed, capped at 8 000 characters. |
+| `python_module_capabilities` | Checks whether named optional Python libraries such as `numpy` or `PIL` are findable in this runtime without importing them. Pyto and desktop installations can differ, so a result from a computer does not prove availability on the phone. |
 | `write_program` | Writes the program into the workspace so you can re-run it later. |
 | `run_program` | Runs it and returns stdout/stderr. If stderr contains `module 'X' has no attribute 'Y'`, `cannot import name 'Y' from 'X'` or `No module named 'X'` for a Pyto module, the result gets an appended **Pyto API hint**: the closest real member names (`difflib`), whether the module is even available here, and the `pyto_api` call to make. The original traceback is never rewritten. |
 
@@ -318,6 +321,34 @@ The catalogue lives in `harness/pyto_api.py`; every entry is traced to Pyto's do
 or its `Lib/*.py` source, and entries that could not be confirmed that way are marked
 `verified: false` (they are rendered with an `[unverified]` tag and the tool says so on
 device).
+
+---
+
+## 3b. Unix commands and saved tools
+
+Pyto embeds an `ios_system` command set and documents running commands with
+`subprocess.Popen`. The harness checks this Pyto build's `help` output with
+`unix_capabilities`, then offers a small read-only set through `unix_command`: `cat`, `cut`,
+`find`, `grep`, `head`, `ls`, `sort`, `tail`, `uniq` and `wc`. Availability can vary by Pyto
+build. The command tool accepts one command with separate arguments, has no shell pipelines
+or redirection, confines file paths to the workspace, and limits ordinary file inputs and
+directory scans. Use `search_files` and `list_files` first for routine workspace browsing.
+See [Pyto's terminal documentation](https://github.com/ColdGrub1384/Pyto/blob/main/docs/terminal.rst).
+
+For a repeated job, the agent can save a callable custom tool:
+
+1. Check commands with `unix_capabilities`, Pyto module APIs with `pyto_api`, and optional
+   installed Python libraries with `python_module_capabilities`.
+2. Call `custom_tool_create` with a small Python `run(inputs)` function and an explicit JSON
+   input schema. The source is shown in the creation approval.
+3. The new tool is available to the model in the next turn and is saved under
+   `pyto_harness_workspace/custom-tools/` so it remains after restart.
+4. Every invocation asks for approval again. Review or disable saved tools with
+   `custom_tool_list` and `custom_tool_disable`; `custom_tool_enable` re-enables one.
+
+Custom tools run as Python inside Pyto with the app's permissions; they are not isolated or
+sandboxed. Their dependency lists are descriptive hints for the agent, not an installer. Read
+the saved `.py` source before approving use of a tool you do not recognize.
 
 ---
 
@@ -437,10 +468,10 @@ Everything the agent can reach from these is listed by `python run.py --capabili
 | No `multiprocessing` | No parallelism across processes | Tool calls overlap on threads inside one process |
 | Scripts are stopped when free memory nears **~500 MB** (Pyto stops *all* of them) | An unbounded log or a chatty program crashes the session | Session logs compact near 4 000 events / 4 MB; tool output is capped and spilled; `memory_status` reports `os_proc_available_memory()` |
 | No background daemon; the app is **suspended then killed** | Nothing runs while you are elsewhere | Everything durable is a file; `keepalive_start` uses `background.BackgroundTask` for a short reprieve |
-| No PTY, no shell | `input()`, curses and progress bars misbehave | The system prompt tells the model to write non-interactive programs; programs get plain pipes |
+| No PTY; Pyto's embedded shell commands run in-process | `input()`, curses and progress bars misbehave; commands cannot be reliably force-stopped | The harness offers a confirmed, read-only command subset with separate arguments and bounded inputs; programs get plain pipes |
 | Clipboard works **only in the foreground** | Reading it from a background task fails | Documented in the tool description; the adapter reports the failure instead of guessing |
 | No Reminders / HealthKit / Bluetooth module | Those tasks are impossible from Python | Route them through a Shortcut you build; `shortcut_run` triggers it |
-| Compiled `pip` packages impossible (numpy/pandas are a paid in-app purchase) | No scientific stack | Standard library only; `array`, `statistics`, `math`, `sqlite3` cover a surprising amount |
+| Optional third-party libraries vary; compiled packages cannot be added with `pip` | A package may not be installed on this device | `python_module_capabilities` checks candidates; use the standard library or another available module as a fallback |
 | Photo library, calendar, notifications, speech need **permission** | First call may be denied | Adapters report the denial; nothing is retried silently |
 | `background.BackgroundTask` is a **store-review grey area** (it plays silence to stay alive) | Apple has rejected apps for abusing it | Opt-in, labelled as such, and stopped as soon as the work is done |
 | An app can only write inside its own container | You cannot reach arbitrary paths | The workspace is a path jail: `../` and symlink escapes are refused before any I/O |
@@ -463,7 +494,7 @@ applies the repairs a machine can and prints a before/after report. `--repair "<
 lets the model change the harness's own source, subject to a path jail, an AST/stdlib
 pre-check, a snapshot with hashes, and the offline test suite as the gate: a red suite
 reverts the edit byte-for-byte and hands back the failure verbatim. A bounded gate (~3 s,
-232 tests) is the default; `--deep-tests` asks for all 721.
+232 tests) is the default; `--deep-tests` asks for all 745.
 
 **The full story — the three tiers, the guardrail list, what is deliberately not automated,
 and a worked transcript — is in [SELF-REPAIR.md](SELF-REPAIR.md).**
@@ -538,7 +569,10 @@ harness/
   llm.py               chat-completions client: SSE, retries, cancellation, non-streaming fallback
   schema.py            JSON-Schema-subset validator (bool is not an integer)
   tools.py             tool registry: validation, approval, bounded timeout, concurrent dispatch
-  tools_ios.py         the 34 model-facing tools (8 of them diagnose, repair or ground the API)
+  tools_ios.py         the 41 model-facing tools, including Unix and reusable custom tools
+  unix_tools.py        Pyto-aware command discovery and bounded read-only commands
+  custom_tools.py      persistent Python tools with schemas and per-run approval
+  module_tools.py      optional package availability checks without importing packages
   ios.py               device capability adapters, all degrading gracefully off-device
   loop.py              agent loop, system prompt, approval policy, result truncation
   session.py           append-only JSONL log: append, resume, projection, compaction
@@ -551,7 +585,7 @@ harness/
   repair.py            self-repair: path-jailed, snapshot-first, test-gated source edits
   pyto_api.py          Pyto library grounding: 25 modules / 160 members, curated + introspected
   errors.py            error taxonomy with retryability
-tests/                 721 offline tests against localhost mock servers
+tests/                 745 offline tests against localhost mock servers
 examples/              three programs the agent is expected to be able to write
 stdlib_audit.py        proves "stdlib only" and "parses as Python 3.10"
 ```
@@ -581,8 +615,8 @@ read so their snapshots stay restorable.
 ## 10. Verifying it yourself
 
 ```bash
-python3 -m unittest discover -s tests -t .     # 721 tests, offline, no external network (~40 s)
-python3 stdlib_audit.py                        # third_party_modules: [], 18 files parse at (3,10)
+python3 -m unittest discover -s tests -t .     # 745 tests, offline, no external network (~41 s)
+python3 stdlib_audit.py                        # third_party_modules: [], 22 files parse at (3,10)
 python3 run.py --dry-run "hello"               # prints the request, sends nothing
 python3 run.py --paths                         # every resolved path and the rule that chose it
 python3 run.py --doctor                        # health report, exit 0 healthy / 1 fixable / 2 human

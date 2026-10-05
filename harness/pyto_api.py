@@ -1962,8 +1962,8 @@ NOT_AVAILABLE: Tuple[Dict[str, str], ...] = (
         "instead": "Use a Shortcut's media actions, or AVFoundation through the Objective-C bridge (advanced).",
     },
     {
-        "name": "wget / curl as an external binary",
-        "reason": "No external binaries; there is no shell PATH with those tools.",
+        "name": "wget / curl through this harness's command tool",
+        "reason": "This harness exposes only a small read-only command allowlist and omits wget/curl. Use urllib.request from the standard library for HTTP.",
         "instead": "urllib.request / http.client from the standard library.",
     },
     {

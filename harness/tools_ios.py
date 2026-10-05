@@ -20,6 +20,7 @@ import os
 import re
 import runpy
 import shutil
+import shlex
 import signal
 import subprocess
 import sys
@@ -28,7 +29,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
-from . import budget, doctor, ios, pyto_api, repair
+from . import budget, custom_tools, doctor, ios, module_tools, pyto_api, repair, unix_tools
 from .config import Config, ConfigError, load_config
 from .errors import ToolError
 from .home import expand_user_path
@@ -157,6 +158,12 @@ class ToolContext:
     harness_root: str = ""
     #: Gate every self-edit on the whole test suite instead of the covering subset.
     full_gate: bool = False
+    #: The live registry is used only for explicit custom-tool enable/create operations.
+    registry: Optional[ToolRegistry] = None
+    #: Lazy, per-process cache of this Pyto build's command inventory.
+    unix_inventory: Optional[Dict[str, Any]] = None
+    #: Invalid custom tool manifests are reported to the agent but never executed.
+    custom_tool_errors: List[str] = field(default_factory=list)
 
     def note_call(self, name: str) -> None:
         self.calls.append(name)
@@ -198,7 +205,14 @@ def _iter_workspace_files(root: str, pattern: str = "*", limit: int = 5000) -> L
 def build_registry(context: ToolContext) -> ToolRegistry:
     """Create the registry containing every model-facing tool."""
     registry = ToolRegistry()
+    context.registry = registry
     workspace = context.workspace
+
+    def protect_custom_tool_store(target: str) -> None:
+        relative = workspace.relative(os.path.realpath(target))
+        first = relative.split(os.sep, 1)[0]
+        if first == custom_tools.STORE_DIR:
+            raise ToolError("custom tool files are managed by custom_tool_create/enable/disable; review them with custom_tool_list and read_file")
 
     # -- programs ------------------------------------------------------------------
 
@@ -228,6 +242,7 @@ def build_registry(context: ToolContext) -> ToolRegistry:
         target = workspace.resolve(path)
         if not target.endswith(".py"):
             target += ".py"
+        protect_custom_tool_store(target)
         if os.path.isdir(target):
             raise ToolError("{} is a directory".format(workspace.relative(target)))
         header = PROGRAM_HEADER.format(
@@ -297,7 +312,13 @@ def build_registry(context: ToolContext) -> ToolRegistry:
             target = None
             source = path_or_source
             label = "<inline source>"
-        outcome = _execute(target=target, source=source, argv=argv, cwd=workspace.root, timeout=timeout)
+        if ios.is_pyto():
+            # Pyto's subprocess replacement changes process-wide cwd, streams, argv and env.
+            # Share one execution lane with its embedded Unix commands to avoid cross-talk.
+            with unix_tools.IN_PROCESS_EXECUTION_LOCK:
+                outcome = _execute(target=target, source=source, argv=argv, cwd=workspace.root, timeout=timeout)
+        else:
+            outcome = _execute(target=target, source=source, argv=argv, cwd=workspace.root, timeout=timeout)
         outcome["program"] = label
         header = "{} {} in {:.2f}s ({} mode)".format(
             "TIMED OUT" if outcome["timed_out"] else ("FAILED" if outcome["returncode"] else "OK"),
@@ -375,6 +396,214 @@ def build_registry(context: ToolContext) -> ToolRegistry:
             member=member,
             chars=len(text),
             capped=capped,
+        )
+
+    @registry.tool(
+        "python_module_capabilities",
+        "Check whether named optional Python libraries are installed in this runtime without importing them. Use this before planning around a third-party package; then test a small import on the device.",
+        {
+            "type": "object",
+            "properties": {
+                "modules": {
+                    "type": "array",
+                    "items": {"type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"},
+                    "minItems": 1,
+                    "maxItems": module_tools.MAX_MODULE_NAMES,
+                    "description": "Top-level Python import names such as numpy or PIL.",
+                }
+            },
+            "required": ["modules"],
+            "additionalProperties": False,
+        },
+        timeout=10.0,
+    )
+    def python_module_capabilities(modules: Sequence[str]) -> ToolResult:
+        result = module_tools.inspect_modules(modules)
+        return ToolResult.ok(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True), **result)
+
+    # -- Pyto's embedded Unix commands -------------------------------------------
+
+    def command_inventory() -> Dict[str, Any]:
+        if context.unix_inventory is None:
+            context.unix_inventory = unix_tools.discover_commands(workspace.root)
+        return context.unix_inventory
+
+    @registry.tool(
+        "unix_capabilities",
+        "List the read-only Unix commands confirmed on this Pyto build. Call this before using unix_command; use search_files and list_files for ordinary workspace searches.",
+        {"type": "object", "properties": {}, "additionalProperties": False},
+        timeout=None if ios.is_pyto() else 30.0,
+    )
+    def unix_capabilities() -> ToolResult:
+        inventory = command_inventory()
+        return ToolResult.ok(
+            json.dumps(inventory, ensure_ascii=False, indent=2, sort_keys=True),
+            commands=inventory.get("commands", []),
+            verified=bool(inventory.get("verified")),
+            platform=inventory.get("platform", "unknown"),
+        )
+
+    @registry.tool(
+        "unix_command",
+        "Run one confirmed read-only Unix command with separate arguments and a workspace-relative file path. Call unix_capabilities first. No shell chains or file-writing options are accepted; Pyto commands share the app process and cannot be forcibly timed out.",
+        {
+            "type": "object",
+            "properties": {
+                "command": {"type": "string", "description": "A command listed by unix_capabilities."},
+                "args": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "maxItems": unix_tools.MAX_ARGS,
+                    "description": "Only the command's small documented read-only option set is accepted.",
+                },
+                "path": {
+                    "type": "string",
+                    "description": "Optional file or folder inside the workspace; never an outside Files path.",
+                },
+                "input_text": {
+                    "type": "string",
+                    "maxLength": unix_tools.MAX_INPUT_BYTES,
+                    "description": "Optional text input for sort, uniq, cut, wc or grep instead of a file path.",
+                },
+            },
+            "required": ["command"],
+            "additionalProperties": False,
+        },
+        timeout=None if ios.is_pyto() else 35.0,
+    )
+    def unix_command(
+        command: str,
+        args: Optional[Sequence[str]] = None,
+        path: str = "",
+        input_text: Optional[str] = None,
+    ) -> ToolResult:
+        inventory = command_inventory()
+        outcome = unix_tools.run_command(
+            command,
+            args or [],
+            path=path,
+            input_text=input_text,
+            workspace=workspace,
+            available=inventory.get("commands", []),
+        )
+        status = "No matches" if outcome["no_matches"] else (
+            "OK" if outcome["returncode"] == 0 else "Command returned {}".format(outcome["returncode"])
+        )
+        sections = ["{} ({} mode)".format(status, outcome["mode"])]
+        sections.append("$ {}".format(" ".join(shlex.quote(value) for value in outcome["argv"])))
+        sections.append("--- stdout ---\n{}".format(outcome["stdout"].rstrip() or "<empty>"))
+        if outcome["stderr"].strip():
+            sections.append("--- stderr ---\n{}".format(outcome["stderr"].rstrip()))
+        if not outcome["timeout_enforced"]:
+            sections.append("Pyto ran this command inside the app process; no hard kill timeout is available.")
+        return ToolResult(
+            content="\n".join(sections),
+            is_error=(outcome["returncode"] != 0 and not outcome["no_matches"]) or bool(outcome["stderr"].strip()),
+            metadata={
+                "command": command,
+                "returncode": outcome["returncode"],
+                "truncated": outcome["truncated"],
+                "timeout_enforced": outcome["timeout_enforced"],
+                "mode": outcome["mode"],
+            },
+        )
+
+    # -- persistent custom tools --------------------------------------------------
+
+    @registry.tool(
+        "custom_tool_list",
+        "List saved custom tools with their input schemas, Pyto modules and commands. Use this before calling or editing a tool you created.",
+        {"type": "object", "properties": {}, "additionalProperties": False},
+        timeout=15.0,
+    )
+    def custom_tool_list() -> ToolResult:
+        result = custom_tools.list_custom_tools(workspace)
+        result["load_errors"] = list(context.custom_tool_errors)
+        return ToolResult.ok(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True), **result)
+
+    @registry.tool(
+        "custom_tool_create",
+        "Create a persistent callable Python tool with an explicit JSON input schema. Source must define def run(inputs):. This stores code that runs with Pyto's app permissions; creation needs approval and every later invocation also needs approval.",
+        {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "pattern": "^[a-z][a-z0-9_]{0,47}$"},
+                "purpose": {"type": "string", "maxLength": custom_tools.MAX_PURPOSE_CHARS},
+                "parameters": {"type": "object", "description": "A JSON Schema object describing the tool inputs."},
+                "source": {
+                    "type": "string",
+                    "maxLength": custom_tools.MAX_SOURCE_CHARS,
+                    "description": "Python source defining one synchronous def run(inputs): function.",
+                },
+                "required_commands": {"type": "array", "items": {"type": "string"}, "maxItems": 32},
+                "required_modules": {"type": "array", "items": {"type": "string"}, "maxItems": 32},
+            },
+            "required": ["name", "purpose", "parameters", "source"],
+            "additionalProperties": False,
+        },
+        timeout=30.0,
+    )
+    def custom_tool_create(
+        name: str,
+        purpose: str,
+        parameters: Mapping[str, Any],
+        source: str,
+        required_commands: Optional[Sequence[str]] = None,
+        required_modules: Optional[Sequence[str]] = None,
+    ) -> ToolResult:
+        if context.registry is None:
+            raise ToolError("the live tool registry is unavailable")
+        manifest = custom_tools.create_custom_tool(
+            workspace,
+            name=name,
+            purpose=purpose,
+            parameters=parameters,
+            source=source,
+            required_commands=required_commands,
+            required_modules=required_modules,
+        )
+        custom_tools.register_custom_tool(workspace, context.registry, run_program, manifest)
+        return ToolResult.ok(
+            "Created custom_{} and added it to this session's tool list. Its source is {}. It will ask for approval every time it runs.".format(
+                manifest["name"], manifest["source"]
+            ),
+            name="custom_" + manifest["name"],
+            source=manifest["source"],
+            source_sha256=manifest["source_sha256"],
+        )
+
+    @registry.tool(
+        "custom_tool_disable",
+        "Disable a saved custom tool while keeping its source and manifest so it can be reviewed or re-enabled later.",
+        {
+            "type": "object",
+            "properties": {"name": {"type": "string", "description": "Tool name, with or without the custom_ prefix."}},
+            "required": ["name"],
+            "additionalProperties": False,
+        },
+        timeout=15.0,
+    )
+    def custom_tool_disable(name: str) -> ToolResult:
+        if context.registry is None:
+            raise ToolError("the live tool registry is unavailable")
+        return ToolResult.ok(custom_tools.disable_custom_tool(workspace, name, context.registry), name=name)
+
+    @registry.tool(
+        "custom_tool_enable",
+        "Re-enable a disabled custom tool only if its source still matches the reviewed manifest. It will continue to require approval each time it runs.",
+        {
+            "type": "object",
+            "properties": {"name": {"type": "string", "description": "Tool name, with or without the custom_ prefix."}},
+            "required": ["name"],
+            "additionalProperties": False,
+        },
+        timeout=15.0,
+    )
+    def custom_tool_enable(name: str) -> ToolResult:
+        if context.registry is None:
+            raise ToolError("the live tool registry is unavailable")
+        return ToolResult.ok(
+            custom_tools.enable_custom_tool(workspace, name, context.registry, run_program), name=name
         )
 
     # -- files ---------------------------------------------------------------------
@@ -466,6 +695,7 @@ def build_registry(context: ToolContext) -> ToolRegistry:
     def write_file(path: str, content: str) -> ToolResult:
         _guard_write(content, "content")
         target = workspace.resolve(path)
+        protect_custom_tool_store(target)
         if os.path.isdir(target):
             raise ToolError("{} is a directory".format(path))
         os.makedirs(os.path.dirname(target) or workspace.root, exist_ok=True)
@@ -501,6 +731,7 @@ def build_registry(context: ToolContext) -> ToolRegistry:
     )
     def edit_file(path: str, old: str, new: str, count: int = 1) -> ToolResult:
         target = workspace.resolve(path, must_exist=True)
+        protect_custom_tool_store(target)
         if os.path.isdir(target):
             raise ToolError("{} is a directory".format(path))
         with open(target, "r", encoding="utf-8") as handle:
@@ -1270,6 +1501,7 @@ def build_registry(context: ToolContext) -> ToolRegistry:
             "Turn finished. Summary delivered to the user.", finished=True, message=message
         )
 
+    context.custom_tool_errors = custom_tools.register_custom_tools(workspace, registry, run_program)
     return registry
 
 

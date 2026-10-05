@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import tempfile
 import unittest
 
 from harness.errors import MalformedResponseError
@@ -107,8 +108,45 @@ class TestApprovalPolicy(unittest.TestCase):
         self.assertIn("Pay Rent", seen[0].describe())
         self.assertIn("Shortcuts", seen[0].reason)
 
+    def test_custom_tool_approval_shows_the_saved_python_source(self) -> None:
+        with tempfile.TemporaryDirectory() as workspace:
+            os.makedirs(os.path.join(workspace, "custom-tools"), exist_ok=True)
+            source = "def run(inputs):\n    return 'review this code'\n"
+            with open(os.path.join(workspace, "custom-tools", "example.py"), "w", encoding="utf-8") as handle:
+                handle.write(source)
+            request = ApprovalRequest(
+                tool="custom_example", arguments={"text": "hello"},
+                reason="runs saved Python", workspace=workspace,
+            )
+            self.assertIn(source.rstrip(), request.describe())
+            enable_request = ApprovalRequest(
+                tool="custom_tool_enable", arguments={"name": "example"},
+                reason="re-enables Python", workspace=workspace,
+            )
+            self.assertIn(source.rstrip(), enable_request.describe())
+
+    def test_custom_tool_creation_approval_shows_full_source(self) -> None:
+        source = "#" + (" review" * 400) + "\ndef run(inputs):\n    return None\n"
+        description = ApprovalRequest(
+            tool="custom_tool_create", arguments={"name": "long", "source": source},
+            reason="stores Python",
+        ).describe()
+        self.assertIn(source.rstrip(), description)
+        self.assertNotIn("more characters", description)
+
     def test_unknown_tool_is_denied(self) -> None:
         self.assertFalse(make_policy()("mystery_tool", {}).allowed)
+
+    def test_saved_custom_tools_need_approval_for_each_invocation(self) -> None:
+        self.assertFalse(make_policy()("custom_saved", {}).allowed)
+        seen = []
+
+        def prompter(request: ApprovalRequest) -> bool:
+            seen.append(request)
+            return True
+
+        self.assertTrue(make_policy(prompter=prompter)("custom_saved", {"text": "hello"}).allowed)
+        self.assertIn("saved Python", seen[0].reason)
 
     def test_calendar_write_needs_approval_but_read_does_not(self) -> None:
         policy = make_policy()
@@ -209,6 +247,31 @@ class TestToolRoundTrip(TempDirTestCase):
         roles = [m["role"] for m in sent_second]
         self.assertEqual(roles, ["system", "user", "assistant", "tool"])
         self.assertEqual(sent_second[3]["name"], "write_program")
+
+    def test_new_custom_tool_is_offered_in_the_next_turn(self) -> None:
+        schema = {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"], "additionalProperties": False}
+        source = "def run(inputs):\n    print('custom:', inputs['text'])\n"
+        script = [
+            tool_response(("custom_tool_create", {
+                "name": "echo_text",
+                "purpose": "Print supplied text.",
+                "parameters": schema,
+                "source": source,
+                "required_modules": ["sys"],
+            })),
+            tool_response(("custom_echo_text", {"text": "hello"})),
+            text_response("The saved tool ran."),
+        ]
+        with MockProvider(script) as provider:
+            client = make_client(provider)
+            session = self.make_session()
+            options = make_options(client, self.make_registry(), session)
+            events, done = drive(options, "create and run an echo tool")
+            client.close()
+        self.assertEqual(done["stop"], "stop")
+        self.assertIn("custom_echo_text", provider.tool_names_sent(1))
+        tool_results = [event.data.get("content", "") for event in events if event.kind == "tool.completed"]
+        self.assertTrue(any("custom: hello" in content for content in tool_results))
 
     def test_tool_results_are_logged_in_model_order(self) -> None:
         script = [
