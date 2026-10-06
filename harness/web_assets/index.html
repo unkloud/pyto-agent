@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="light dark">
+  <title>Pyto Harness</title>
+  <link rel="stylesheet" href="asset/style.css">
+  <script defer src="asset/app.js"></script>
+</head>
+<body>
+  <div class="shell">
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">LOCAL SESSION</p>
+        <h1>Pyto Harness</h1>
+      </div>
+      <div class="connection"><span class="pulse" aria-hidden="true"></span><span id="connection">Connecting…</span></div>
+    </header>
+
+    <nav class="tabs" aria-label="Workspace views">
+      <button class="tab active" data-view="chat" aria-selected="true">Chat</button>
+      <button class="tab" data-view="programs" aria-selected="false">Saved programs</button>
+      <button class="tab" data-view="history" aria-selected="false">History</button>
+    </nav>
+
+    <main>
+      <section id="view-chat" class="view active" aria-labelledby="chat-heading">
+        <div class="section-heading">
+          <div><p class="eyebrow">CONVERSATION</p><h2 id="chat-heading">Work with your harness</h2></div>
+          <button id="stop-turn" class="button secondary" disabled>Stop turn</button>
+        </div>
+        <div id="transcript" class="transcript" aria-live="polite" aria-label="Conversation transcript"></div>
+        <div id="approval" class="approval hidden" role="alertdialog" aria-labelledby="approval-title">
+          <div class="approval-mark" aria-hidden="true">!</div>
+          <div class="approval-copy">
+            <p class="eyebrow">ACTION NEEDS YOUR REVIEW</p>
+            <h3 id="approval-title">Approve this action?</h3>
+            <p id="approval-description" class="preserve"></p>
+          </div>
+          <div class="approval-actions">
+            <button id="deny" class="button secondary">Deny</button>
+            <button id="allow" class="button primary">Allow</button>
+          </div>
+        </div>
+        <form id="chat-form" class="composer">
+          <label class="sr-only" for="prompt">Message</label>
+          <textarea id="prompt" rows="2" maxlength="8192" placeholder="Ask for a script, a change, or an explanation…" required></textarea>
+          <div class="composer-bottom">
+            <span class="hint">Runs on this device. Approvals stay in this page.</span>
+            <button id="send" class="button primary" type="submit">Send</button>
+          </div>
+        </form>
+      </section>
+
+      <section id="view-programs" class="view" aria-labelledby="programs-heading" hidden>
+        <div class="section-heading">
+          <div><p class="eyebrow">YOUR LIBRARY</p><h2 id="programs-heading">Saved programs</h2></div>
+          <button id="refresh-programs" class="button secondary">Refresh</button>
+        </div>
+        <p class="lede">Choose a program and provide its inputs. File and folder fields accept paths that Pyto can access.</p>
+        <div id="program-list" class="program-list"><p class="muted">Loading programs…</p></div>
+      </section>
+
+      <section id="view-history" class="view" aria-labelledby="history-heading" hidden>
+        <div class="section-heading">
+          <div><p class="eyebrow">SAVED LOCALLY</p><h2 id="history-heading">Session history</h2></div>
+          <button id="older-history" class="button secondary" hidden>Older messages</button>
+        </div>
+        <pre id="history-text" class="history">Loading history…</pre>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <p>Local to this device. When started from Pyto, this session uses Pyto’s background keepalive while Safari is open; iOS may show background audio.</p>
+      <button id="stop-session" class="text-button">Stop web session</button>
+    </footer>
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  </div>
+</body>
+</html>

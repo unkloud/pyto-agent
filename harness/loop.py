@@ -33,7 +33,7 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from . import budget, ios, pyto_api, request_context
 from .config import Config, ConfigError
-from .errors import HarnessError
+from .errors import CancelledError, HarnessError
 from .home import expand_user_path
 from .llm import AssistantStream, LLMClient, LLMConfig, RetryPolicy, ToolCall, Usage
 from .security import scrub_secrets, scrub_value
@@ -681,6 +681,11 @@ async def run_turn(options: LoopOptions, prompt: str) -> Any:
             elif isinstance(item, BaseException):
                 failure = item
         if failure is not None:
+            if isinstance(failure, CancelledError) or stop.is_set():
+                session.append("turn.cancelled", {"turn": turns, "message": "cancelled by the caller"})
+                result.stop = "cancelled"
+                yield _emit(options, Event("error", {"code": "CANCELLED", "message": "cancelled", "turn": turns}))
+                break
             if isinstance(failure, HarnessError):
                 message = "{}: {}".format(failure.code, failure.message)
             else:

@@ -16,7 +16,7 @@ file into a workspace on the device, runs it, and tells you what happened.
 * **Survives the app being killed.** Every turn is appended to a JSONL session log, so
   `--resume` picks up exactly where iOS interrupted you.
 
-**Latest published release: v1.0.17.** Its device diagnostic now runs seven focused, offline behavior checks on the installed Pyto runtime, keeps native UI acceptance separate, includes redacted failure summaries for device-only issues, and captures CLI output in the Shortcuts tests without replacing Pyto’s global console streams. See the [release notes](RELEASE-NOTES-v1.0.17.md) and [device goal checklists](harness/projects/easy-device-programming/goals/).
+**Latest published release: v1.0.18.** Adds an optional, token-protected browser interface for chat, approvals, saved programs, and session history on the same device. The desktop checks pass; Safari and Pyto lifecycle acceptance still needs a real device. See the [release notes](RELEASE-NOTES-v1.0.18.md) and [browser interface guide](docs/web-interface.md).
 
 ---
 
@@ -26,7 +26,7 @@ Choose one option. Each Python block is a complete script: copy the whole block 
 
 ### Option A — Install the latest release (recommended)
 
-This automatically finds the newest stable release on GitHub. It installs v1.0.17, whose source archive includes `device_release_diagnostic.py` beside `run.py` and `harness/`.
+This automatically finds the newest stable release on GitHub. It installs v1.0.18, which includes the optional `--web` interface.
 
 ```python
 import json
@@ -52,7 +52,7 @@ sys.argv = ["install.py", "--ref", tag]
 runpy.run_path("install.py", run_name="__main__")
 ```
 
-### Option B — Install v1.0.17 exactly
+### Option B — Install v1.0.18 exactly
 
 Use this if you want this specific release, even after a newer one is available.
 
@@ -61,7 +61,7 @@ import runpy
 import sys
 import urllib.request
 
-tag = "v1.0.17"
+tag = "v1.0.18"
 installer_url = "https://raw.githubusercontent.com/unkloud/pyto-agent/" + tag + "/install.py"
 with urllib.request.urlopen(installer_url, timeout=120) as response:
     with open("install.py", "wb") as installer:
@@ -71,13 +71,13 @@ sys.argv = ["install.py", "--ref", tag]
 runpy.run_path("install.py", run_name="__main__")
 ```
 
-### Option C — Install v1.0.17 from Files or AirDrop
+### Option C — Install v1.0.18 from Files or AirDrop
 
-Use this if you downloaded the files in Safari or received them from someone else. The source ZIP includes `device_release_diagnostic.py` beside `run.py` and `harness/`. Download both files to Files, then run the script below. Pyto will ask you to choose the installer first and the ZIP file second. You do not need to rename either file or type a path.
+Use this if you downloaded the files in Safari or received them from someone else. Download the installer and source ZIP to Files, then run the script below. Pyto will ask you to choose the installer first and the ZIP file second. You do not need to rename either file or type a path.
 
-- [Download the v1.0.17 installer](https://raw.githubusercontent.com/unkloud/pyto-agent/v1.0.17/install.py)
-- [Download the v1.0.17 source ZIP](https://github.com/unkloud/pyto-agent/archive/refs/tags/v1.0.17.zip)
-- [Download only the diagnostic script](https://github.com/unkloud/pyto-agent/releases/download/v1.0.17/device_release_diagnostic_v1.0.17.py)
+- [Download the v1.0.18 installer](https://raw.githubusercontent.com/unkloud/pyto-agent/v1.0.18/install.py)
+- [Download the v1.0.18 source ZIP](https://github.com/unkloud/pyto-agent/archive/refs/tags/v1.0.18.zip)
+- [Download the v1.0.17 device diagnostic](https://github.com/unkloud/pyto-agent/releases/download/v1.0.17/device_release_diagnostic_v1.0.17.py) (this does not test the web interface)
 
 ```python
 import file_system as fs
@@ -88,7 +88,7 @@ installer_path = fs.import_file()
 archive_path = fs.import_file()
 sys.argv = [
     installer_path,
-    "--ref", "v1.0.17",
+    "--ref", "v1.0.18",
     "--zip", archive_path,
 ]
 runpy.run_path(installer_path, run_name="__main__")
@@ -120,9 +120,9 @@ When setup finishes, open the new start.py file in Pyto and tap Run to start the
 
 Your settings, chat history and programs stay in their own folders when you update the app.
 
-### Run the on-device diagnostic
+### Run the v1.0.17 on-device diagnostic
 
-After installing v1.0.17, open `device_release_diagnostic.py` from the pyto-agent folder in Pyto and tap Run. It writes a Markdown report beside the script. The report includes seven offline behavior checks for execution, saved programs, inputs, simulated recovery, project context, Objective-C recipes and the Shortcuts saved-run contract. They use disposable test data and make no model or network requests. Failed cases include short redacted exception summaries to make device-only issues easier to diagnose.
+Open the standalone v1.0.17 diagnostic in Pyto and tap Run. It writes a Markdown report beside the script. The report includes seven offline behavior checks for execution, saved programs, inputs, simulated recovery, project context, Objective-C recipes and the Shortcuts saved-run contract. They use disposable test data and make no model or network requests. Failed cases include short redacted exception summaries to make device-only issues easier to diagnose. This diagnostic predates the browser interface; use the [web interface device checklist](docs/web-interface.md#device-checklist) to test `--web`.
 
 The report keeps native UI checks as `NOT RUN`; a scripted pass does not verify approvals, pickers, app layout, force-quit behavior or the Shortcuts app handoff.
 
@@ -248,6 +248,7 @@ runpy.run_path("run.py", run_name="__main__")
 python run.py "rename my screenshots by date"     # one task, then exit
 python run.py                                     # interactive terminal chat
 python run.py --ui                                # Pyto chat window
+python run.py --web                               # browser interface on this device
 python run.py --resume <session.jsonl> "and July too?"
 python run.py --dry-run "..."                     # print the request, contact nothing
 python run.py --capabilities                      # what this device can actually do
@@ -436,6 +437,24 @@ The one design rule that matters: **the model call never runs on the UI thread.*
 button handler starts a `threading.Thread`, and Pyto's documented high-level PytoUI views
 can be updated from that worker while `ui.show_view` keeps the script alive. A Pyto button
 handler that calls an API endpoint freezes the app until the response lands.
+
+### Browser interface
+
+```bash
+python run.py --web
+```
+
+This starts a responsive chat page in Safari, served by Pyto itself. It also includes
+approval controls, saved-program forms, and session history. The server binds only to
+`127.0.0.1` on an ephemeral port; the page uses a fresh per-run token. It is for the
+browser on the same device, not another device on the network. The API key stays in the
+Python process. Use **Stop turn** to cancel current work or **Stop web session** to close
+the browser server and finish the run. Full startup, lifecycle, and device-check details
+are in [docs/web-interface.md](docs/web-interface.md).
+
+Saved program file and folder inputs ask for paths Pyto can access. Safari's file picker
+does not grant the Python process access to a selected file, so this web form does not
+offer upload-style picking.
 
 ---
 

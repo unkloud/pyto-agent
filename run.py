@@ -4,6 +4,7 @@
     python run.py "rename my screenshots by date"      one task, then exit
     python run.py                                       interactive terminal chat
     python run.py --ui                                  Pyto chat window
+    python run.py --web                                 browser interface on this device
     python run.py --resume <session.jsonl> "and again"  continue a previous chat
     python run.py --dry-run "..."                       print the request, send nothing
     python run.py --capabilities                        what this device can do
@@ -427,6 +428,7 @@ def build_parser() -> argparse.ArgumentParser:
             "  python run.py --doctor --fix\n"
             "  python run.py --repair \"the api_base keeps 404ing\"\n"
             "  python run.py --ui\n"
+            "  python run.py --web\n"
             "  python run.py --programs\n"
             "  python run.py --run-saved <program-id>\n"
             "  python run.py --shortcut-run <program-id> --allow-unattended-saved-programs\n"
@@ -451,7 +453,13 @@ def build_parser() -> argparse.ArgumentParser:
         "narrower than --yolo",
     )
     parser.add_argument("--dry-run", action="store_true", help="print the request that would be sent, contact nothing")
-    parser.add_argument("--ui", action="store_true", help="open the Pyto chat window instead of the terminal")
+    frontend = parser.add_mutually_exclusive_group()
+    frontend.add_argument("--ui", action="store_true", help="open the Pyto chat window instead of the terminal")
+    frontend.add_argument(
+        "--web",
+        action="store_true",
+        help="open a token-protected browser interface served from this device",
+    )
     parser.add_argument("--workspace", help="workspace directory (default ~/pyto_harness_workspace)")
     parser.add_argument("--max-turns", type=int, help="model round trips per task (default 8)")
     parser.add_argument("--no-stream", action="store_true", help="use the non-streaming request path")
@@ -817,8 +825,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         print("could not open the session: {}".format(exc), file=sys.stderr)
         return 2
 
-    prompter = None if config.yolo else (UIApprover() if args.ui else TerminalApprover())
-    factory = make_options_factory(config, prompter=prompter, verbose=args.verbose, ui=bool(args.ui))
+    interactive_frontend = bool(args.ui or args.web)
+    prompter = None if config.yolo else (UIApprover() if interactive_frontend else TerminalApprover())
+    factory = make_options_factory(config, prompter=prompter, verbose=args.verbose, ui=interactive_frontend)
 
     approvals_line = (
         "bypassed (--yolo)"
@@ -852,6 +861,23 @@ def main(argv: Optional[List[str]] = None) -> int:
                 print(banner)
                 return 3
             return 0
+
+        if args.web:
+            from harness.web import WebController, run_web
+
+            controller = WebController(
+                options_factory=factory,
+                session=session,
+                approver=prompter if isinstance(prompter, UIApprover) else None,
+                verbose=args.verbose,
+                initial_prompt=task,
+            )
+            try:
+                return run_web(controller)
+            except OSError as exc:
+                controller.close()
+                print("--web could not start or continue: {}: {}".format(type(exc).__name__, exc), file=sys.stderr)
+                return 3
 
         printer = Printer(verbose=args.verbose)
         if task:
