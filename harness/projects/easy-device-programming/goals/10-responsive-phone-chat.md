@@ -8,7 +8,7 @@ Work in this repository and read `AUDIT-2026-10-05.md` plus applicable repositor
 
 **Prerequisites:** 01 readable-output; 02 working-chat-gui. Verify prerequisite behavior exists before depending on it; if absent, identify the unmet prerequisite instead of inventing its API.
 
-**Starting points:** harness/ui.py: _UIStream, Transcript, run_ui; session-backed details/history views.
+**Starting points:** harness/web.py, harness/web_assets/app.js, harness/web_assets/style.css; session-backed details/history views.
 
 **Implement:**
 

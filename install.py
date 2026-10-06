@@ -28,7 +28,7 @@ One run does what the four "paste this next" one-liners used to do, in order:
 4. run the doctor's checks and apply the safe fixes, printing one compact line;
 5. write ``start.py`` next to ``run.py`` (open it in Pyto and press Run);
 6. print the single command that starts the agent -- and run it if ``--chat``,
-   ``--ui`` or ``--task "..."`` was asked for.
+   ``--web`` or ``--task "..."`` was asked for.
 
 Nothing here blocks: with no terminal and no key the install finishes, prints the one
 command to run later and exits 0.  The key is never printed and never echoed.
@@ -407,7 +407,7 @@ def next_steps(target: str) -> str:
         "  3. Ask for something:\n"
         "       {three}\n"
         "\n"
-        "  4. Optional: a chat window instead of the console:\n"
+        "  4. Optional: browser chat on this device:\n"
         "       {four}\n"
         "\n"
         "Full instructions: {target}/README.md\n"
@@ -421,7 +421,7 @@ def next_steps(target: str) -> str:
         one=prefix + "['run.py', '--init']" + tail,
         two=prefix + "['run.py', '--doctor', '--fix']" + tail,
         three=prefix + "['run.py', 'write me a script that renames my screenshots by date']" + tail,
-        four=prefix + "['run.py', '--ui']" + tail,
+        four=prefix + "['run.py', '--web']" + tail,
     )
 
 
@@ -1101,8 +1101,8 @@ def launch_argv(args) -> "list[str] | None":
     """The ``run.py`` arguments a launch flag asks for, or ``None`` for "just print"."""
     if args.task:
         return ["run.py", args.task]
-    if args.ui:
-        return ["run.py", "--ui"]
+    if args.web:
+        return ["run.py", "--web"]
     if args.chat:
         return ["run.py"]
     return None
@@ -1394,7 +1394,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     launch = parser.add_mutually_exclusive_group()
     launch.add_argument("--chat", action="store_true", help="after setup, start the terminal chat REPL")
-    launch.add_argument("--ui", action="store_true", help="after setup, open the Pyto chat window")
+    launch.add_argument("--web", action="store_true", help="after setup, open browser chat on this device")
     launch.add_argument("--task", default=None, metavar="TEXT", help="after setup, run TEXT as one task")
     return parser
 
@@ -1502,8 +1502,8 @@ def main(argv=None) -> int:
             print("verify: {}".format(note))
 
     if args.no_setup:
-        if args.chat or args.ui or args.task:
-            print("(--no-setup: --chat/--ui/--task are ignored)", file=sys.stderr)
+        if args.chat or args.web or args.task:
+            print("(--no-setup: --chat/--web/--task are ignored)", file=sys.stderr)
         print()
         print(next_steps(target))
         return 0

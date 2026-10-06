@@ -1,5 +1,7 @@
 # Goal 02: Make chat open, respond and close reliably
 
+> **Superseded for the harness chat interface by Goal 14 in v1.0.20.** The native `--ui` chat window is retired; use `--web` for graphical chat. This does not remove `pyto_ui` support for generated programs or interactive previews. Keep this file as the historical record of the former front end.
+
 ## Executable prompt
 
 Work in this repository and read `AUDIT-2026-10-05.md` plus applicable repository instructions first. Inspect the current implementation; earlier goal work may have changed the cited code. Implement the outcome end to end rather than returning only a plan. Preserve existing user files and policy guarantees. Use supported Pyto documentation/source when native API behavior matters. Add focused regression tests for the behavior being changed and run the relevant existing tests (`python3 -m unittest discover -s tests -t .` for the full suite; it uses a localhost mock server). Do not claim native verification without a device. If device access is unavailable, complete desktop-verifiable work and leave an exact device checklist and the verification limitation. Finish with changed files, tests/results and remaining limitations.

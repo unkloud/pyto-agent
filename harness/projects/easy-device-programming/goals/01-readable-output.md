@@ -8,7 +8,7 @@ Work in this repository and read `AUDIT-2026-10-05.md` plus applicable repositor
 
 **Prerequisites:** None. Verify prerequisite behavior exists before depending on it; if absent, identify the unmet prerequisite instead of inventing its API.
 
-**Starting points:** harness/ui.py: Printer, Transcript, _UIStream; run.py; install.py: START_PY.
+**Starting points:** harness/ui.py: Printer; harness/web.py: browser stream; run.py; install.py: START_PY.
 
 **Implement:**
 
@@ -33,15 +33,15 @@ Run these in Pyto from the folder containing `run.py`. Leave `start.py` unchange
 ```python
 import os, runpy, sys
 os.chdir("/path/to/pyto-harness")
-sys.argv = ["run.py", "--ui"]
+sys.argv = ["run.py", "--web"]
 runpy.run_path("run.py", run_name="__main__")
 ```
 
 Repeat by changing only the `sys.argv` list. For example, add `"--no-stream"` to check the non-streaming provider path or `"--verbose"` to see tool details.
 
-- [ ] **Normal GUI output:** launch with `--ui` and ask: “Use `pyto_api` with no arguments to list the Pyto modules, then summarize the result.” Confirm that the reference body is not dumped into the chat, one short “Checking the Pyto API reference…” status appears, and the final answer appears once.
-- [ ] **Non-streaming answer:** launch with `--ui --no-stream` and ask: “Reply exactly: non-stream check complete.” Confirm the answer is visible once.
-- [ ] **Verbose details:** launch with `--ui --verbose` and repeat the Pyto API request. Confirm tool arguments, result body and timing are visible, the answer is not duplicated, and credentials remain redacted.
+- [ ] **Normal GUI output:** launch with `--web` and ask: “Use `pyto_api` with no arguments to list the Pyto modules, then summarize the result.” Confirm that the reference body is not dumped into the chat, one short “Checking the Pyto API reference…” status appears, and the final answer appears once.
+- [ ] **Non-streaming answer:** launch with `--web --no-stream` and ask: “Reply exactly: non-stream check complete.” Confirm the answer is visible once.
+- [ ] **Verbose details:** launch with `--web --verbose` and repeat the Pyto API request. Confirm tool arguments, result body and timing are visible, the answer is not duplicated, and credentials remain redacted.
 - [ ] **Error and denial:** ask it to run a harmless program that raises `ValueError('readable output check')`; confirm a short actionable error appears. Then ask it to open `https://example.com` and deny the request if prompted; confirm the URL is not opened and one concise denial reason appears.
 - [ ] **Interruption:** in terminal chat mode, interrupt a deliberately slow request using Pyto's Stop/Ctrl-C control. Confirm the transcript reports “Interrupted.” If Pyto stops the script before it can render that status, record that as a device limitation.
 

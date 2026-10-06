@@ -1,15 +1,7 @@
-"""Front ends: the Pyto UI when it exists, otherwise a terminal REPL.
+"""Shared front-end helpers for browser and terminal sessions.
 
-The UI is deliberately small.  The pattern that matters is not the layout — it is that
-**the network never runs on the UI thread**.  A Pyto button handler starts a plain
-``threading.Thread`` for model work. Pyto's documented ``pyto_ui`` view wrappers can be
-modified from another thread; direct UIKit calls have separate main-thread requirements
-and are not used here. ``ui.show_view`` keeps the script and its session resources alive
-until the view closes.
-
-If ``pyto_ui`` is missing (Linux, a test, a plain Pyto console session) the caller gets
-:func:`terminal_repl` instead.  :func:`run_ui` raises :class:`UnsupportedCapability` in
-that case so ``run.py --ui`` can explain itself rather than silently doing nothing.
+The web controller and terminal REPL use the same event renderer, approval queue,
+session-history formatter, and synchronous turn driver.
 """
 
 from __future__ import annotations
@@ -20,97 +12,27 @@ import json
 import os
 import sys
 import threading
-import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
 
-from .errors import UnsupportedCapability
 from .home import expand_user_path
-from .loop import ApprovalRequest, Event, LoopOptions, make_policy, run_turn
+from .loop import ApprovalRequest, Event, LoopOptions, run_turn
 from . import program_inputs, programs
 from .session import SessionLog, new_session_path
 from .security import scrub_secrets, scrub_value
 
-TRANSCRIPT_LIMIT_CHARS = 80_000
-UI_STREAM_FLUSH_INTERVAL_SECONDS = 0.06
-UI_STREAM_FLUSH_CHARS = 2048
-UI_HISTORY_PAGE_MESSAGES = 12
-UI_HISTORY_MESSAGE_CHARS = 1800
-
-
-def pyto_ui_module() -> Any:
-    """Return the ``pyto_ui`` module, or ``None`` when it is not available."""
-    try:
-        import pyto_ui  # type: ignore
-    except ImportError:
-        return None
-    return pyto_ui
-
-
-def is_ui_available() -> bool:
-    return pyto_ui_module() is not None
-
-
-@dataclass
-class Transcript:
-    """Text buffer behind the chat view.  Pure data, so it is testable without Pyto."""
-
-    lines: List[str] = field(default_factory=list)
-    _partial: str = ""
-
-    def add(self, text: str) -> None:
-        if not text:
-            return
-        if len(text) > TRANSCRIPT_LIMIT_CHARS:
-            text = text[-TRANSCRIPT_LIMIT_CHARS:]
-        self.lines.append(text)
-        self._trim()
-
-    def append_delta(self, text: str) -> None:
-        self._partial += text
-        if len(self._partial) > TRANSCRIPT_LIMIT_CHARS:
-            self._partial = self._partial[-TRANSCRIPT_LIMIT_CHARS:]
-        self._trim()
-
-    def flush_delta(self, prefix: str = "") -> None:
-        if self._partial:
-            self.add(("{}{}".format(prefix, self._partial)).rstrip())
-        self._partial = ""
-
-    def complete_message(self, text: str) -> None:
-        """Commit one assistant message, preferring the final body over partial deltas."""
-        content = (text or "").strip()
-        partial = self._partial.strip()
-        self._partial = ""
-        if content:
-            self.add(partial if partial == content else content)
-        elif partial:
-            self.add(partial)
-
-    def _trim(self) -> None:
-        total = sum(len(line) for line in self.lines) + len(self._partial)
-        while total > TRANSCRIPT_LIMIT_CHARS and len(self.lines) > 1:
-            total -= len(self.lines.pop(0))
-        if total > TRANSCRIPT_LIMIT_CHARS and self.lines:
-            total -= len(self.lines.pop(0))
-        if total > TRANSCRIPT_LIMIT_CHARS:
-            self._partial = self._partial[-TRANSCRIPT_LIMIT_CHARS:]
-
-    def render(self) -> str:
-        body = "\n".join(self.lines)
-        if self._partial:
-            body += ("\n" if body else "") + self._partial
-        return body
+HISTORY_PAGE_MESSAGES = 12
+HISTORY_MESSAGE_CHARS = 1800
 
 
 def format_history_page(
     messages: Any,
     *,
     offset: int = 0,
-    page_size: int = UI_HISTORY_PAGE_MESSAGES,
+    page_size: int = HISTORY_PAGE_MESSAGES,
     session_path: str = "",
 ) -> tuple[str, bool]:
-    """Format one bounded page of durable provider history for the chat's History view."""
+    """Format one bounded page of durable session history for the browser."""
     if not isinstance(messages, (list, tuple)):
         messages = []
     total = len(messages)
@@ -157,10 +79,10 @@ def format_history_page(
         body = scrub_secrets(str(message.get("content") or "")).strip()
         if call_details:
             body = (body + "\n\n" if body else "") + "Tool request details:\n" + "\n\n".join(call_details)
-        if len(body) > UI_HISTORY_MESSAGE_CHARS:
-            first = UI_HISTORY_MESSAGE_CHARS * 2 // 3
-            last = UI_HISTORY_MESSAGE_CHARS - first
-            omitted = len(body) - UI_HISTORY_MESSAGE_CHARS
+        if len(body) > HISTORY_MESSAGE_CHARS:
+            first = HISTORY_MESSAGE_CHARS * 2 // 3
+            last = HISTORY_MESSAGE_CHARS - first
+            omitted = len(body) - HISTORY_MESSAGE_CHARS
             body = body[:first] + "\n… {} characters omitted from this page …\n".format(omitted) + body[-last:]
         rows.append("\n{}. {}\n{}".format(index, speaker, body or "(no text)"))
 
@@ -178,7 +100,6 @@ class Printer:
     def __init__(self, *, verbose: bool = False, stream: Any = None) -> None:
         self.verbose = verbose
         self.stream = stream or sys.stdout
-        self.transcript = Transcript()
         self._last_message: Optional[bytes] = None
         self._denied_ids = set()
 
@@ -204,7 +125,6 @@ class Printer:
         elif kind == "message.completed":
             content = scrub_secrets(str(data.get("content") or "")).strip()
             reasoning = scrub_secrets(str(data.get("reasoning") or "")).strip()
-            self.transcript.complete_message(content)
             if self.verbose and reasoning:
                 self.write("[reasoning]")
                 for line in reasoning.splitlines():
@@ -254,7 +174,6 @@ class Printer:
             message_key = _message_key(message) if message else None
             if message and message_key != self._last_message:
                 self._write_assistant(message)
-                self.transcript.add(message)
             if message_key is not None:
                 self._last_message = message_key
         elif kind == "turn.limit":
@@ -458,7 +377,7 @@ class _ApprovalTicket:
 
 
 class UIApprover:
-    """Queue policy prompts for explicit answers in the visible Pyto chat."""
+    """Queue policy prompts for explicit answers in an attached browser session."""
 
     interactive = True
 
@@ -572,147 +491,6 @@ def _library_workspace(options_factory: Callable[..., Any]) -> Any:
     return getattr(context, "workspace", None)
 
 
-def collect_program_inputs_ui(
-    ui: Any,
-    record: Dict[str, Any],
-    *,
-    file_system: Any = None,
-) -> Dict[str, Any]:
-    """Render a scrollable PytoUI form and return typed values after explicit submission."""
-    schema = program_inputs.normalize_schema(record.get("input_schema"))
-    if not schema:
-        return {}
-    view = ui.View()
-    view.title = "Run {}".format(record.get("title", "saved program"))
-    view.background_color = ui.COLOR_SYSTEM_BACKGROUND
-
-    width = max(220, view.width)
-    scroll = ui.ScrollView()
-    scroll.frame = (0, 52, width, max(100, view.height - 150))
-    scroll.content_width = width
-    scroll.content_height = max(100, len(schema) * 78 + 12)
-    scroll.vertical = True
-    content = scroll.content_view
-    content.frame = (0, 0, width, scroll.content_height)
-    view.add_subview(scroll)
-
-    raw_values: Dict[str, Any] = {}
-    controls: Dict[str, Any] = {}
-    field_states: Dict[str, Dict[str, Any]] = {}
-    for index, field in enumerate(schema):
-        name = field["name"]
-        top = 8 + index * 78
-        label = ui.Label("{}{}".format(field["label"], " (required)" if field["required"] else ""))
-        label.frame = (14, top, width - 28, 22)
-        content.add_subview(label)
-        kind = field["type"]
-        if kind in ("text", "number"):
-            default = field.get("default", "")
-            field_control = ui.TextField(text="" if default is None else str(default), placeholder=field["label"])
-            field_control.frame = (14, top + 25, width - 28, 40)
-            if kind == "number":
-                keyboard_type = getattr(ui, "KeyboardType", None)
-                decimal_pad = getattr(keyboard_type, "DECIMAL_PAD", None) if keyboard_type is not None else None
-                if decimal_pad is not None:
-                    field_control.keyboard_type = decimal_pad
-            controls[name] = field_control
-            content.add_subview(field_control)
-        elif kind == "choice":
-            choices = field["choices"]
-            default = field.get("default", choices[0])
-            state = {"value": default}
-            button = ui.Button(title="{}: {}".format(field["label"], state["value"]))
-            button.frame = (14, top + 25, width - 28, 40)
-
-            def next_choice(_sender: Any = None, *, current=state, options=choices, title=field["label"], target=button) -> None:
-                position = options.index(current["value"]) if current["value"] in options else -1
-                current["value"] = options[(position + 1) % len(options)]
-                target.title = "{}: {}".format(title, current["value"])
-
-            button.action = next_choice
-            controls[name] = button
-            field_states[name] = state
-            content.add_subview(button)
-        else:
-            status = ui.Label("Not selected")
-            status.number_of_lines = 1
-            status.frame = (14, top + 26, max(80, width - 150), 36)
-            browse = ui.Button(title="Pick {}".format(kind))
-            browse.frame = (width - 130, top + 25, 116, 40)
-            state = {"value": None}
-
-            def choose_path(
-                _sender: Any = None,
-                *,
-                current=state,
-                target=status,
-                descriptor=field,
-            ) -> None:
-                try:
-                    selected = program_inputs.pick_value(descriptor, file_system)
-                    current["value"] = selected
-                    base = os.path.basename(selected.rstrip(os.sep)) or selected
-                    target.text = "Selected: {}".format(base)
-                except program_inputs.InputsCancelled:
-                    current["value"] = None
-                    target.text = "Selection cancelled"
-                except program_inputs.ProgramInputError as exc:
-                    current["value"] = None
-                    target.text = str(exc)
-
-            browse.action = choose_path
-            controls[name] = browse
-            field_states[name] = state
-            content.add_subview(status)
-            content.add_subview(browse)
-
-    error_label = ui.Label("")
-    error_label.number_of_lines = 2
-    error_label.text_color = getattr(ui, "COLOR_SYSTEM_RED", ui.COLOR_LABEL)
-    error_label.frame = (14, view.height - 92, width - 28, 36)
-    view.add_subview(error_label)
-
-    buttons_top = view.height - 48
-    submit = ui.Button(title="Run")
-    submit.frame = (width - 132, buttons_top, 118, 38)
-    cancel = ui.Button(title="Cancel")
-    cancel.frame = (14, buttons_top, 118, 38)
-    view.add_subview(submit)
-    view.add_subview(cancel)
-    result: Dict[str, Any] = {}
-
-    def submit_values(_sender: Any = None) -> None:
-        submitted: Dict[str, Any] = {}
-        for field in schema:
-            name, kind = field["name"], field["type"]
-            if kind in ("text", "number"):
-                value = controls[name].text or ""
-                submitted[name] = None if value == "" and not field["required"] and "default" not in field else value
-            elif kind == "choice":
-                submitted[name] = field_states[name]["value"]
-            else:
-                selected = field_states[name]["value"]
-                if selected is not None or field["required"]:
-                    submitted[name] = selected
-                else:
-                    submitted[name] = None
-        try:
-            result["values"] = program_inputs.validate_values(schema, submitted)
-        except program_inputs.ProgramInputError as exc:
-            error_label.text = str(exc)
-            return
-        view.close()
-
-    def cancel_form(_sender: Any = None) -> None:
-        result["cancelled"] = True
-        view.close()
-
-    submit.action = submit_values
-    cancel.action = cancel_form
-    ui.show_view(view)
-    if result.get("cancelled") or "values" not in result:
-        raise program_inputs.InputsCancelled("program input form cancelled")
-    return result["values"]
 
 
 def handle_program_command(
@@ -777,7 +555,7 @@ def handle_program_command(
     input_values = None
     if record.get("input_schema"):
         if input_collector is None:
-            printer.write("This program needs inputs. Run it from the chat form or terminal prompt.")
+            printer.write("This program needs inputs. Run it from the browser form or terminal prompt.")
             return True
         try:
             input_values = input_collector(record)
@@ -843,549 +621,6 @@ def terminal_repl(
             printer.handle(Event("error", {"code": "CANCELLED", "message": "cancelled"}))
             if options.client is not None:
                 options.client.cancel()
-
-
-# --------------------------------------------------------------------------------------
-# Pyto UI
-# --------------------------------------------------------------------------------------
-
-UI_HEADER = "pyto-harness"
-
-
-def run_ui(
-    *,
-    options_factory: Callable[[SessionLog], LoopOptions],
-    session: SessionLog,
-    title: str = UI_HEADER,
-    verbose: bool = False,
-    approver: Optional[UIApprover] = None,
-) -> None:
-    """Launch the chat view.  Raises :class:`UnsupportedCapability` when pyto_ui is absent."""
-    ui = pyto_ui_module()
-    if ui is None:
-        raise UnsupportedCapability(
-            "pyto_ui is not importable here, so the Pyto window cannot be created. "
-            "Run without --ui for the terminal REPL, or run this file from the Pyto app."
-        )
-    view = ui.View()
-    view.title = title
-    view.background_color = ui.COLOR_SYSTEM_BACKGROUND
-
-    transcript = ui.TextView()
-    transcript.text = ""
-    transcript.editable = False
-    transcript.font = ui.Font("Menlo", 13)
-    transcript.background_color = ui.COLOR_SECONDARY_SYSTEM_BACKGROUND
-    transcript.text_color = ui.COLOR_LABEL
-
-    history_button = ui.Button()
-    history_button.title = "History"
-    history_button.background_color = ui.COLOR_SECONDARY_SYSTEM_BACKGROUND
-    history_button.text_color = ui.COLOR_LABEL
-
-    entry = ui.TextField()
-    entry.placeholder = "Ask for an automation..."
-    entry.background_color = ui.COLOR_TERTIARY_SYSTEM_BACKGROUND
-    entry.text_color = ui.COLOR_LABEL
-
-    send = ui.Button()
-    send.title = "Send"
-    send.background_color = ui.COLOR_SYSTEM_BLUE
-    send.text_color = ui.COLOR_WHITE
-
-    stop = ui.Button()
-    stop.title = "Stop"
-    stop.text_color = ui.COLOR_WHITE
-    stop.enabled = False
-
-    approve = ui.Button()
-    approve.title = "Allow"
-    approve.background_color = ui.COLOR_SYSTEM_BLUE
-    approve.text_color = ui.COLOR_WHITE
-    approve.enabled = False
-
-    deny = ui.Button()
-    deny.title = "Deny"
-    deny.background_color = ui.COLOR_SECONDARY_SYSTEM_BACKGROUND
-    deny.text_color = ui.COLOR_LABEL
-    deny.enabled = False
-
-    close = ui.Button()
-    close.title = "Close"
-
-    programs_button = ui.Button()
-    programs_button.title = "Programs"
-    programs_button.background_color = ui.COLOR_SECONDARY_SYSTEM_BACKGROUND
-    programs_button.text_color = ui.COLOR_LABEL
-
-    view.add_subview(transcript)
-    view.add_subview(programs_button)
-    view.add_subview(history_button)
-    if approver is not None:
-        view.add_subview(approve)
-        view.add_subview(deny)
-    view.add_subview(entry)
-    view.add_subview(send)
-    view.add_subview(stop)
-    view.add_subview(close)
-
-    transcript.frame = (10, 46, max(180, view.width - 20), max(80, view.height - (175 if approver is not None else 130) - 46))
-    programs_button.frame = (10, 5, 90, 32)
-    history_button.frame = (max(110, view.width - 100), 5, 90, 32)
-    approve.frame = (10, view.height - 160, 100, 36)
-    deny.frame = (120, view.height - 160, 100, 36)
-    entry.frame = (10, view.height - 110, max(100, view.width - 240), 40)
-    send.frame = (view.width - 220, view.height - 110, 65, 40)
-    stop.frame = (view.width - 145, view.height - 110, 65, 40)
-    close.frame = (view.width - 70, view.height - 110, 60, 40)
-
-    _apply_chat_flex(
-        ui,
-        transcript=transcript,
-        programs_button=programs_button,
-        history_button=history_button,
-        approve=approve,
-        deny=deny,
-        entry=entry,
-        send=send,
-        stop=stop,
-        close=close,
-    )
-
-    output = _UIStream(transcript)
-    prior_messages = session.project()
-    if prior_messages:
-        recent, _has_older = format_history_page(
-            prior_messages,
-            session_path=str(getattr(session, "path", "") or ""),
-        )
-        output.seed(recent)
-    printer = Printer(verbose=verbose, stream=output)
-    lifecycle = _ChatLifecycle()
-    approval_state = {"token": None}
-    history_state = {"active": False, "offset": 0, "older_available": False}
-
-    def clear_approval_controls() -> None:
-        approval_state["token"] = None
-        approve.enabled = False
-        deny.enabled = False
-        approve.action = lambda _sender=None: None
-        deny.action = lambda _sender=None: None
-
-    def on_approval(token: int, granted: bool) -> None:
-        if approval_state["token"] != token:
-            return
-        clear_approval_controls()
-        printer.write("\nApproval {}.\n".format("allowed" if granted else "denied"))
-        output.flush(force=True)
-        if approver is not None:
-            approver.answer(token, granted)
-
-    def present_approval(request: ApprovalRequest, token: int) -> None:
-        printer.write(
-            "\n[approval required]\n{}\nChoose Allow or Deny below.\n".format(request.describe())
-        )
-        output.flush(force=True)
-
-        def update() -> None:
-            if approver is not None and approver.current_token() != token:
-                return
-            approval_state["token"] = token
-            approve.action = lambda _sender=None, current=token: on_approval(current, True)
-            deny.action = lambda _sender=None, current=token: on_approval(current, False)
-            approve.enabled = True
-            deny.enabled = True
-
-        if not lifecycle.update_if_open(update) and approver is not None:
-            approver.cancel()
-
-    def update_controls(*, busy: bool) -> None:
-        def update() -> None:
-            _set_chat_controls(
-                send,
-                stop,
-                entry,
-                navigation=(programs_button, history_button),
-                busy=busy,
-            )
-            if not busy and history_state["active"] and not history_state["older_available"]:
-                programs_button.enabled = False
-
-        lifecycle.update_if_open(update)
-
-    def worker(prompt: str) -> None:
-        options: Optional[LoopOptions] = None
-        try:
-            if approver is not None:
-                approver.reset()
-            options = options_factory(session)
-            # Stop cancels the shared client. Each new turn gets a fresh cancellation
-            # event before it can become the active worker.
-            options.client.reset_cancel()
-            if not lifecycle.attach(options):
-                return
-            printer.write("\n>>> {}".format(prompt))
-            if not handle_program_command(
-                prompt,
-                options_factory=options_factory,
-                session=session,
-                printer=printer,
-                options=options,
-                input_collector=lambda record: collect_program_inputs_ui(ui, record),
-            ):
-                run_turn_sync(options, prompt, printer)
-        except Exception as exc:  # noqa: BLE001 - report failures instead of hiding them
-            try:
-                printer.write("[error] {}: {}".format(type(exc).__name__, exc))
-            except Exception as display_exc:  # surface a broken view through Pyto's console
-                print(
-                    "chat display failed: {}: {}".format(type(display_exc).__name__, display_exc),
-                    file=sys.stderr,
-                )
-        finally:
-            try:
-                output.flush(force=True)
-                update_controls(busy=False)
-            except Exception as exc:  # noqa: BLE001 - keep Pyto UI contract failures visible
-                print(
-                    "chat controls could not be updated: {}: {}".format(type(exc).__name__, exc),
-                    file=sys.stderr,
-                )
-            finally:
-                lifecycle.finish(options)
-
-    def on_send(_sender: Any = None) -> None:
-        prompt = (entry.text or "").strip()
-        if not prompt:
-            return
-        if history_state["active"]:
-            on_chat()
-        entry.text = ""
-        clear_approval_controls()
-        update_controls(busy=True)
-        thread = threading.Thread(target=worker, args=(prompt,), name="pyto-ui-turn", daemon=True)
-        try:
-            if not lifecycle.start(thread):
-                update_controls(busy=False)
-        except Exception as exc:  # noqa: BLE001 - thread startup errors are actionable
-            lifecycle.finish(None)
-            update_controls(busy=False)
-            printer.write("Could not start the chat worker: {}: {}".format(type(exc).__name__, exc))
-
-    def on_stop(_sender: Any = None) -> None:
-        if lifecycle.request_stop():
-            if approver is not None:
-                approver.cancel()
-            clear_approval_controls()
-            lifecycle.update_if_open(lambda: setattr(stop, "title", "Stopping…"))
-
-    def on_close(_sender: Any = None) -> None:
-        if approver is not None:
-            approver.close()
-        view.close()
-
-    def on_programs(_sender: Any = None) -> None:
-        workspace = _library_workspace(options_factory)
-        if workspace is None:
-            printer.write("The saved-program library is unavailable in this front end.")
-            return
-        try:
-            printer.write(scrub_secrets(programs.render_listing(workspace)))
-            output.flush(force=True)
-        except programs.ProgramLibraryError as exc:
-            printer.write("Saved-program library error: {}".format(exc))
-
-    def render_history_page() -> None:
-        messages = session.project()
-        page, older_available = format_history_page(
-            messages,
-            offset=history_state["offset"],
-            session_path=str(getattr(session, "path", "") or ""),
-        )
-        history_state["older_available"] = older_available
-        output.replace_display(page)
-        programs_button.title = "Older" if older_available else "Oldest"
-        programs_button.action = on_older
-        programs_button.enabled = older_available
-        history_button.title = "Chat"
-        history_button.action = on_chat
-
-    def on_history(_sender: Any = None) -> None:
-        history_state["active"] = True
-        history_state["offset"] = 0
-        render_history_page()
-
-    def on_older(_sender: Any = None) -> None:
-        if not history_state["older_available"]:
-            return
-        history_state["offset"] += UI_HISTORY_PAGE_MESSAGES
-        render_history_page()
-
-    def on_chat(_sender: Any = None) -> None:
-        history_state["active"] = False
-        history_state["offset"] = 0
-        output.restore_display()
-        programs_button.title = "Programs"
-        programs_button.action = on_programs
-        programs_button.enabled = True
-        history_button.title = "History"
-        history_button.action = on_history
-
-    # Register every callback before presentation so a fast first tap cannot race setup.
-    send.action = on_send
-    entry.action = on_send
-    stop.action = on_stop
-    close.action = on_close
-    programs_button.action = on_programs
-    history_button.action = on_history
-    if approver is not None:
-        approver.set_presenter(present_approval)
-    printer.write("pyto-harness ready. Session: {}. Tap Programs to browse saved tools.".format(getattr(session, "path", None) or "<memory>"))
-    output.flush(force=True)
-    sys.stdout.flush()
-
-    try:
-        # The documented API blocks this Python script until dismissal. Model calls run
-        # on the dedicated worker, and this wrapper does not call UIKit directly.
-        ui.show_view(view)
-    finally:
-        worker_thread, active_options = lifecycle.close()
-        if approver is not None:
-            approver.close()
-        # Quiesce output before cancellation wakes a provider worker with its final error
-        # event. No assignment can reach the dismissed TextView after this barrier.
-        output.close()
-        try:
-            lifecycle.cancel(active_options)
-        finally:
-            if worker_thread is not None and worker_thread is not threading.current_thread():
-                # run.py closes the session and model client only after this returns.
-                # Drain the worker so no final event can write to closed resources.
-                worker_thread.join()
-
-
-class _ChatLifecycle:
-    """Serialize chat turns and make stop/close safe against worker callbacks."""
-
-    def __init__(self) -> None:
-        self._lock = threading.RLock()
-        self._closed = False
-        self._busy = False
-        self._stop_requested = False
-        self._options: Optional[LoopOptions] = None
-        self._worker: Optional[threading.Thread] = None
-
-    def start(self, worker: threading.Thread) -> bool:
-        """Reserve and start one worker atomically with respect to close."""
-        with self._lock:
-            if self._closed or self._busy:
-                return False
-            self._busy = True
-            self._stop_requested = False
-            self._worker = worker
-            try:
-                worker.start()
-            except BaseException:
-                self._busy = False
-                self._worker = None
-                raise
-            return True
-
-    def attach(self, options: LoopOptions) -> bool:
-        """Register resources, cancelling immediately if stop/close already won."""
-        if options.stop is None:
-            options.stop = threading.Event()
-        with self._lock:
-            closed = self._closed
-            stop_requested = self._stop_requested
-            if not closed:
-                self._options = options
-            if closed or stop_requested:
-                options.stop.set()
-        if closed or stop_requested:
-            options.client.cancel()
-        return not closed
-
-    def request_stop(self) -> bool:
-        with self._lock:
-            if self._closed or not self._busy:
-                return False
-            self._stop_requested = True
-            options = self._options
-            if options is not None and options.stop is not None:
-                options.stop.set()
-        if options is not None:
-            options.client.cancel()
-        return True
-
-    def finish(self, options: Optional[LoopOptions]) -> None:
-        with self._lock:
-            if options is None or self._options is options or self._options is None:
-                self._options = None
-                self._busy = False
-                self._stop_requested = False
-                self._worker = None
-
-    def close(self) -> tuple:
-        """Mark the window closed and return its worker/resources for teardown."""
-        with self._lock:
-            self._closed = True
-            self._stop_requested = True
-            options = self._options
-            worker = self._worker
-        return worker, options
-
-    def cancel(self, options: Optional[LoopOptions]) -> None:
-        if options is not None:
-            if options.stop is not None:
-                options.stop.set()
-            options.client.cancel()
-
-    def update_if_open(self, callback: Callable[[], None]) -> bool:
-        with self._lock:
-            if self._closed:
-                return False
-            callback()
-            return True
-
-
-def _apply_chat_flex(ui: Any, **views: Any) -> None:
-    """Apply PytoUI's documented autoresizing flags where this Pyto version exposes them."""
-    flags = {
-        "transcript": ("FLEXIBLE_WIDTH", "FLEXIBLE_HEIGHT"),
-        "programs_button": ("FLEXIBLE_RIGHT_MARGIN", "FLEXIBLE_BOTTOM_MARGIN"),
-        "history_button": ("FLEXIBLE_LEFT_MARGIN", "FLEXIBLE_BOTTOM_MARGIN"),
-        "approve": ("FLEXIBLE_RIGHT_MARGIN", "FLEXIBLE_TOP_MARGIN"),
-        "deny": ("FLEXIBLE_RIGHT_MARGIN", "FLEXIBLE_TOP_MARGIN"),
-        "entry": ("FLEXIBLE_WIDTH", "FLEXIBLE_TOP_MARGIN"),
-        "send": ("FLEXIBLE_LEFT_MARGIN", "FLEXIBLE_TOP_MARGIN"),
-        "stop": ("FLEXIBLE_LEFT_MARGIN", "FLEXIBLE_TOP_MARGIN"),
-        "close": ("FLEXIBLE_LEFT_MARGIN", "FLEXIBLE_TOP_MARGIN"),
-    }
-    for name, view in views.items():
-        values = [getattr(ui, flag, None) for flag in flags.get(name, ())]
-        values = [value for value in values if value is not None]
-        if values:
-            view.flex = values
-
-
-def _set_chat_controls(
-    send: Any,
-    stop: Any,
-    entry: Any,
-    *,
-    busy: bool,
-    navigation: Any = (),
-) -> None:
-    send.enabled = not busy
-    stop.enabled = busy
-    stop.title = "Stop"
-    entry.enabled = not busy
-    for button in navigation:
-        button.enabled = not busy
-
-
-class _UIStream:
-    """File-like output for a Pyto ``TextView``; writes stop when the view closes.
-
-    Pyto documents that ``show_view`` permits another thread to modify its PytoUI views.
-    Keep the lock while assigning ``TextView.text`` so ``close`` forms a barrier: once it
-    returns, no earlier or later worker write can touch the dismissed view.
-    """
-
-    def __init__(self, view: Any) -> None:
-        self._view = view
-        self._pending: List[str] = []
-        self._pending_chars = 0
-        self._lock = threading.Lock()
-        self._text = ""
-        self._display_override: Optional[str] = None
-        self._closed = False
-        self._last_flush = time.monotonic()
-
-    def write(self, text: str) -> int:
-        if not text:
-            return 0
-        with self._lock:
-            if self._closed:
-                return len(text)
-            self._pending.append(text)
-            self._pending_chars += len(text)
-            self._flush_if_due_locked()
-        return len(text)
-
-    def flush(self, *, force: bool = False) -> None:
-        with self._lock:
-            if not self._closed:
-                if force:
-                    self._flush_locked()
-                else:
-                    self._flush_if_due_locked()
-
-    def close(self) -> None:
-        """Prevent further view writes and wait for any current assignment to finish."""
-        with self._lock:
-            self._closed = True
-            self._pending = []
-            self._pending_chars = 0
-
-    def seed(self, text: str) -> None:
-        """Set initial chat content before presentation, bounded like later output."""
-        with self._lock:
-            if self._closed:
-                return
-            self._text = str(text or "")[-TRANSCRIPT_LIMIT_CHARS:]
-            self._view.text = self._text
-            self._last_flush = time.monotonic()
-
-    def replace_display(self, text: str) -> None:
-        """Temporarily show a history page without changing the chat transcript buffer."""
-        with self._lock:
-            if self._closed:
-                return
-            self._display_override = str(text or "")[-TRANSCRIPT_LIMIT_CHARS:]
-            self._view.text = self._display_override
-
-    def restore_display(self) -> None:
-        """Return to the bounded chat buffer after the user closes the history page."""
-        with self._lock:
-            if self._closed:
-                return
-            self._display_override = None
-            self._view.text = self._text
-
-    def _flush_if_due_locked(self) -> None:
-        if not self._pending:
-            return
-        if (
-            self._pending_chars >= UI_STREAM_FLUSH_CHARS
-            or time.monotonic() - self._last_flush >= UI_STREAM_FLUSH_INTERVAL_SECONDS
-        ):
-            self._flush_locked()
-
-    def _flush_locked(self) -> None:
-        if not self._pending:
-            return
-        text = "".join(self._pending)
-        self._pending = []
-        self._pending_chars = 0
-        if len(text) >= TRANSCRIPT_LIMIT_CHARS:
-            self._text = text[-TRANSCRIPT_LIMIT_CHARS:]
-        else:
-            self._text = (self._text + text)[-TRANSCRIPT_LIMIT_CHARS:]
-        self._last_flush = time.monotonic()
-        # Do not suppress errors here. A broken Pyto view update must reach the worker's
-        # error path instead of silently leaving the chat frozen or stale.
-        if self._display_override is None:
-            self._view.text = self._text
-
-    def isatty(self) -> bool:
-        return False
-
-
-# --------------------------------------------------------------------------------------
-# Session helpers shared by the front ends
-# --------------------------------------------------------------------------------------
 
 
 def open_session(config: Any, *, resume: Optional[str] = None, label: str = "chat") -> SessionLog:

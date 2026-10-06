@@ -8,7 +8,7 @@ Work in this repository and read `AUDIT-2026-10-05.md` plus applicable repositor
 
 **Prerequisites:** 02 working-chat-gui. Verify prerequisite behavior exists before depending on it; if absent, identify the unmet prerequisite instead of inventing its API.
 
-**Starting points:** run.py: main, make_options_factory; harness/ui.py: TerminalApprover, run_ui; harness/loop.py: make_policy.
+**Starting points:** run.py: main, make_options_factory; harness/ui.py: TerminalApprover, UIApprover; harness/web.py: WebController, run_web; harness/loop.py: make_policy.
 
 **Implement:**
 
@@ -20,7 +20,7 @@ Approve and deny mocked share-sheet and URL operations entirely through the GUI 
 
 ## Implementation record — local v1.0.9 candidate (unpublished)
 
-`run.py --ui` now supplies a UI-specific prompter to the same policy used by terminal runs.
+`run.py --web` now supplies a UI-specific prompter to the same policy used by terminal runs.
 The chat displays the approval description and arguments alongside explicit Allow and Deny
 buttons. A FIFO ticket queue serializes simultaneous requests; each answer is accepted only
 for its request token. Stop and Close deny every unresolved request, and terminal approval

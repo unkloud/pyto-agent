@@ -16,7 +16,7 @@ file into a workspace on the device, runs it, and tells you what happened.
 * **Survives the app being killed.** Every turn is appended to a JSONL session log, so
   `--resume` picks up exactly where iOS interrupted you.
 
-**Latest published release: v1.0.19.** Adds safe Markdown formatting for assistant replies in the optional, token-protected browser interface. Raw HTML and images remain inert; only HTTP, HTTPS, and mailto links are active. See the [release notes](RELEASE-NOTES-v1.0.19.md) and [browser interface guide](docs/web-interface.md).
+**Latest published release: v1.0.20.** Keeps graphical chat in the optional browser interface and retires the separate native `--ui` chat window. PytoUI remains available to generated programs. See the [release notes](RELEASE-NOTES-v1.0.20.md) and [browser interface guide](docs/web-interface.md).
 
 ---
 
@@ -26,7 +26,7 @@ Choose one option. Each Python block is a complete script: copy the whole block 
 
 ### Option A — Install the latest release (recommended)
 
-This automatically finds the newest stable release on GitHub. It installs v1.0.19, which includes the optional `--web` interface.
+This automatically finds the newest stable release on GitHub. It installs v1.0.20, which includes the optional `--web` interface.
 
 ```python
 import json
@@ -52,7 +52,7 @@ sys.argv = ["install.py", "--ref", tag]
 runpy.run_path("install.py", run_name="__main__")
 ```
 
-### Option B — Install v1.0.19 exactly
+### Option B — Install v1.0.20 exactly
 
 Use this if you want this specific release, even after a newer one is available.
 
@@ -61,7 +61,7 @@ import runpy
 import sys
 import urllib.request
 
-tag = "v1.0.19"
+tag = "v1.0.20"
 installer_url = "https://raw.githubusercontent.com/unkloud/pyto-agent/" + tag + "/install.py"
 with urllib.request.urlopen(installer_url, timeout=120) as response:
     with open("install.py", "wb") as installer:
@@ -71,12 +71,12 @@ sys.argv = ["install.py", "--ref", tag]
 runpy.run_path("install.py", run_name="__main__")
 ```
 
-### Option C — Install v1.0.19 from Files or AirDrop
+### Option C — Install v1.0.20 from Files or AirDrop
 
 Use this if you downloaded the files in Safari or received them from someone else. Download the installer and source ZIP to Files, then run the script below. Pyto will ask you to choose the installer first and the ZIP file second. You do not need to rename either file or type a path.
 
-- [Download the v1.0.19 installer](https://raw.githubusercontent.com/unkloud/pyto-agent/v1.0.19/install.py)
-- [Download the v1.0.19 source ZIP](https://github.com/unkloud/pyto-agent/archive/refs/tags/v1.0.19.zip)
+- [Download the v1.0.20 installer](https://raw.githubusercontent.com/unkloud/pyto-agent/v1.0.20/install.py)
+- [Download the v1.0.20 source ZIP](https://github.com/unkloud/pyto-agent/archive/refs/tags/v1.0.20.zip)
 - [Download the v1.0.17 device diagnostic](https://github.com/unkloud/pyto-agent/releases/download/v1.0.17/device_release_diagnostic_v1.0.17.py) (this does not test the web interface)
 
 ```python
@@ -88,7 +88,7 @@ installer_path = fs.import_file()
 archive_path = fs.import_file()
 sys.argv = [
     installer_path,
-    "--ref", "v1.0.19",
+    "--ref", "v1.0.20",
     "--zip", archive_path,
 ]
 runpy.run_path(installer_path, run_name="__main__")
@@ -247,7 +247,6 @@ runpy.run_path("run.py", run_name="__main__")
 ```bash
 python run.py "rename my screenshots by date"     # one task, then exit
 python run.py                                     # interactive terminal chat
-python run.py --ui                                # Pyto chat window
 python run.py --web                               # browser interface on this device
 python run.py --resume <session.jsonl> "and July too?"
 python run.py --dry-run "..."                     # print the request, contact nothing
@@ -423,22 +422,9 @@ the saved `.py` source before approving use of a tool you do not recognize.
 
 ---
 
-## 4. The Pyto UI
+## 4. Browser interface
 
-```bash
-python run.py --ui
-```
-
-Opens a small window: a scrollable transcript, a text field, a Send button. If `pyto_ui`
-is not importable, `--ui` prints why and exits with code 3 — you get the terminal chat
-instead.
-
-The one design rule that matters: **the model call never runs on the UI thread.** The
-button handler starts a `threading.Thread`, and Pyto's documented high-level PytoUI views
-can be updated from that worker while `ui.show_view` keeps the script alive. A Pyto button
-handler that calls an API endpoint freezes the app until the response lands.
-
-### Browser interface
+The harness provides graphical chat in Safari while the Python process runs in Pyto. Terminal chat remains available when you run without `--web`.
 
 ```bash
 python run.py --web
@@ -705,7 +691,7 @@ harness/
   home.py              the one resolver for ~/pyto_harness (never a literal '~')
   budget.py            the size limits that keep iOS from killing the process
   textbudget.py        head/tail truncation with spill-to-file
-  ui.py                Pyto UI window, terminal REPL, terminal approval prompt
+  ui.py                shared browser/terminal rendering, approvals, history, and terminal REPL
   programs.py          versioned, workspace-local saved-program metadata and actions
   doctor.py            self-diagnosis: 22 structured checks + the fixes a machine can apply
   repair.py            self-repair: path-jailed, snapshot-first, test-gated source edits

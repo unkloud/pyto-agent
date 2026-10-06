@@ -72,7 +72,7 @@ Entry points implemented and tested:
 - `pyto://python/<path to run.py>?task=<url-encoded task>` — how a Shortcut (or any app) starts it.
 - `PYTO_HARNESS_TASK="…"` in the environment — same thing without a URL.
 - Shortcuts → **Run Script**, input on `sys.stdin`, **Show Console off**, output read back from **stdout** by **Get Script Output**.
-- `--ui` for the `pyto_ui` chat window (falls back with a clear message when `pyto_ui` is absent).
+- `--web` for the same-device browser chat; without it, an interactive terminal uses the terminal REPL.
 
 Rules that follow from the platform:
 

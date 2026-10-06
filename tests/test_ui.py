@@ -1,10 +1,9 @@
-"""User-facing output tests for the shared terminal and GUI printer."""
+"""User-facing output tests for the shared browser and terminal renderer."""
 
 from __future__ import annotations
 
 import io
 import os
-import tempfile
 import threading
 import time
 import unittest
@@ -12,27 +11,12 @@ from types import SimpleNamespace
 from unittest import mock
 
 from harness import program_inputs, programs
-from harness.loop import ApprovalRequest, Event, make_policy
-from harness.ui import Printer, Transcript, UIApprover, _UIStream, collect_program_inputs_ui, format_history_page, handle_program_command, run_turn_sync, run_ui, terminal_repl
+from harness.loop import ApprovalRequest, Event
+from harness.ui import Printer, UIApprover, format_history_page, handle_program_command, run_turn_sync, terminal_repl
 from harness.tools_ios import Workspace, build_registry, default_context
 
 from .mock_provider import MockProvider, text_response, tool_response
 from .support import TempDirTestCase, make_client, make_options
-
-
-class TestTranscript(unittest.TestCase):
-    def test_completed_streamed_message_is_committed_once(self) -> None:
-        transcript = Transcript()
-        transcript.append_delta("hello ")
-        transcript.append_delta("world")
-        transcript.complete_message("hello world")
-        self.assertEqual(transcript.render(), "hello world")
-
-    def test_final_message_replaces_a_partial_mismatch(self) -> None:
-        transcript = Transcript()
-        transcript.append_delta("half answer")
-        transcript.complete_message("corrected answer")
-        self.assertEqual(transcript.render(), "corrected answer")
 
 
 class TestPrinter(unittest.TestCase):
@@ -183,13 +167,11 @@ class TestPrinter(unittest.TestCase):
         printer.handle(Event("message.completed", {"content": "Ready."}))
         printer.handle(Event("finished", {"message": "Ready."}))
         self.assertEqual(stream.getvalue(), "Ready.\n")
-        self.assertEqual(printer.transcript.render(), "Ready.")
 
     def test_non_stream_delta_free_message_is_visible(self) -> None:
         printer, stream = self.make_printer()
         printer.handle(Event("message.completed", {"content": "non-streamed answer"}))
         self.assertEqual(stream.getvalue(), "non-streamed answer\n")
-        self.assertEqual(printer.transcript.render(), "non-streamed answer")
 
 
 class TestPrinterWithProvider(TempDirTestCase):
@@ -254,78 +236,6 @@ class TestPrinterWithProvider(TempDirTestCase):
         self.assertEqual(len(tool_messages), 1)
         self.assertIn("No files matching", tool_messages[0]["content"])
         self.assertNotIn("No files matching", printer_stream.getvalue())
-
-
-class TestUIStream(unittest.TestCase):
-    class TextView:
-        def __init__(self) -> None:
-            self._text = ""
-            self.assignment_count = 0
-
-        @property
-        def text(self) -> str:
-            return self._text
-
-        @text.setter
-        def text(self, value: str) -> None:
-            self.assignment_count += 1
-            self._text = value
-
-    def test_display_history_is_bounded(self) -> None:
-        view = self.TextView()
-        output = _UIStream(view)
-        output.write("a" * 210_000)
-        self.assertLessEqual(len(view.text), 80_000)
-        self.assertTrue(view.text.endswith("a" * 100))
-
-    def test_small_writes_are_coalesced_until_interval_or_forced_flush(self) -> None:
-        view = self.TextView()
-        with mock.patch("harness.ui.time.monotonic", return_value=100.0):
-            output = _UIStream(view)
-            for piece in ("token ",) * 100:
-                output.write(piece)
-                output.flush()
-            self.assertEqual(view.assignment_count, 0)
-            output.flush(force=True)
-        self.assertEqual(view.assignment_count, 1)
-        self.assertEqual(view.text, "token " * 100)
-
-    def test_history_display_does_not_replace_the_chat_buffer(self) -> None:
-        view = self.TextView()
-        output = _UIStream(view)
-        output.write("chat transcript")
-        output.flush(force=True)
-        output.replace_display("older history page")
-        self.assertEqual(view.text, "older history page")
-        output.restore_display()
-        self.assertEqual(view.text, "chat transcript")
-
-    def test_close_prevents_all_later_view_writes(self) -> None:
-        view = self.TextView()
-        output = _UIStream(view)
-        output.write("before")
-        output.flush(force=True)
-        output.close()
-        assignments = view.assignment_count
-        output.write("after")
-        output.flush()
-        self.assertEqual(view.assignment_count, assignments)
-        self.assertEqual(view.text, "before")
-
-    def test_view_assignment_errors_are_not_suppressed(self) -> None:
-        class BrokenView:
-            @property
-            def text(self):
-                return ""
-
-            @text.setter
-            def text(self, _value):
-                raise RuntimeError("view update failed")
-
-        output = _UIStream(BrokenView())
-        output.write("chat text")
-        with self.assertRaisesRegex(RuntimeError, "view update failed"):
-            output.flush(force=True)
 
 
 class TestHistoryPage(unittest.TestCase):
@@ -410,361 +320,8 @@ class TestUIApprover(unittest.TestCase):
         raise AssertionError("condition did not become true before timeout")
 
 
-class TestPytoChatLifecycle(unittest.TestCase):
-    """Use only PytoUI members documented by Pyto; omit invented dispatch APIs."""
-
-    class View:
-        def __init__(self) -> None:
-            self.title = ""
-            self.background_color = None
-            self.width = 390
-            self.height = 844
-            self.frame = None
-            self.subviews = []
-            self.closed = False
-
-        def add_subview(self, view) -> None:
-            self.subviews.append(view)
-
-        def close(self) -> None:
-            self.closed = True
-
-    class TextView(TestUIStream.TextView):
-        def __init__(self) -> None:
-            super().__init__()
-            self.editable = True
-            self.font = None
-            self.background_color = None
-            self.text_color = None
-            self.frame = None
-
-    class TextField:
-        def __init__(self) -> None:
-            self.placeholder = ""
-            self.background_color = None
-            self.text_color = None
-            self.frame = None
-            self.action = None
-            self.text = ""
-            self.enabled = True
-
-    class Button:
-        def __init__(self) -> None:
-            self.title = ""
-            self.background_color = None
-            self.text_color = None
-            self.frame = None
-            self.action = None
-            self.enabled = True
-
-    class Client:
-        def __init__(self) -> None:
-            self.reset_count = 0
-            self.cancel_count = 0
-            self.cancelled = threading.Event()
-
-        def reset_cancel(self) -> None:
-            self.reset_count += 1
-            self.cancelled.clear()
-
-        def cancel(self) -> None:
-            self.cancel_count += 1
-            self.cancelled.set()
-
-    class Session:
-        path = "session.jsonl"
-
-        def __init__(self) -> None:
-            self.closed = False
-            self.events = []
-            self.messages = []
-
-        def project(self):
-            return list(self.messages)
-
-        def append(self, event: str) -> None:
-            if self.closed:
-                raise AssertionError("worker wrote to a closed session")
-            self.events.append(event)
-
-        def close(self) -> None:
-            self.closed = True
-
-    class StrictPytoUI:
-        COLOR_SYSTEM_BACKGROUND = object()
-        COLOR_SECONDARY_SYSTEM_BACKGROUND = object()
-        COLOR_TERTIARY_SYSTEM_BACKGROUND = object()
-        COLOR_LABEL = object()
-        COLOR_SYSTEM_BLUE = object()
-        COLOR_WHITE = object()
-        FLEXIBLE_LEFT_MARGIN = 1
-        FLEXIBLE_WIDTH = 2
-        FLEXIBLE_RIGHT_MARGIN = 4
-        FLEXIBLE_TOP_MARGIN = 8
-        FLEXIBLE_HEIGHT = 16
-        FLEXIBLE_BOTTOM_MARGIN = 32
-
-        def __init__(self, show_view) -> None:
-            self.View = TestPytoChatLifecycle.View
-            self.TextView = TestPytoChatLifecycle.TextView
-            self.TextField = TestPytoChatLifecycle.TextField
-            self.Button = TestPytoChatLifecycle.Button
-            self.Font = lambda name, size: (name, size)
-            self.presented = []
-            self._show_view = show_view
-
-        def show_view(self, view) -> None:
-            self.presented.append(view)
-            self._show_view(view)
-
-    @staticmethod
-    def wait_for(condition, message: str) -> None:
-        deadline = time.monotonic() + 2
-        while time.monotonic() < deadline:
-            if condition():
-                return
-            time.sleep(0.005)
-        raise AssertionError(message)
-
-    def test_callbacks_are_ready_before_presentation_and_close_drains_two_turns(self) -> None:
-        client = self.Client()
-        session = self.Session()
-        second_started = threading.Event()
-        third_started = threading.Event()
-        prompts = []
-
-        def run_turn(options, prompt, printer):
-            prompts.append(prompt)
-            if prompt in ("second request", "third request"):
-                (second_started if prompt == "second request" else third_started).set()
-                self.assertTrue(client.cancelled.wait(2), "Stop or dismissal should cancel the active request")
-                session.append(prompt + " finished")
-                # A stopped turn may produce a final event. The stream stays live for a
-                # Stop action and is closed before cancellation on window dismissal.
-                printer.write("late completion")
-            else:
-                session.append("first turn finished")
-            return {"finished": True}
-
-        def show_view(view):
-            self.assertTrue(view.subviews)
-            buttons = {item.title: item for item in view.subviews if isinstance(item, self.Button)}
-            entry = next(item for item in view.subviews if isinstance(item, self.TextField))
-            transcript = next(item for item in view.subviews if isinstance(item, self.TextView))
-            send = buttons["Send"]
-            stop = buttons["Stop"]
-            close = buttons["Close"]
-            self.assertTrue(callable(send.action))
-            self.assertTrue(callable(entry.action))
-            self.assertTrue(callable(stop.action))
-            self.assertTrue(callable(close.action))
-
-            entry.text = "first request"
-            send.action(send)
-            self.wait_for(lambda: len(prompts) == 1 and send.enabled, "first turn did not complete")
-
-            entry.text = "second request"
-            entry.action(entry)
-            self.assertTrue(second_started.wait(2), "second turn did not start")
-            self.assertTrue(stop.enabled)
-
-            stop.action(stop)
-            self.wait_for(lambda: len(prompts) == 2 and send.enabled, "Stop did not finish the second turn")
-            self.assertEqual(stop.title, "Stop")
-
-            entry.text = "third request"
-            send.action(send)
-            self.assertTrue(third_started.wait(2), "third turn did not start")
-            close.action(close)  # same supported close method used by a PytoUI view
-            self.assertTrue(view.closed)
-            self.dismissed_assignments = transcript.assignment_count
-
-        ui = self.StrictPytoUI(show_view)
-        # These names caused the original defect and are intentionally absent from the
-        # strict contract fake: pyto_ui.View.present and pyto_ui.main_thread.
-        self.assertFalse(hasattr(ui, "main_thread"))
-        self.assertFalse(hasattr(self.View(), "present"))
-
-        def run_and_close():
-            try:
-                run_ui(
-                    options_factory=lambda _session: SimpleNamespace(client=client, stop=threading.Event()),
-                    session=session,
-                )
-            finally:
-                session.close()
-
-        with mock.patch("harness.ui.pyto_ui_module", return_value=ui):
-            with mock.patch("harness.ui.run_turn_sync", side_effect=run_turn):
-                run_and_close()
-
-        self.assertEqual(len(ui.presented), 1)
-        self.assertEqual(prompts, ["first request", "second request", "third request"])
-        self.assertEqual(client.reset_count, 3)
-        self.assertEqual(client.cancel_count, 2)
-        self.assertEqual(
-            session.events,
-            ["first turn finished", "second request finished", "third request finished"],
-        )
-        self.assertTrue(session.closed)
-        self.assertEqual(ui.presented[0].subviews[0].assignment_count, self.dismissed_assignments)
-
-    def test_history_button_pages_the_session_and_returns_to_chat(self) -> None:
-        session = self.Session()
-        session.messages = [{"role": "user", "content": "saved turn {}".format(index)} for index in range(13)]
-        client = self.Client()
-
-        def show_view(view):
-            buttons = {item.title: item for item in view.subviews if isinstance(item, self.Button)}
-            transcript = next(item for item in view.subviews if isinstance(item, self.TextView))
-            history = buttons["History"]
-            history.action(history)
-            self.assertIn("Session history", transcript.text)
-            self.assertIn("saved turn 1", transcript.text)
-            self.assertNotIn("saved turn 0", transcript.text)
-            buttons = {item.title: item for item in view.subviews if isinstance(item, self.Button)}
-            older = buttons["Older"]
-            older.action(older)
-            self.assertIn("saved turn 0", transcript.text)
-            chat = next(item for item in view.subviews if isinstance(item, self.Button) and item.title == "Chat")
-            chat.action(chat)
-            self.assertIn("saved turn 1", transcript.text)
-            self.assertNotIn("saved turn 0", transcript.text)
-            self.assertEqual(transcript.flex, [self.StrictPytoUI.FLEXIBLE_WIDTH, self.StrictPytoUI.FLEXIBLE_HEIGHT])
-            view.close()
-
-        ui = self.StrictPytoUI(show_view)
-        with mock.patch("harness.ui.pyto_ui_module", return_value=ui):
-            run_ui(
-                options_factory=lambda _session: SimpleNamespace(client=client, stop=threading.Event()),
-                session=session,
-            )
-
-    def test_approvals_are_answered_in_chat_and_actions_run_only_once_when_allowed(self) -> None:
-        client = self.Client()
-        session = self.Session()
-        approver = UIApprover()
-        executed = []
-        requests = (
-            ApprovalRequest("share_text", {"text": "weekly summary"}, "shares data", "/workspace"),
-            ApprovalRequest("open_url", {"url": "https://example.test"}, "opens a link", "/workspace"),
-        )
-        policy = make_policy(prompter=approver, workspace="/workspace")
-
-        def run_turn(_options, _prompt, _printer):
-            for request in requests:
-                if policy(request.tool, request.arguments).allowed:
-                    executed.append(request.tool)
-            return {"finished": True}
-
-        def show_view(view):
-            buttons = {item.title: item for item in view.subviews if isinstance(item, self.Button)}
-            transcript = next(item for item in view.subviews if isinstance(item, self.TextView))
-            entry = next(item for item in view.subviews if isinstance(item, self.TextField))
-            allow = buttons["Allow"]
-            deny = buttons["Deny"]
-            send = buttons["Send"]
-            entry.text = "share a summary and open a link"
-            send.action(send)
-
-            self.wait_for(
-                lambda: "share_text(text='weekly summary')" in transcript.text and allow.enabled,
-                "share approval was not shown in the chat",
-            )
-            old_allow = allow.action
-            old_allow(allow)
-            old_allow(allow)  # repeated callback retains the first request token
-
-            self.wait_for(
-                lambda: "open_url(url='https://example.test')" in transcript.text and deny.enabled,
-                "queued URL approval was not shown after the first response",
-            )
-            old_allow(allow)  # a stale approval cannot answer the current request
-            self.assertTrue(deny.enabled)
-            deny.action(deny)
-            deny.action(deny)
-            self.wait_for(lambda: send.enabled, "turn did not finish after the denial")
-
-        ui = self.StrictPytoUI(show_view)
-        with mock.patch("harness.ui.pyto_ui_module", return_value=ui):
-            with mock.patch("harness.ui.run_turn_sync", side_effect=run_turn):
-                run_ui(
-                    options_factory=lambda _session: SimpleNamespace(client=client, stop=threading.Event()),
-                    session=session,
-                    approver=approver,
-                )
-
-        self.assertEqual(executed, ["share_text"])
-        self.assertIn("Approval allowed.", ui.presented[0].subviews[0].text)
-        self.assertIn("Approval denied.", ui.presented[0].subviews[0].text)
-
-    def test_stop_denies_the_visible_approval(self) -> None:
-        client = self.Client()
-        session = self.Session()
-        approver = UIApprover()
-        executed = []
-        policy = make_policy(prompter=approver)
-
-        def run_turn(_options, _prompt, _printer):
-            if policy("share_text", {"text": "private"}).allowed:
-                executed.append("share_text")
-            return {"finished": True}
-
-        def show_view(view):
-            buttons = {item.title: item for item in view.subviews if isinstance(item, self.Button)}
-            entry = next(item for item in view.subviews if isinstance(item, self.TextField))
-            entry.text = "share something"
-            buttons["Send"].action(buttons["Send"])
-            self.wait_for(lambda: buttons["Allow"].enabled, "approval did not appear")
-            buttons["Stop"].action(buttons["Stop"])
-            self.wait_for(lambda: buttons["Send"].enabled, "stopped turn did not finish")
-
-        ui = self.StrictPytoUI(show_view)
-        with mock.patch("harness.ui.pyto_ui_module", return_value=ui):
-            with mock.patch("harness.ui.run_turn_sync", side_effect=run_turn):
-                run_ui(
-                    options_factory=lambda _session: SimpleNamespace(client=client, stop=threading.Event()),
-                    session=session,
-                    approver=approver,
-                )
-        self.assertEqual(executed, [])
-        self.assertEqual(client.cancel_count, 1)
-
-    def test_closing_with_an_approval_pending_denies_it_and_drains_worker(self) -> None:
-        client = self.Client()
-        session = self.Session()
-        approver = UIApprover()
-        executed = []
-        policy = make_policy(prompter=approver)
-
-        def run_turn(_options, _prompt, _printer):
-            if policy("open_url", {"url": "https://example.test"}).allowed:
-                executed.append("open_url")
-            return {"finished": True}
-
-        def show_view(view):
-            buttons = {item.title: item for item in view.subviews if isinstance(item, self.Button)}
-            entry = next(item for item in view.subviews if isinstance(item, self.TextField))
-            entry.text = "open a link"
-            buttons["Send"].action(buttons["Send"])
-            self.wait_for(lambda: buttons["Allow"].enabled, "approval did not appear")
-            buttons["Close"].action(buttons["Close"])
-            self.assertTrue(view.closed)
-
-        ui = self.StrictPytoUI(show_view)
-        with mock.patch("harness.ui.pyto_ui_module", return_value=ui):
-            with mock.patch("harness.ui.run_turn_sync", side_effect=run_turn):
-                run_ui(
-                    options_factory=lambda _session: SimpleNamespace(client=client, stop=threading.Event()),
-                    session=session,
-                    approver=approver,
-                )
-        self.assertEqual(executed, [])
-        self.assertEqual(client.cancel_count, 1)
-
-
 class TestProgramChatCommands(TempDirTestCase):
-    """Saved-program Run/Edit controls use the same registry in chat and terminal."""
+    """Terminal saved-program commands use the shared registry and runner."""
 
     def setUp(self) -> None:
         super().setUp()
@@ -792,8 +349,8 @@ class TestProgramChatCommands(TempDirTestCase):
         return factory
 
     def test_terminal_run_command_executes_without_model_turn(self) -> None:
-        client = TestPytoChatLifecycle.Client()
-        session = TestPytoChatLifecycle.Session()
+        client = SimpleNamespace()
+        session = SimpleNamespace(path="session.jsonl")
         output = io.StringIO()
         printer = Printer(stream=output)
         answers = iter(("/run {}".format(self.record["id"]), "/quit"))
@@ -808,35 +365,9 @@ class TestProgramChatCommands(TempDirTestCase):
         self.assertIn("saved program ran without a model", output.getvalue())
         self.assertEqual(programs.find_program(self.workspace, self.record["id"])["last_verification_result"]["status"], "passed")
 
-    def test_gui_programs_button_lists_and_run_command_does_not_call_model(self) -> None:
-        client = TestPytoChatLifecycle.Client()
-        session = TestPytoChatLifecycle.Session()
-        dismissed = {}
-
-        def show_view(view):
-            buttons = {item.title: item for item in view.subviews if isinstance(item, TestPytoChatLifecycle.Button)}
-            transcript = next(item for item in view.subviews if isinstance(item, TestPytoChatLifecycle.TextView))
-            entry = next(item for item in view.subviews if isinstance(item, TestPytoChatLifecycle.TextField))
-            buttons["Programs"].action(buttons["Programs"])
-            self.assertIn(self.record["id"], transcript.text)
-            entry.text = "/run {}".format(self.record["id"])
-            buttons["Send"].action(buttons["Send"])
-            TestPytoChatLifecycle.wait_for(
-                lambda: buttons["Send"].enabled and "saved program ran without a model" in transcript.text,
-                "the saved Run action did not finish in chat",
-            )
-            buttons["Close"].action(buttons["Close"])
-            dismissed["closed"] = view.closed
-
-        ui = TestPytoChatLifecycle.StrictPytoUI(show_view)
-        with mock.patch("harness.ui.pyto_ui_module", return_value=ui):
-            with mock.patch("harness.ui.run_turn_sync", side_effect=AssertionError("model turn was used")):
-                run_ui(options_factory=self.make_options_factory(client), session=session)
-        self.assertTrue(dismissed["closed"])
-
     def test_edit_command_passes_the_selected_record_into_the_model_turn(self) -> None:
-        client = TestPytoChatLifecycle.Client()
-        session = TestPytoChatLifecycle.Session()
+        client = SimpleNamespace()
+        session = SimpleNamespace(path="session.jsonl")
         options = self.make_options_factory(client)(session)
         captured = []
         with mock.patch("harness.ui.run_turn_sync", side_effect=lambda _options, prompt, _printer: captured.append(prompt) or {}):
@@ -863,8 +394,8 @@ class TestProgramChatCommands(TempDirTestCase):
             program_id=self.record["id"],
             input_schema=[{"name": "folder", "label": "Folder", "type": "folder"}],
         )
-        client = TestPytoChatLifecycle.Client()
-        session = TestPytoChatLifecycle.Session()
+        client = SimpleNamespace()
+        session = SimpleNamespace(path="session.jsonl")
         output = io.StringIO()
 
         def cancel(_record):
@@ -880,131 +411,3 @@ class TestProgramChatCommands(TempDirTestCase):
             )
         self.assertTrue(handled)
         self.assertIn("Input cancelled. The program was not run.", output.getvalue())
-
-
-class TestProgramInputForm(unittest.TestCase):
-    class Element:
-        def __init__(self) -> None:
-            self.subviews = []
-            self.frame = None
-
-        def add_subview(self, child) -> None:
-            self.subviews.append(child)
-
-    class View(Element):
-        def __init__(self) -> None:
-            super().__init__()
-            self.width = 390
-            self.height = 844
-            self.closed = False
-
-        def close(self) -> None:
-            self.closed = True
-
-    class ScrollView(Element):
-        def __init__(self) -> None:
-            super().__init__()
-            self.content_view = TestProgramInputForm.Element()
-
-    class Label(Element):
-        def __init__(self, text="") -> None:
-            super().__init__()
-            self.text = text
-            self.number_of_lines = 1
-            self.text_color = None
-
-    class TextField(Element):
-        def __init__(self, text="", placeholder="") -> None:
-            super().__init__()
-            self.text = text
-            self.placeholder = placeholder
-            self.keyboard_type = None
-
-    class Button(Element):
-        def __init__(self, title="") -> None:
-            super().__init__()
-            self.title = title
-            self.action = None
-            self.enabled = True
-
-    class UI:
-        COLOR_SYSTEM_BACKGROUND = object()
-        COLOR_SYSTEM_RED = object()
-        COLOR_LABEL = object()
-        KeyboardType = SimpleNamespace(DECIMAL_PAD="decimal-pad")
-
-        def __init__(self, on_show) -> None:
-            self.View = TestProgramInputForm.View
-            self.ScrollView = TestProgramInputForm.ScrollView
-            self.Label = TestProgramInputForm.Label
-            self.TextField = TestProgramInputForm.TextField
-            self.Button = TestProgramInputForm.Button
-            self._on_show = on_show
-
-        def show_view(self, view) -> None:
-            self._on_show(view)
-
-    @staticmethod
-    def _walk(view):
-        pending = [view]
-        while pending:
-            item = pending.pop()
-            yield item
-            pending.extend(getattr(item, "subviews", []))
-            content = getattr(item, "content_view", None)
-            if content is not None:
-                pending.append(content)
-
-    def test_form_validates_then_returns_typed_values_from_controls_and_picker(self) -> None:
-        with tempfile.TemporaryDirectory() as folder:
-            captured = {}
-
-            def show(view):
-                captured["view"] = view
-                fields = [item for item in self._walk(view) if isinstance(item, self.TextField)]
-                self.assertEqual(len(fields), 1)
-                fields[0].text = "not a number"
-                buttons = [item for item in self._walk(view) if isinstance(item, self.Button)]
-                next(item for item in buttons if item.title == "Pick folder").action(None)
-                run = next(item for item in buttons if item.title == "Run")
-                run.action(None)
-                self.assertFalse(view.closed, "invalid values should leave the form open")
-                self.assertTrue(any("must be a number" in item.text for item in self._walk(view) if isinstance(item, self.Label)))
-                fields[0].text = "4"
-                next(item for item in buttons if item.title.startswith("Group by:")).action(None)
-                run.action(None)
-
-            ui = self.UI(show)
-            values = collect_program_inputs_ui(
-                ui,
-                {
-                    "title": "Organizer",
-                    "input_schema": [
-                        {"name": "max_files", "label": "Maximum files", "type": "number", "integer": True, "minimum": 1},
-                        {"name": "group_by", "label": "Group by", "type": "choice", "choices": ["extension", "first letter"]},
-                        {"name": "folder", "label": "Folder", "type": "folder"},
-                    ],
-                },
-                file_system=SimpleNamespace(pick_directory=lambda: folder),
-            )
-            self.assertEqual(values["max_files"], 4)
-            self.assertEqual(values["group_by"], "first letter")
-            self.assertEqual(values["folder"], os.path.realpath(folder))
-            self.assertTrue(captured["view"].closed)
-
-    def test_cancel_form_reports_cancellation_without_values(self) -> None:
-        from harness.ui import collect_program_inputs_ui
-
-        def show(view):
-            cancel = next(
-                item for item in self._walk(view)
-                if isinstance(item, self.Button) and item.title == "Cancel"
-            )
-            cancel.action(None)
-
-        ui = self.UI(show)
-        with self.assertRaises(program_inputs.InputsCancelled):
-            collect_program_inputs_ui(
-                ui,
-                {"title": "Organizer", "input_schema": [{"name": "name", "label": "Name", "type": "text"}]},
-            )

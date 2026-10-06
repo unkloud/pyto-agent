@@ -292,6 +292,11 @@ class TestMain(unittest.TestCase):
             install.main(["--help"])
         self.assertEqual(caught.exception.code, 0)
 
+    def test_installer_rejects_the_removed_ui_flag(self):
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as caught:
+            install.build_parser().parse_args(["--ui"])
+        self.assertEqual(caught.exception.code, 2)
+
 
 class TestDefaults(unittest.TestCase):
     def test_points_at_the_real_repository(self):
@@ -303,6 +308,8 @@ class TestDefaults(unittest.TestCase):
     def test_next_steps_mention_the_state_directory(self):
         text = install.next_steps("pyto-agent")
         self.assertIn("~/pyto_harness", text)
+        self.assertIn("['run.py', '--web']", text)
+        self.assertNotIn("--ui", text)
         self.assertIn("never touched by an update", text)
 
     def test_start_line_names_the_absolute_directory_and_one_command(self):
@@ -745,8 +752,8 @@ class TestSetup(SetupTestCase):
     def test_chat_launches_the_installed_run_py(self):
         self._launch_case(("--chat",), [])
 
-    def test_ui_launches_the_installed_run_py_with_ui(self):
-        self._launch_case(("--ui",), ["--ui"])
+    def test_web_launches_the_installed_run_py_with_web(self):
+        self._launch_case(("--web",), ["--web"])
 
     def test_task_launches_the_installed_run_py_with_the_task(self):
         self._launch_case(("--task", "rename my screenshots"), ["rename my screenshots"])

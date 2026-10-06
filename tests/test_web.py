@@ -345,10 +345,11 @@ class TestWebFrontEnd(TempDirTestCase):
         with self.assertRaises((OSError, urllib.error.URLError)):
             urllib.request.urlopen(url, timeout=1)
 
-    def test_cli_exposes_web_and_keeps_ui_exclusive(self) -> None:
+    def test_cli_exposes_web_and_rejects_the_removed_ui_flag(self) -> None:
         self.assertTrue(runner.build_parser().parse_args(["--web"]).web)
-        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
-            runner.build_parser().parse_args(["--web", "--ui"])
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as raised:
+            runner.build_parser().parse_args(["--ui"])
+        self.assertEqual(raised.exception.code, 2)
 
     def test_background_task_lifecycle_runs_and_stops_on_a_helper_thread(self) -> None:
         created = []

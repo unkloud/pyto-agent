@@ -3,7 +3,6 @@
 
     python run.py "rename my screenshots by date"      one task, then exit
     python run.py                                       interactive terminal chat
-    python run.py --ui                                  Pyto chat window
     python run.py --web                                 browser interface on this device
     python run.py --resume <session.jsonl> "and again"  continue a previous chat
     python run.py --dry-run "..."                       print the request, send nothing
@@ -49,7 +48,7 @@ from harness.config import (  # noqa: E402
     redact_key,
     write_sample_config,
 )
-from harness.errors import HarnessError, UnsupportedCapability  # noqa: E402
+from harness.errors import HarnessError  # noqa: E402
 from harness.loop import (  # noqa: E402
     LoopOptions,
     build_system_prompt,
@@ -427,7 +426,6 @@ def build_parser() -> argparse.ArgumentParser:
             "  python run.py --resume ~/pyto_harness/sessions/latest.jsonl \"do the same for July\"\n"
             "  python run.py --doctor --fix\n"
             "  python run.py --repair \"the api_base keeps 404ing\"\n"
-            "  python run.py --ui\n"
             "  python run.py --web\n"
             "  python run.py --programs\n"
             "  python run.py --run-saved <program-id>\n"
@@ -453,9 +451,7 @@ def build_parser() -> argparse.ArgumentParser:
         "narrower than --yolo",
     )
     parser.add_argument("--dry-run", action="store_true", help="print the request that would be sent, contact nothing")
-    frontend = parser.add_mutually_exclusive_group()
-    frontend.add_argument("--ui", action="store_true", help="open the Pyto chat window instead of the terminal")
-    frontend.add_argument(
+    parser.add_argument(
         "--web",
         action="store_true",
         help="open a token-protected browser interface served from this device",
@@ -640,18 +636,23 @@ def print_request_preview(config: Config, system_prompt: str, task: str) -> int:
     return 0
 
 
-def make_options_factory(config: Config, *, prompter: Any, verbose: bool, ui: bool = False) -> Any:
+def make_options_factory(
+    config: Config,
+    *,
+    prompter: Any,
+    verbose: bool,
+    interactive_frontend: bool = False,
+) -> Any:
     """Build the callable that turns a session into loop options.
 
-    ``ui=True`` marks a Pyto-window session as interactive even when stdin is not a TTY:
-    the user is in the app and can see the transcript, which is what ``run_program``'s AUTO
-    status is for.  A headless/Shortcut run has neither a TTY nor a window, so there it is
-    denied unless ``--allow-unattended-programs`` (or ``--yolo``) was asked for.
+    ``interactive_frontend=True`` marks a browser session as interactive even when stdin is
+    not a TTY. A headless/Shortcut run has no attached user, so program execution is denied
+    unless ``--allow-unattended-programs`` (or ``--yolo``) was requested.
     """
     workspace = ensure_workspace(config)
     context = default_context(workspace, config.spill_dir, config=config)
     registry = build_registry(context)
-    interactive = bool(ui) or prompter_is_interactive(prompter)
+    interactive = bool(interactive_frontend) or prompter_is_interactive(prompter)
     registry.policy = make_policy(
         yolo=config.yolo,
         prompter=prompter,
@@ -825,9 +826,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         print("could not open the session: {}".format(exc), file=sys.stderr)
         return 2
 
-    interactive_frontend = bool(args.ui or args.web)
+    interactive_frontend = bool(args.web)
     prompter = None if config.yolo else (UIApprover() if interactive_frontend else TerminalApprover())
-    factory = make_options_factory(config, prompter=prompter, verbose=args.verbose, ui=interactive_frontend)
+    factory = make_options_factory(
+        config, prompter=prompter, verbose=args.verbose, interactive_frontend=interactive_frontend
+    )
 
     approvals_line = (
         "bypassed (--yolo)"
@@ -846,22 +849,6 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
 
     try:
-        if args.ui:
-            from harness.ui import run_ui
-
-            try:
-                run_ui(
-                    options_factory=factory,
-                    session=session,
-                    verbose=args.verbose,
-                    approver=prompter if isinstance(prompter, UIApprover) else None,
-                )
-            except UnsupportedCapability as exc:
-                print("--ui is not available: {}".format(exc.message), file=sys.stderr)
-                print(banner)
-                return 3
-            return 0
-
         if args.web:
             from harness.web import WebController, run_web
 
@@ -898,8 +885,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         print("{}: {}".format(exc.code, exc.message), file=sys.stderr)
         return 1
     finally:
-        # In --ui mode run_ui returns only after dismissal and after its active turn
-        # worker has drained, so these resources stay valid for every callback.
+        # The interactive front end returns after its active work has drained, so the
+        # session and client stay valid for every browser callback.
         session.close()
         factory.client.close()  # type: ignore[attr-defined]
 
