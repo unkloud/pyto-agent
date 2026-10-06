@@ -359,6 +359,8 @@ def _tool_definition(workspace: Any, manifest: Mapping[str, Any], run_program: C
         parameters=dict(manifest["parameters"]),
         handler=run_custom,
         timeout=None,
+        resource_writes=("workspace", "pyto_process"),
+        manages_execution_lane=True,
     )
 
 

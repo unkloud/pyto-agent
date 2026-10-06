@@ -263,6 +263,54 @@ class TestConcurrency(TempDirTestCase):
         self.assertGreaterEqual(peak["value"], 2, "sync handlers must run off the event loop")
         self.assertLess(elapsed, 4 * 0.3 * 0.8, "4 x 0.3s of work must not take 1.2s")
 
+    def test_resource_reads_can_overlap(self) -> None:
+        registry = ToolRegistry()
+        rendezvous = threading.Barrier(2)
+
+        for name in ("read_a", "read_b"):
+            @registry.tool(
+                name,
+                "Read one workspace resource.",
+                {"type": "object", "properties": {}},
+                resource_reads=("workspace",),
+            )
+            def read() -> str:
+                rendezvous.wait(timeout=1.0)
+                return "read"
+
+        results = run(
+            registry.invoke_batch([("a", "read_a", {}), ("b", "read_b", {})], max_parallel=2)
+        )
+        self.assertEqual(len(results), 2)
+        self.assertTrue(all(not result.is_error for _, result in results))
+
+    def test_resource_write_precedes_a_later_read(self) -> None:
+        registry = ToolRegistry()
+        state = {"ready": False}
+
+        @registry.tool(
+            "write",
+            "Prepare a workspace resource.",
+            {"type": "object", "properties": {}},
+            resource_writes=("workspace",),
+        )
+        def write() -> str:
+            time.sleep(0.05)
+            state["ready"] = True
+            return "written"
+
+        @registry.tool(
+            "read",
+            "Read the workspace resource.",
+            {"type": "object", "properties": {}},
+            resource_reads=("workspace",),
+        )
+        def read() -> str:
+            return "ready" if state["ready"] else "not ready"
+
+        results = run(registry.invoke_batch([("w", "write", {}), ("r", "read", {})], max_parallel=2))
+        self.assertEqual([result.content for _, result in results], ["written", "ready"])
+
     def test_batch_preserves_model_order(self) -> None:
         registry = ToolRegistry()
 

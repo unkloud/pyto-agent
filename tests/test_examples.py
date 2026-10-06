@@ -1,7 +1,8 @@
-"""Tests for the example programs, and for running an example through `run_program`.
+"""Tests for batch examples and the explicitly interactive PytoUI scaffold.
 
-The examples are what the agent is supposed to produce, so they are held to the same bar
-as the harness: stdlib only, no network, no destructive default.
+Batch examples use only the standard library and default to non-destructive behavior. The
+interactive scaffold may use PytoUI and standard-library networking after the user taps its
+Refresh button; it does not contact the network during import or startup.
 """
 
 from __future__ import annotations
@@ -10,7 +11,9 @@ import os
 import runpy
 import subprocess
 import sys
+import types
 import unittest
+from unittest import mock
 
 from .support import ROOT, TempDirTestCase
 
@@ -94,6 +97,93 @@ class TestRenameByDate(TempDirTestCase):
 
     def test_missing_folder_is_reported(self) -> None:
         self.assertEqual(self.module["main"](["--folder", self.path("nope")]), 2)
+
+
+class TestFolderOrganizer(TempDirTestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.module = load_example("folder_organizer_logic.py")
+        self.folder = self.path("選んだ folder")
+        os.makedirs(self.folder, exist_ok=True)
+
+    def write(self, name: str, contents: str = "data") -> str:
+        path = os.path.join(self.folder, name)
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(contents)
+        return path
+
+    def test_plan_is_read_only_and_groups_unicode_names(self) -> None:
+        source = self.write("Résumé 1.PDF", "résumé")
+        plan = self.module["build_plan"](
+            self.folder, group_by="extension", collection_name="My files"
+        )
+        self.assertEqual(len(plan["moves"]), 1)
+        self.assertEqual(plan["moves"][0]["source"], "Résumé 1.PDF")
+        self.assertEqual(plan["moves"][0]["destination"], os.path.join("My files", "pdf", "Résumé 1.PDF"))
+        self.assertTrue(os.path.exists(source))
+        self.assertFalse(os.path.exists(os.path.join(self.folder, "My files")))
+
+    def test_apply_requires_confirmation_and_moves_reviewed_files(self) -> None:
+        source = self.write("scan 1.pdf", "pdf bytes")
+        self.write("notes.txt", "text bytes")
+        plan = self.module["build_plan"](self.folder)
+        with self.assertRaisesRegex(self.module["OrganizerError"], "Explicit confirmation"):
+            self.module["apply_plan"](plan)
+        self.assertTrue(os.path.exists(source))
+        applied = self.module["apply_plan"](plan, confirmed=True)
+        self.assertEqual(applied["moved"], 2)
+        self.assertTrue(os.path.isfile(os.path.join(self.folder, "Organized", "pdf", "scan 1.pdf")))
+        self.assertTrue(os.path.isfile(os.path.join(self.folder, "Organized", "txt", "notes.txt")))
+        self.assertFalse(os.path.exists(source))
+        with self.assertRaisesRegex(self.module["OrganizerError"], "Explicit confirmation"):
+            self.module["undo_plan"](applied)
+        undone = self.module["undo_plan"](applied, confirmed=True)
+        self.assertEqual(undone["restored"], 2)
+        self.assertTrue(os.path.isfile(source))
+        self.assertTrue(os.path.isfile(os.path.join(self.folder, "notes.txt")))
+        self.assertFalse(os.path.exists(os.path.join(self.folder, "Organized")))
+        with open(source, encoding="utf-8") as handle:
+            self.assertEqual(handle.read(), "pdf bytes")
+
+    def test_undo_detects_any_occupied_original_before_moving_files(self) -> None:
+        source = self.write("report.pdf", "report")
+        other = self.write("notes.txt", "notes")
+        plan = self.module["build_plan"](self.folder)
+        applied = self.module["apply_plan"](plan, confirmed=True)
+        with open(other, "w", encoding="utf-8") as handle:
+            handle.write("keep the newer note")
+
+        with self.assertRaisesRegex(self.module["OrganizerError"], "original path is occupied"):
+            self.module["undo_plan"](applied, confirmed=True)
+        self.assertFalse(os.path.exists(source))
+        self.assertTrue(os.path.isfile(os.path.join(self.folder, "Organized", "pdf", "report.pdf")))
+        with open(other, encoding="utf-8") as handle:
+            self.assertEqual(handle.read(), "keep the newer note")
+
+    def test_stale_collision_refuses_the_whole_plan_without_overwriting(self) -> None:
+        source = self.write("report.pdf", "source")
+        plan = self.module["build_plan"](self.folder)
+        destination = os.path.join(self.folder, "Organized", "pdf", "report.pdf")
+        os.makedirs(os.path.dirname(destination), exist_ok=True)
+        with open(destination, "w", encoding="utf-8") as handle:
+            handle.write("keep this")
+        with self.assertRaisesRegex(self.module["OrganizerError"], "destination already exists"):
+            self.module["apply_plan"](plan, confirmed=True)
+        self.assertTrue(os.path.exists(source))
+        with open(destination, encoding="utf-8") as handle:
+            self.assertEqual(handle.read(), "keep this")
+
+    def test_first_letter_group_and_file_limit_are_clear(self) -> None:
+        self.write("zeta.txt")
+        self.write("alpha.txt")
+        self.write("東京.txt")
+        plan = self.module["build_plan"](self.folder, group_by="first letter", max_files=2)
+        self.assertEqual(len(plan["moves"]), 2)
+        self.assertEqual(plan["unplanned_count"], 1)
+        self.assertEqual(
+            [os.path.basename(os.path.dirname(item["destination"])) for item in plan["moves"]],
+            ["A", "Z"],
+        )
 
 
 class TestNoteDigest(TempDirTestCase):
@@ -254,11 +344,16 @@ class TestExamplesAreStdlibOnly(unittest.TestCase):
 
         allowed = {
             "__future__", "argparse", "datetime", "fnmatch", "json", "os", "re", "runpy", "sys", "typing",
-            "textwrap", "collections", "pathlib", "shutil", "hashlib", "math", "csv", "io", "time",
+            "textwrap", "collections", "pathlib", "shutil", "hashlib", "math", "csv", "io", "time", "errno",
+            "threading", "urllib", "interactive_logic", "folder_organizer_logic",
         }
-        # Pyto bridges the examples may use, always inside a `try: import` guard so the
-        # program still runs off-device.
-        optional_on_device = {"pasteboard", "share", "pyto", "notifications", "speech", "photos"}
+        # Pyto bridges and Objective-C framework modules are imported only when their
+        # device-specific functions run, so loading the examples remains safe off-device.
+        optional_on_device = {
+            "pasteboard", "share", "pyto", "notifications", "speech", "photos", "Foundation", "UIKit"
+        }
+        interactive_only = {"pyto_ui"}
+        interactive_examples = {"interactive_app_scaffold.py", "folder_organizer_app.py"}
         for name in sorted(os.listdir(EXAMPLES)):
             if not name.endswith(".py"):
                 continue
@@ -271,10 +366,18 @@ class TestExamplesAreStdlibOnly(unittest.TestCase):
                         top = alias.name.split(".")[0]
                         if top in optional_on_device:
                             continue
+                        if top in interactive_only:
+                            self.assertIn(name, interactive_examples, "{} imports {}".format(name, alias.name))
+                            continue
                         self.assertIn(top, allowed, "{} imports {}".format(name, alias.name))
                 elif isinstance(node, ast.ImportFrom) and node.module:
                     if node.level:
                         continue  # relative import inside a package: not used here
+                    if node.module.split(".")[0] in optional_on_device:
+                        continue
+                    if node.module.split(".")[0] in interactive_only:
+                        self.assertIn(name, interactive_examples, "{} imports {}".format(name, node.module))
+                        continue
                     self.assertIn(
                         node.module.split(".")[0], allowed, "{} imports {}".format(name, node.module)
                     )
@@ -289,6 +392,39 @@ class TestExamplesAreStdlibOnly(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("usage:", result.stdout)
+
+
+class TestObjectiveCFrameworkRecipes(unittest.TestCase):
+    def setUp(self) -> None:
+        self.module = load_example("objc_framework_recipes.py")
+
+    def test_foundation_recipe_reads_the_main_bundle_path(self) -> None:
+        foundation = types.ModuleType("Foundation")
+        foundation.NSBundle = types.SimpleNamespace(
+            mainBundle=types.SimpleNamespace(
+                bundleURL=types.SimpleNamespace(path="/Pyto/Pyto.app")
+            )
+        )
+        with mock.patch.dict(sys.modules, {"Foundation": foundation}):
+            self.assertEqual(self.module["app_bundle_path"](), "/Pyto/Pyto.app")
+
+    def test_uikit_recipe_reads_documented_device_properties(self) -> None:
+        device = types.SimpleNamespace(model="iPhone", systemName="iOS", systemVersion="18.0")
+        uikit = types.ModuleType("UIKit")
+        uikit.UIDevice = types.SimpleNamespace(currentDevice=lambda: device)
+        with mock.patch.dict(sys.modules, {"UIKit": uikit}):
+            self.assertEqual(
+                self.module["device_summary"](),
+                {"model": "iPhone", "system": "iOS", "version": "18.0"},
+            )
+
+    def test_desktop_run_reports_missing_framework_instead_of_claiming_success(self) -> None:
+        output = []
+        with mock.patch.dict(sys.modules, {"Foundation": None, "UIKit": None}):
+            with mock.patch("builtins.print", side_effect=output.append):
+                self.module["main"]()
+        self.assertIn("Objective-C recipe unavailable", output[0])
+        self.assertIn("does not establish", output[0])
 
 
 if __name__ == "__main__":

@@ -206,6 +206,47 @@ class TestNotificationsAndSpeech(TempDirTestCase):
         self.assertTrue(result.ok)
         self.assertEqual(module.calls[0][0], ("hello",))
 
+    def test_speak_uses_documented_avfoundation_bridge_when_pyto_wrapper_is_missing(self) -> None:
+        calls = []
+
+        class Utterance:
+            @classmethod
+            def speechUtteranceWithString_(cls, text):
+                calls.append(("create", text))
+                return cls()
+
+            def setRate_(self, rate):
+                calls.append(("rate", rate))
+
+            def setVoice_(self, voice):
+                calls.append(("voice", voice))
+
+        class Synthesizer:
+            @classmethod
+            def new(cls):
+                return cls()
+
+            def speakUtterance_(self, utterance):
+                calls.append(("speak", utterance))
+
+        class Voice:
+            @staticmethod
+            def voiceWithLanguage_(language):
+                calls.append(("language", language))
+                return "voice:{}".format(language)
+
+        framework = types.ModuleType("AVFoundation")
+        framework.AVSpeechSynthesizer = Synthesizer
+        framework.AVSpeechUtterance = Utterance
+        framework.AVSpeechSynthesisVoice = Voice
+        with mock.patch.dict(sys.modules, {"speech": None, "AVFoundation": framework}):
+            result = ios.speak("hello", language="en-AU", rate=0.4)
+
+        self.assertTrue(result.ok)
+        self.assertTrue(result.supported)
+        self.assertEqual(result.method, "AVSpeechSynthesizer")
+        self.assertEqual([item[0] for item in calls], ["create", "rate", "language", "voice", "speak"])
+
 
 class TestPhotos(TempDirTestCase):
     def test_missing_file(self) -> None:

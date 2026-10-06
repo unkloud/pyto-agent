@@ -5,10 +5,12 @@ from __future__ import annotations
 import json
 import os
 import stat
+import sys
+import threading
 import time
 import unittest
 
-from harness import budget, ios
+from harness import budget, ios, programs
 from harness.errors import ToolError
 from harness.tools_ios import Workspace, _load_memory, default_context
 
@@ -108,6 +110,89 @@ class TestWriteProgram(TempDirTestCase):
         self.call("write_program", path="tools/x.py", source="print(1)")
         self.assertTrue(os.path.exists(os.path.join(self.workspace_dir, "tools", "x.py")))
 
+    def test_register_and_list_saved_program_tools(self) -> None:
+        self.call("write_program", path="tools/daily.py", source="print('daily')", purpose="Daily job")
+        registered = self.call(
+            "register_program",
+            title="Daily job",
+            purpose="Print the daily status.",
+            entry_file="tools/daily.py",
+            mode="batch",
+            required_capabilities=["files"],
+        )
+        self.assertFalse(registered.is_error, registered.content)
+        self.assertIn("/run {}".format(registered.metadata["program_id"]), registered.content)
+        listed = self.call("list_saved_programs")
+        self.assertFalse(listed.is_error, listed.content)
+        self.assertEqual(listed.metadata["count"], 1)
+        self.assertIn("Daily job", listed.content)
+
+    def test_project_brief_tools_read_and_update_only_the_selected_program(self) -> None:
+        self.call("write_program", path="daily.py", source="print('daily')")
+        registered = self.call(
+            "register_program",
+            title="Daily job",
+            purpose="Print the daily status.",
+            entry_file="daily.py",
+            mode="batch",
+        )
+        program_id = registered.metadata["program_id"]
+
+        updated = self.call(
+            "project_brief_update",
+            program_id=program_id,
+            requirements=["Keep the report on this device."],
+            decisions=["Use a weekly heading."],
+            related_files=["daily.py"],
+            unresolved=["Choose the export format."],
+        )
+        self.assertFalse(updated.is_error, updated.content)
+        loaded = self.call("project_brief_read", program_id=program_id)
+        self.assertFalse(loaded.is_error, loaded.content)
+        detail = json.loads(loaded.content)
+        self.assertEqual(detail["project_brief"]["requirements"], ["Keep the report on this device."])
+        self.assertEqual(detail["files"], [{"path": "daily.py", "status": "present"}])
+
+        self.call(
+            "project_brief_update",
+            program_id=program_id,
+            unresolved=[],
+        )
+        again = json.loads(self.call("project_brief_read", program_id=program_id).content)
+        self.assertEqual(again["project_brief"]["requirements"], detail["project_brief"]["requirements"])
+        self.assertEqual(again["project_brief"]["unresolved"], [])
+
+    def test_project_brief_tool_rejects_paths_outside_workspace(self) -> None:
+        self.call("write_program", path="daily.py", source="print('daily')")
+        registered = self.call(
+            "register_program",
+            title="Daily job",
+            purpose="Print the daily status.",
+            entry_file="daily.py",
+            mode="batch",
+        )
+        with self.assertRaisesRegex(ToolError, "stay inside the workspace"):
+            self.call("project_brief_update", program_id=registered.metadata["program_id"], related_files=["../secrets.txt"])
+
+    def test_saved_program_index_cannot_be_overwritten_by_file_tools(self) -> None:
+        with self.assertRaises(ToolError):
+            self.call("write_file", path="pyto-programs.json", content="{}")
+
+    def test_rewriting_a_registered_program_clears_its_previous_verification(self) -> None:
+        self.call("write_program", path="daily.py", source="print('first')")
+        registered = self.call(
+            "register_program",
+            title="Daily",
+            purpose="Print a daily message.",
+            entry_file="daily.py",
+            mode="batch",
+        )
+        context = self.registry.context
+        programs.update_verification(context.workspace, registered.metadata["program_id"], status="passed", summary="It ran.")
+        rewritten = self.call("write_program", path="daily.py", source="print('second')")
+        self.assertIn("previous verification was cleared", rewritten.content)
+        stored = programs.find_program(context.workspace, registered.metadata["program_id"])
+        self.assertEqual(stored["last_verification_result"]["status"], "not_run")
 
 class TestRunProgram(TempDirTestCase):
     def setUp(self) -> None:
@@ -131,6 +216,24 @@ class TestRunProgram(TempDirTestCase):
         )
         result = self.call(path_or_source="argv.py", args=["one", "two"])
         self.assertIn("ARGS ['one', 'two']", result.content)
+
+    def test_registered_input_program_uses_validated_main_contract(self) -> None:
+        self.registry._tools["write_program"].handler(
+            path="input_program.py",
+            source="def main(inputs):\n    print(type(inputs['count']).__name__, inputs['count'])\n",
+        )
+        self.registry._tools["register_program"].handler(
+            title="Input program",
+            purpose="Print a typed value.",
+            entry_file="input_program.py",
+            mode="batch",
+            input_schema=[{"name": "count", "label": "Count", "type": "number", "integer": True}],
+        )
+        result = self.call(path_or_source="input_program.py", input_values={"count": "12"})
+        self.assertFalse(result.is_error, result.content)
+        self.assertIn("int 12", result.content)
+        with self.assertRaisesRegex(ToolError, "whole number"):
+            self.call(path_or_source="input_program.py", input_values={"count": "12.5"})
 
     def test_nonzero_exit_is_an_error_result(self) -> None:
         result = self.call(path_or_source="import sys\nsys.exit(3)\n")
@@ -184,6 +287,103 @@ class TestRunProgram(TempDirTestCase):
         self.assertIn("captured", result.content)
         self.assertEqual(result.metadata["returncode"], 2)
         self.assertEqual(result.metadata["mode"], "runpy")
+
+    def test_in_process_runs_do_not_overlap_or_mix_output(self) -> None:
+        ios._REAL_SUBPROCESS = False
+        start = threading.Barrier(3)
+        results = {}
+
+        def invoke(label: str) -> None:
+            start.wait()
+            results[label] = self.call(
+                path_or_source=(
+                    "import time\nprint('{0}-start')\ntime.sleep(0.1)\nprint('{0}-end')\n".format(label)
+                ),
+                timeout_s=1.0,
+            )
+
+        workers = [threading.Thread(target=invoke, args=(label,)) for label in ("first", "second")]
+        for worker in workers:
+            worker.start()
+        start.wait()
+        for worker in workers:
+            worker.join(timeout=5.0)
+
+        self.assertTrue(all(not worker.is_alive() for worker in workers))
+        self.assertEqual(len(results), 2)
+        completed = [label for label, result in results.items() if not result.is_error]
+        rejected = [label for label, result in results.items() if result.metadata.get("execution_lane_busy")]
+        self.assertEqual(len(completed), 1)
+        self.assertEqual(len(rejected), 1)
+        output = results[completed[0]].content
+        self.assertIn(completed[0] + "-start", output)
+        self.assertIn(completed[0] + "-end", output)
+        self.assertNotIn(rejected[0] + "-start", output)
+
+    def test_in_process_survivor_holds_the_lane_until_it_exits(self) -> None:
+        ios._REAL_SUBPROCESS = False
+        first = self.call(
+            path_or_source="import time\ntime.sleep(4)\nprint('late completion')\n",
+            timeout_s=0.5,
+        )
+        self.assertTrue(first.is_error)
+        self.assertTrue(first.metadata["execution_lane_busy"])
+        self.assertFalse(first.metadata["timeout_enforced"])
+        self.assertIn("may still change workspace files or process state", first.content)
+
+        rejected = self.call(path_or_source="print('must not launch')\n", timeout_s=1.0)
+        self.assertTrue(rejected.is_error)
+        self.assertTrue(rejected.metadata["execution_lane_busy"])
+        self.assertNotIn("must not launch", rejected.content)
+
+        deadline = time.monotonic() + 6.0
+        while True:
+            recovered = self.call(path_or_source="print('lane recovered')\n", timeout_s=1.0)
+            if not recovered.metadata.get("execution_lane_busy"):
+                break
+            if time.monotonic() >= deadline:
+                self.fail("the execution lane was not released after the worker exited")
+            time.sleep(0.05)
+        self.assertFalse(recovered.is_error)
+        self.assertIn("lane recovered", recovered.content)
+
+    def test_in_process_waits_for_program_threads_and_restores_state_after_error(self) -> None:
+        ios._REAL_SUBPROCESS = False
+        original_argv = sys.argv
+        original_stdout = sys.stdout
+        original_stderr = sys.stderr
+        original_cwd = os.getcwd()
+        marker = "HARNESS_TEST_ENV_VALUE"
+        old_marker = os.environ.get(marker)
+
+        def restore_marker() -> None:
+            if old_marker is None:
+                os.environ.pop(marker, None)
+            else:
+                os.environ[marker] = old_marker
+
+        self.addCleanup(restore_marker)
+        os.environ[marker] = "before"
+        result = self.call(
+            path_or_source=(
+                "import os, sys, threading, time\n"
+                "os.environ['HARNESS_TEST_ENV_VALUE'] = 'changed'\n"
+                "sys.argv = ['changed']\n"
+                "os.chdir('/')\n"
+                "threading.Thread(target=lambda: time.sleep(0.05), name='demo-child', daemon=True).start()\n"
+                "raise RuntimeError('expected failure')\n"
+            ),
+            timeout_s=1.0,
+        )
+
+        self.assertTrue(result.is_error)
+        self.assertIn("expected failure", result.content)
+        self.assertIn("waited for them to exit", result.content)
+        self.assertIs(sys.argv, original_argv)
+        self.assertIs(sys.stdout, original_stdout)
+        self.assertIs(sys.stderr, original_stderr)
+        self.assertEqual(os.getcwd(), original_cwd)
+        self.assertEqual(os.environ.get(marker), "before")
 
     def test_program_runs_with_the_workspace_as_cwd(self) -> None:
         self.call(path_or_source="import os\nprint('CWD', os.path.basename(os.getcwd()))\n")
