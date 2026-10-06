@@ -40,14 +40,29 @@ request = urllib.request.Request(
     headers={"User-Agent": "pyto-harness"}
 )
 with urllib.request.urlopen(request, timeout=60) as response:
-    tag = json.load(response)["tag_name"]
+    release = json.load(response)
+tag = release["tag_name"]
 
 installer_url = "https://raw.githubusercontent.com/" + repo + "/" + tag + "/install.py"
 with urllib.request.urlopen(installer_url, timeout=120) as response:
     with open("install.py", "wb") as installer:
         installer.write(response.read())
 
-sys.argv = ["install.py", "--ref", tag]
+bundle_name = "pyto-agent-" + tag + "-diagnostic-bundle.zip"
+bundle = next((item for item in release.get("assets", []) if item.get("name") == bundle_name), None)
+if bundle:
+    bundle_path = "pyto-agent-release.zip"
+    request = urllib.request.Request(bundle["browser_download_url"], headers={"User-Agent": "pyto-harness"})
+    with urllib.request.urlopen(request, timeout=180) as response:
+        with open(bundle_path, "wb") as archive:
+            archive.write(response.read())
+    sys.argv = ["install.py", "--ref", tag, "--zip", bundle_path]
+    digest = bundle.get("digest", "")
+    if digest.startswith("sha256:"):
+        sys.argv.extend(["--sha256", digest.split(":", 1)[1]])
+    print("Installing the diagnostic-inclusive release bundle.")
+else:
+    sys.argv = ["install.py", "--ref", tag]
 runpy.run_path("install.py", run_name="__main__")
 ```
 
@@ -66,16 +81,27 @@ with urllib.request.urlopen(installer_url, timeout=120) as response:
     with open("install.py", "wb") as installer:
         installer.write(response.read())
 
-sys.argv = ["install.py", "--ref", tag]
+bundle_url = "https://github.com/unkloud/pyto-agent/releases/download/v1.0.11/pyto-agent-v1.0.11-diagnostic-bundle.zip"
+with urllib.request.urlopen(bundle_url, timeout=180) as response:
+    with open("pyto-agent-v1.0.11-diagnostic-bundle.zip", "wb") as archive:
+        archive.write(response.read())
+
+sys.argv = [
+    "install.py",
+    "--ref", tag,
+    "--zip", "pyto-agent-v1.0.11-diagnostic-bundle.zip",
+    "--sha256", "4c886c281533628b5ad93d0069221c95a67dfe921ae81330ff352ee7880d8ee2",
+]
 runpy.run_path("install.py", run_name="__main__")
 ```
 
 ### Option C — Install v1.0.11 from Files or AirDrop
 
-Use this if you downloaded the files in Safari or received them from someone else. Download both files to Files, then run the script below. Pyto will ask you to choose the installer first and the ZIP file second. You do not need to rename either file or type a path.
+Use this if you downloaded the files in Safari or received them from someone else. The bundle includes `device_release_diagnostic.py` beside `run.py` and `harness/`. Download both files to Files, then run the script below. Pyto will ask you to choose the installer first and the ZIP file second. You do not need to rename either file or type a path.
 
 - [Download the v1.0.11 installer](https://raw.githubusercontent.com/unkloud/pyto-agent/v1.0.11/install.py)
-- [Download the v1.0.11 source ZIP](https://github.com/unkloud/pyto-agent/archive/refs/tags/v1.0.11.zip)
+- [Download the v1.0.11 diagnostic-inclusive bundle](https://github.com/unkloud/pyto-agent/releases/download/v1.0.11/pyto-agent-v1.0.11-diagnostic-bundle.zip)
+- [Download only the diagnostic script](https://github.com/unkloud/pyto-agent/releases/download/v1.0.11/device_release_diagnostic_v1.0.11.py)
 
 ```python
 import file_system as fs
@@ -84,7 +110,12 @@ import sys
 
 installer_path = fs.import_file()
 archive_path = fs.import_file()
-sys.argv = [installer_path, "--zip", archive_path]
+sys.argv = [
+    installer_path,
+    "--ref", "v1.0.11",
+    "--zip", archive_path,
+    "--sha256", "4c886c281533628b5ad93d0069221c95a67dfe921ae81330ff352ee7880d8ee2",
+]
 runpy.run_path(installer_path, run_name="__main__")
 ```
 

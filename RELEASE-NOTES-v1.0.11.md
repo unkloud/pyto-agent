@@ -46,6 +46,9 @@ file and follows normal legacy state-directory migration behavior. On iOS, the s
 documented `Foundation` and `UIKit` modules and reads `UIDevice` properties. The manual device
 checks start as **NOT RUN** and remain pending until performed on the phone.
 
+The README's stable-release install options now select this bundle when it is available. The
+Files/AirDrop option also links directly to it and verifies its SHA-256 before installation.
+
 ## Verification
 
 - `python3 -m unittest discover -s tests -t .`: **875 tests passed** in 91.136 seconds, including the four retained lifecycle regression tests. The
