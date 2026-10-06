@@ -16,7 +16,7 @@ file into a workspace on the device, runs it, and tells you what happened.
 * **Survives the app being killed.** Every turn is appended to a JSONL session log, so
   `--resume` picks up exactly where iOS interrupted you.
 
-**Latest published release: v1.0.12.** It includes the v1.0.11 harness changes and adds the Pyto device diagnostic script to the tagged source package. The underlying harness passed 875 desktop tests in v1.0.11; native Pyto/iOS acceptance remains pending. See the [release notes](RELEASE-NOTES-v1.0.12.md) and [device goal checklists](harness/projects/easy-device-programming/goals/).
+**Latest published release: v1.0.13.** It corrects the Pyto share-sheet adapter to use `file_system.share_text` / `file_system.share_files` and reports Objective-C probe stages independently. Native Pyto/iOS acceptance remains pending. See the [release notes](RELEASE-NOTES-v1.0.13.md) and [device goal checklists](harness/projects/easy-device-programming/goals/).
 
 ---
 
@@ -26,7 +26,7 @@ Choose one option. Each Python block is a complete script: copy the whole block 
 
 ### Option A — Install the latest release (recommended)
 
-This automatically finds the newest stable release on GitHub. It currently installs v1.0.12, whose source archive includes `device_release_diagnostic.py` beside `run.py` and `harness/`.
+This automatically finds the newest stable release on GitHub. It installs v1.0.13, whose source archive includes `device_release_diagnostic.py` beside `run.py` and `harness/`.
 
 ```python
 import json
@@ -52,7 +52,7 @@ sys.argv = ["install.py", "--ref", tag]
 runpy.run_path("install.py", run_name="__main__")
 ```
 
-### Option B — Install v1.0.12 exactly
+### Option B — Install v1.0.13 exactly
 
 Use this if you want this specific release, even after a newer one is available.
 
@@ -61,7 +61,7 @@ import runpy
 import sys
 import urllib.request
 
-tag = "v1.0.12"
+tag = "v1.0.13"
 installer_url = "https://raw.githubusercontent.com/unkloud/pyto-agent/" + tag + "/install.py"
 with urllib.request.urlopen(installer_url, timeout=120) as response:
     with open("install.py", "wb") as installer:
@@ -71,13 +71,13 @@ sys.argv = ["install.py", "--ref", tag]
 runpy.run_path("install.py", run_name="__main__")
 ```
 
-### Option C — Install v1.0.12 from Files or AirDrop
+### Option C — Install v1.0.13 from Files or AirDrop
 
 Use this if you downloaded the files in Safari or received them from someone else. The source ZIP includes `device_release_diagnostic.py` beside `run.py` and `harness/`. Download both files to Files, then run the script below. Pyto will ask you to choose the installer first and the ZIP file second. You do not need to rename either file or type a path.
 
-- [Download the v1.0.12 installer](https://raw.githubusercontent.com/unkloud/pyto-agent/v1.0.12/install.py)
-- [Download the v1.0.12 source ZIP](https://github.com/unkloud/pyto-agent/archive/refs/tags/v1.0.12.zip)
-- [Download only the diagnostic script](https://github.com/unkloud/pyto-agent/releases/download/v1.0.12/device_release_diagnostic_v1.0.12.py)
+- [Download the v1.0.13 installer](https://raw.githubusercontent.com/unkloud/pyto-agent/v1.0.13/install.py)
+- [Download the v1.0.13 source ZIP](https://github.com/unkloud/pyto-agent/archive/refs/tags/v1.0.13.zip)
+- [Download only the diagnostic script](https://github.com/unkloud/pyto-agent/releases/download/v1.0.13/device_release_diagnostic_v1.0.13.py)
 
 ```python
 import file_system as fs
@@ -88,7 +88,7 @@ installer_path = fs.import_file()
 archive_path = fs.import_file()
 sys.argv = [
     installer_path,
-    "--ref", "v1.0.12",
+    "--ref", "v1.0.13",
     "--zip", archive_path,
 ]
 runpy.run_path(installer_path, run_name="__main__")

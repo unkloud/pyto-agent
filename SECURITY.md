@@ -56,7 +56,7 @@ the whole URL and a `why:` line, before anything happens.
   4 000 characters, and for `run_program` the path and the SHA-256 of the bytes) but the
   decision is only as good as your attention.
 * **A denial is not a sandbox.** It stops the harness's *tool*, not the *capability*: a
-  program can call Pyto's own modules (`share.open`, `pasteboard.set_string`) directly.
+  program can call Pyto's own modules (`file_system.share_text`, `pasteboard.set_string`) directly.
   The only real fix for that is not running generated code in-process, which iOS does not
   allow.
 

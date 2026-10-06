@@ -43,7 +43,7 @@ PYTO_MODULES = (
     "pyto",
     "pyto_ui",
     "pasteboard",
-    "share",
+    "file_system",
     "notifications",
     "speech",
     "photos",
@@ -258,9 +258,10 @@ def _framework_class(framework: str, class_name: str) -> Any:
 
 def available_capabilities() -> Dict[str, bool]:
     """Probe table: which native hooks exist on this interpreter."""
+    file_system = _optional_module("file_system")
     return {
         "pasteboard": _optional_module("pasteboard") is not None,
-        "share": _optional_module("share") is not None,
+        "share": bool(file_system and callable(getattr(file_system, "share_text", None))),
         "notifications": _optional_module("notifications") is not None,
         "usernotification": _optional_module("usernotification") is not None,
         "speech": _optional_module("speech") is not None,
@@ -377,21 +378,17 @@ def clipboard_set(text: str) -> CapabilityResult:
 def share_text(text: str, *, title: str = "") -> CapabilityResult:
     """Open the iOS share sheet with ``text``.  Falls back to writing a file."""
     started = time.monotonic()
-    module = _optional_module("share")
-    opener = getattr(module, "open", None) if module is not None else None
-    if callable(opener):
+    module = _optional_module("file_system")
+    share_text_fn = getattr(module, "share_text", None) if module is not None else None
+    if callable(share_text_fn):
         try:
-            try:
-                opener(str(text))
-            except TypeError:
-                # Some builds take a list of items.
-                opener([str(text)])
+            share_text_fn(str(text))
             return record(
                 CapabilityResult(
                     action="share_text",
                     ok=True,
                     supported=True,
-                    method="share.open",
+                    method="file_system.share_text",
                     detail="share sheet opened for {} characters{}".format(
                         len(text), " ({})".format(title) if title else ""
                     ),
@@ -405,7 +402,7 @@ def share_text(text: str, *, title: str = "") -> CapabilityResult:
                     action="share_text",
                     ok=False,
                     supported=True,
-                    method="share.open",
+                    method="file_system.share_text",
                     detail="{}: {}".format(type(exc).__name__, exc),
                     elapsed_ms=(time.monotonic() - started) * 1000,
                 )
@@ -443,20 +440,17 @@ def share_file(path: str, *, text: str = "") -> CapabilityResult:
                 elapsed_ms=(time.monotonic() - started) * 1000,
             )
         )
-    module = _optional_module("share")
-    opener = getattr(module, "open", None) if module is not None else None
-    if callable(opener):
+    module = _optional_module("file_system")
+    share_files_fn = getattr(module, "share_files", None) if module is not None else None
+    if callable(share_files_fn):
         try:
-            try:
-                opener([os.path.abspath(path)])
-            except TypeError:
-                opener(os.path.abspath(path))
+            share_files_fn(os.path.abspath(path))
             return record(
                 CapabilityResult(
                     action="share_file",
                     ok=True,
                     supported=True,
-                    method="share.open",
+                    method="file_system.share_files",
                     detail="share sheet opened for {}".format(path),
                     data={"path": path},
                     elapsed_ms=(time.monotonic() - started) * 1000,
@@ -468,7 +462,7 @@ def share_file(path: str, *, text: str = "") -> CapabilityResult:
                     action="share_file",
                     ok=False,
                     supported=True,
-                    method="share.open",
+                    method="file_system.share_files",
                     detail="{}: {}".format(type(exc).__name__, exc),
                     elapsed_ms=(time.monotonic() - started) * 1000,
                 )

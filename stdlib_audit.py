@@ -37,7 +37,20 @@ RUNTIME_ENTRY = os.path.join(HERE, "run.py")
 LOCAL_MODULE_NAMES = frozenset({"harness", "run", "stdlib_audit"})
 
 #: Optional modules that only exist on iOS: importing them is allowed to fail.
-OPTIONAL_ON_DEVICE = ("pyto", "pyto_ui", "pasteboard", "share", "notifications", "speech", "photos", "calendar_events", "background", "xcallback", "usernotification")
+OPTIONAL_ON_DEVICE = (
+    "pyto",
+    "pyto_ui",
+    "pasteboard",
+    "file_system",
+    "share",
+    "notifications",
+    "speech",
+    "photos",
+    "calendar_events",
+    "background",
+    "xcallback",
+    "usernotification",
+)
 
 #: Attributes that exist only in a newer interpreter than the 3.10 target.
 BANNED_ATTRS = {

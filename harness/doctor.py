@@ -123,7 +123,7 @@ FIRST_RUN_SKIP = NETWORK_CHECK_IDS + ("selftest",)
 #: static import), because None of these exist on a desktop interpreter.
 IOS_PROBE_MODULES = (
     "pasteboard",
-    "share",
+    "file_system",
     "notifications",
     "photos",
     "speech",
@@ -144,7 +144,8 @@ IOS_PROBE_MODULES = (
 FRAGILE_SIGNATURES = (
     ("calendar_events", "save_event"),
     ("background", "BackgroundTask"),
-    ("share", "open"),
+    ("file_system", "share_text"),
+    ("file_system", "share_files"),
     ("xcallback", "open_url"),
 )
 
@@ -2568,8 +2569,8 @@ def check_ios_signatures(ctx: DoctorContext) -> CheckResult:
             "warn",
             "module present but attribute missing: {}".format(", ".join(drift)),
             human_action=(
-                "a Pyto app update may have renamed this API. The harness reports an 'unsupported' "
-                "result instead of guessing; check the Pyto release notes before relying on it."
+                "this Pyto build is missing a documented API. The harness reports an 'unsupported' "
+                "result instead of guessing; check the installed Pyto API before relying on it."
             ),
             evidence=evidence,
         )

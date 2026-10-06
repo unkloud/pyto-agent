@@ -90,13 +90,24 @@ class TestShare(TempDirTestCase):
         with open(path, encoding="utf-8") as handle:
             self.assertEqual(handle.read(), "some text to share")
 
-    def test_share_text_uses_the_bridge_when_present(self) -> None:
-        module = self.install_bridge("share")
-        module.open = module.record
+    def test_share_text_uses_pyto_file_system_api_when_present(self) -> None:
+        module = self.install_bridge("file_system")
+        module.share_text = module.record
         result = ios.share_text("hi")
         self.assertTrue(result.supported)
-        self.assertEqual(result.method, "share.open")
+        self.assertEqual(result.method, "file_system.share_text")
         self.assertEqual(module.calls[0][0], ("hi",))
+
+    def test_share_file_uses_pyto_file_system_api_when_present(self) -> None:
+        module = self.install_bridge("file_system")
+        module.share_files = module.record
+        target = self.path("thing.txt")
+        with open(target, "w", encoding="utf-8") as handle:
+            handle.write("x")
+        result = ios.share_file(target)
+        self.assertTrue(result.supported)
+        self.assertEqual(result.method, "file_system.share_files")
+        self.assertEqual(module.calls[0][0], (os.path.abspath(target),))
 
     def test_share_file_missing_path(self) -> None:
         result = ios.share_file(self.path("nope.txt"))

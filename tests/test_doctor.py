@@ -636,9 +636,9 @@ class TestIosChecks(DoctorTestCase):
         self.assertEqual(item.evidence["counts"]["probed"], len(doctor.IOS_PROBE_MODULES))
 
     def test_an_injected_bridge_module_shows_up(self) -> None:
-        self.install_bridge("share")
+        self.install_bridge("file_system")
         item = self.check("ios_modules")
-        self.assertIn("share", item.evidence["available"])
+        self.assertIn("file_system", item.evidence["available"])
 
     def test_signatures_are_discovered_without_calling_anything(self) -> None:
         module = self.install_bridge("calendar_events")
@@ -656,10 +656,10 @@ class TestIosChecks(DoctorTestCase):
         self.assertEqual(len(module.calls), calls_before)  # type: ignore[attr-defined]
 
     def test_a_missing_attribute_is_signature_drift(self) -> None:
-        self.install_bridge("share")  # no `open` attribute
+        self.install_bridge("file_system")  # no documented share functions
         item = self.check("ios_signatures")
         self.assertEqual(item.status, "warn")
-        self.assertIn("share.open", item.detail)
+        self.assertIn("file_system.share_text", item.detail)
 
     def test_capabilities_are_persisted_when_allowed(self) -> None:
         module = self.install_bridge("background")

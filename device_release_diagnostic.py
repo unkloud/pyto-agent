@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Create a private, shareable Pyto/iOS acceptance report for release v1.0.12.
+"""Create a private, shareable Pyto/iOS acceptance report for release v1.0.13.
 
 Save this file beside ``run.py`` in the installed pyto-agent folder, open it in Pyto,
 and press Run. It uses only the standard library and the harness already in that folder.
@@ -8,9 +8,10 @@ Automatic checks make no network requests and apply no doctor fixes. The built-i
 may make and remove a temporary workspace write-probe file and retains the app's normal
 legacy state-directory migration. It reads configuration metadata and scans a bounded
 number of recent session logs for integrity; log contents are not copied into the report.
-On iOS, the script imports Foundation and UIKit and reads only UIDevice model/system
-properties. It does not open permission prompts, read the clipboard/photos/calendar, or run
-saved programs. Manual acceptance checks are always written as NOT RUN until a person
+On iOS, the script imports Foundation and UIKit, then probes each read-only UIDevice property
+separately so an unsupported selector does not hide successful framework imports or other
+property reads. It does not open permission prompts, read the clipboard/photos/calendar, or
+run saved programs. Manual acceptance checks are always written as NOT RUN until a person
 records results.
 """
 
@@ -27,7 +28,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 
-RELEASE_VERSION = "1.0.12"
+RELEASE_VERSION = "1.0.13"
 
 MANUAL_CHECKS: Tuple[Tuple[str, str, str], ...] = (
     (
@@ -136,24 +137,56 @@ def _device_probe() -> Dict[str, str]:
         }
     try:
         from Foundation import NSBundle  # noqa: F401 - verifies the documented module/class import
-        from UIKit import UIDevice
-
-        device = UIDevice.currentDevice()
-        return {
-            "status": "PASS",
-            "detail": "Foundation.NSBundle and UIKit.UIDevice imported; UIDevice properties were read.",
-            "model": str(device.model),
-            "system": str(device.systemName),
-            "ios_version": str(device.systemVersion),
-        }
     except Exception as exc:  # A device report should survive an unavailable bridge.
         return {
             "status": "FAIL",
-            "detail": "Bridge probe failed with {}. The exception message is omitted to avoid recording local paths.".format(type(exc).__name__),
+            "detail": "Foundation.NSBundle import failed with {}.".format(type(exc).__name__),
             "model": "",
             "system": "",
             "ios_version": "",
         }
+    try:
+        from UIKit import UIDevice
+    except Exception as exc:
+        return {
+            "status": "FAIL",
+            "detail": "Foundation.NSBundle imported; UIKit.UIDevice import failed with {}.".format(type(exc).__name__),
+            "model": "",
+            "system": "",
+            "ios_version": "",
+        }
+
+    try:
+        device = UIDevice.currentDevice()
+    except Exception as exc:
+        return {
+            "status": "WARN",
+            "detail": "Foundation.NSBundle and UIKit.UIDevice imports passed; UIDevice.currentDevice failed with {}.".format(type(exc).__name__),
+            "model": "",
+            "system": "",
+            "ios_version": "",
+        }
+
+    values: Dict[str, str] = {"model": "", "system": "", "ios_version": ""}
+    successful = []
+    failures = []
+    for attribute, key in (("model", "model"), ("systemName", "system"), ("systemVersion", "ios_version")):
+        try:
+            values[key] = str(getattr(device, attribute))
+            successful.append(attribute)
+        except Exception as exc:
+            failures.append("{} ({})".format(attribute, type(exc).__name__))
+
+    if failures:
+        detail = "Framework imports and UIDevice.currentDevice passed; read {}. Failed: {}.".format(
+            ", ".join(successful) if successful else "no UIDevice properties",
+            ", ".join(failures),
+        )
+        status = "WARN"
+    else:
+        detail = "Foundation.NSBundle and UIKit.UIDevice imported; UIDevice.currentDevice and all three read-only properties passed."
+        status = "PASS"
+    return {"status": status, "detail": detail, **values}
 
 
 def _redact(text: str, ctx: Any) -> str:
@@ -279,7 +312,7 @@ def build_report(script_path: Path, explicit_root: Optional[str]) -> str:
         "### Objective-C bridge probe",
         "",
         "- **{}** — {}".format(device["status"], _safe_markdown(device["detail"])),
-        "- Probe scope: documented `Foundation.NSBundle` / `UIKit.UIDevice` import and read-only device properties. It does not test permissions, entitlements, or arbitrary selectors.",
+        "- Probe scope: documented `Foundation.NSBundle` / `UIKit.UIDevice` imports and isolated read-only device properties. It does not test permissions, entitlements, or arbitrary selectors.",
         "",
         "### Built-in offline doctor",
         "",
