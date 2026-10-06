@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Create a private, shareable Pyto/iOS acceptance report for release v1.0.13.
+"""Create a private, shareable Pyto/iOS acceptance report for release v1.0.14.
 
 Save this file beside ``run.py`` in the installed pyto-agent folder, open it in Pyto,
 and press Run. It uses only the standard library and the harness already in that folder.
@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 
-RELEASE_VERSION = "1.0.13"
+RELEASE_VERSION = "1.0.14"
 
 MANUAL_CHECKS: Tuple[Tuple[str, str, str], ...] = (
     (
@@ -157,11 +157,12 @@ def _device_probe() -> Dict[str, str]:
         }
 
     try:
-        device = UIDevice.currentDevice()
+        current_device = UIDevice.currentDevice
+        device = current_device() if callable(current_device) else current_device
     except Exception as exc:
         return {
             "status": "WARN",
-            "detail": "Foundation.NSBundle and UIKit.UIDevice imports passed; UIDevice.currentDevice failed with {}.".format(type(exc).__name__),
+            "detail": "Foundation.NSBundle and UIKit.UIDevice imports passed; UIDevice.currentDevice access failed with {}.".format(type(exc).__name__),
             "model": "",
             "system": "",
             "ios_version": "",
@@ -178,13 +179,13 @@ def _device_probe() -> Dict[str, str]:
             failures.append("{} ({})".format(attribute, type(exc).__name__))
 
     if failures:
-        detail = "Framework imports and UIDevice.currentDevice passed; read {}. Failed: {}.".format(
+        detail = "Framework imports and UIDevice.currentDevice access passed; read {}. Failed: {}.".format(
             ", ".join(successful) if successful else "no UIDevice properties",
             ", ".join(failures),
         )
         status = "WARN"
     else:
-        detail = "Foundation.NSBundle and UIKit.UIDevice imported; UIDevice.currentDevice and all three read-only properties passed."
+        detail = "Foundation.NSBundle and UIKit.UIDevice imported; UIDevice.currentDevice access and all three read-only properties passed."
         status = "PASS"
     return {"status": status, "detail": detail, **values}
 

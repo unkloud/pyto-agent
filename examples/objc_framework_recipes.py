@@ -17,7 +17,8 @@ def device_summary() -> dict:
     """Read model and iOS version through UIKit's UIDevice Objective-C class."""
     from UIKit import UIDevice
 
-    device = UIDevice.currentDevice()
+    current_device = UIDevice.currentDevice
+    device = current_device() if callable(current_device) else current_device
     return {
         "model": str(device.model),
         "system": str(device.systemName),

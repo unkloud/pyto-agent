@@ -411,6 +411,16 @@ class TestObjectiveCFrameworkRecipes(unittest.TestCase):
     def test_uikit_recipe_reads_documented_device_properties(self) -> None:
         device = types.SimpleNamespace(model="iPhone", systemName="iOS", systemVersion="18.0")
         uikit = types.ModuleType("UIKit")
+        uikit.UIDevice = types.SimpleNamespace(currentDevice=device)
+        with mock.patch.dict(sys.modules, {"UIKit": uikit}):
+            self.assertEqual(
+                self.module["device_summary"](),
+                {"model": "iPhone", "system": "iOS", "version": "18.0"},
+            )
+
+    def test_uikit_recipe_supports_a_callable_current_device(self) -> None:
+        device = types.SimpleNamespace(model="iPhone", systemName="iOS", systemVersion="18.0")
+        uikit = types.ModuleType("UIKit")
         uikit.UIDevice = types.SimpleNamespace(currentDevice=lambda: device)
         with mock.patch.dict(sys.modules, {"UIKit": uikit}):
             self.assertEqual(

@@ -86,9 +86,12 @@ Static preflight does not execute imports or prove that an Objective-C member ex
 
 [`objc_framework_recipes.py`](objc_framework_recipes.py) is a read-only bridge primer for two
 small probes: Foundation's `NSBundle.mainBundle.bundleURL.path`, which follows Pyto's documented
-example, and UIKit's `UIDevice.currentDevice()` model and OS-version properties. The sample keeps
-framework imports inside the functions so it can be imported by desktop tests; running it on
-desktop reports that those iOS modules are unavailable.
+example, and UIKit's `UIDevice.currentDevice` model and OS-version properties. Pyto exposes this
+zero-argument class method as an attribute; the sample also handles a bridge that exposes it as a
+callable. Pyto's own [Battery.py sample](https://gist.github.com/ColdGrub1384/90838e45712aaa8aeed830ab910f048b)
+accesses `UIDevice.currentDevice` the same way. The sample keeps framework imports inside the
+functions so it can be imported by desktop tests; running it on desktop reports that those iOS
+modules are unavailable.
 
 Pyto exposes listed framework modules through its Rubicon-ObjC bridge. Rubicon maps Objective-C
 selector colons to underscores in Python method names. Use a Pyto wrapper first when it covers the
