@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Create a private, shareable Pyto/iOS acceptance report for release v1.0.16.
+"""Create a private, shareable Pyto/iOS acceptance report for release v1.0.17.
 
 Save this file beside ``run.py`` in the installed pyto-agent folder, open it in Pyto,
 and press Run. It uses only the standard library and the harness already in that folder.
@@ -36,7 +36,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 
-RELEASE_VERSION = "1.0.16"
+RELEASE_VERSION = "1.0.17"
 
 # These are deliberately narrow, offline checks. They run in Pyto's Python process against
 # disposable test workspaces; they do not simulate or certify native UI behavior. Keep the

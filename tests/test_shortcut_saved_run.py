@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-import contextlib
 import io
 import os
+from unittest import mock
 
 import run as harness_run
 from harness import programs
@@ -32,7 +32,17 @@ class TestShortcutSavedRun(TempDirTestCase):
     def invoke(self, record, *, values=(), allow=True):
         stdout = io.StringIO()
         stderr = io.StringIO()
-        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+
+        def capture_print(*args, **kwargs):
+            # Pyto's native console can bypass contextlib.redirect_stdout/stderr. Patch
+            # run.py's module-level print lookup so this CLI contract test observes the
+            # command response without replacing interpreter-global streams.
+            stream = stderr if kwargs.get("file") is not None else stdout
+            separator = kwargs.get("sep", " ")
+            ending = kwargs.get("end", "\n")
+            stream.write(separator.join(str(arg) for arg in args) + ending)
+
+        with mock.patch.object(harness_run, "print", capture_print, create=True):
             result = harness_run.run_saved_program_command(
                 self.make_config(api_key=None),
                 record["id"],

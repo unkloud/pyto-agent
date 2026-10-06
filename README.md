@@ -16,7 +16,7 @@ file into a workspace on the device, runs it, and tells you what happened.
 * **Survives the app being killed.** Every turn is appended to a JSONL session log, so
   `--resume` picks up exactly where iOS interrupted you.
 
-**Latest published release: v1.0.16.** Its device diagnostic now runs seven focused, offline behavior checks on the installed Pyto runtime, keeps native UI acceptance separate, and includes redacted failure summaries for device-only issues. See the [release notes](RELEASE-NOTES-v1.0.16.md) and [device goal checklists](harness/projects/easy-device-programming/goals/).
+**Latest published release: v1.0.17.** Its device diagnostic now runs seven focused, offline behavior checks on the installed Pyto runtime, keeps native UI acceptance separate, includes redacted failure summaries for device-only issues, and captures CLI output in the Shortcuts tests without replacing Pyto’s global console streams. See the [release notes](RELEASE-NOTES-v1.0.17.md) and [device goal checklists](harness/projects/easy-device-programming/goals/).
 
 ---
 
@@ -26,7 +26,7 @@ Choose one option. Each Python block is a complete script: copy the whole block 
 
 ### Option A — Install the latest release (recommended)
 
-This automatically finds the newest stable release on GitHub. It installs v1.0.16, whose source archive includes `device_release_diagnostic.py` beside `run.py` and `harness/`.
+This automatically finds the newest stable release on GitHub. It installs v1.0.17, whose source archive includes `device_release_diagnostic.py` beside `run.py` and `harness/`.
 
 ```python
 import json
@@ -52,7 +52,7 @@ sys.argv = ["install.py", "--ref", tag]
 runpy.run_path("install.py", run_name="__main__")
 ```
 
-### Option B — Install v1.0.16 exactly
+### Option B — Install v1.0.17 exactly
 
 Use this if you want this specific release, even after a newer one is available.
 
@@ -61,7 +61,7 @@ import runpy
 import sys
 import urllib.request
 
-tag = "v1.0.16"
+tag = "v1.0.17"
 installer_url = "https://raw.githubusercontent.com/unkloud/pyto-agent/" + tag + "/install.py"
 with urllib.request.urlopen(installer_url, timeout=120) as response:
     with open("install.py", "wb") as installer:
@@ -71,13 +71,13 @@ sys.argv = ["install.py", "--ref", tag]
 runpy.run_path("install.py", run_name="__main__")
 ```
 
-### Option C — Install v1.0.16 from Files or AirDrop
+### Option C — Install v1.0.17 from Files or AirDrop
 
 Use this if you downloaded the files in Safari or received them from someone else. The source ZIP includes `device_release_diagnostic.py` beside `run.py` and `harness/`. Download both files to Files, then run the script below. Pyto will ask you to choose the installer first and the ZIP file second. You do not need to rename either file or type a path.
 
-- [Download the v1.0.16 installer](https://raw.githubusercontent.com/unkloud/pyto-agent/v1.0.16/install.py)
-- [Download the v1.0.16 source ZIP](https://github.com/unkloud/pyto-agent/archive/refs/tags/v1.0.16.zip)
-- [Download only the diagnostic script](https://github.com/unkloud/pyto-agent/releases/download/v1.0.16/device_release_diagnostic_v1.0.16.py)
+- [Download the v1.0.17 installer](https://raw.githubusercontent.com/unkloud/pyto-agent/v1.0.17/install.py)
+- [Download the v1.0.17 source ZIP](https://github.com/unkloud/pyto-agent/archive/refs/tags/v1.0.17.zip)
+- [Download only the diagnostic script](https://github.com/unkloud/pyto-agent/releases/download/v1.0.17/device_release_diagnostic_v1.0.17.py)
 
 ```python
 import file_system as fs
@@ -88,7 +88,7 @@ installer_path = fs.import_file()
 archive_path = fs.import_file()
 sys.argv = [
     installer_path,
-    "--ref", "v1.0.16",
+    "--ref", "v1.0.17",
     "--zip", archive_path,
 ]
 runpy.run_path(installer_path, run_name="__main__")
@@ -122,7 +122,7 @@ Your settings, chat history and programs stay in their own folders when you upda
 
 ### Run the on-device diagnostic
 
-After installing v1.0.16, open `device_release_diagnostic.py` from the pyto-agent folder in Pyto and tap Run. It writes a Markdown report beside the script. The report includes seven offline behavior checks for execution, saved programs, inputs, simulated recovery, project context, Objective-C recipes and the Shortcuts saved-run contract. They use disposable test data and make no model or network requests. Failed cases include short redacted exception summaries to make device-only issues easier to diagnose.
+After installing v1.0.17, open `device_release_diagnostic.py` from the pyto-agent folder in Pyto and tap Run. It writes a Markdown report beside the script. The report includes seven offline behavior checks for execution, saved programs, inputs, simulated recovery, project context, Objective-C recipes and the Shortcuts saved-run contract. They use disposable test data and make no model or network requests. Failed cases include short redacted exception summaries to make device-only issues easier to diagnose.
 
 The report keeps native UI checks as `NOT RUN`; a scripted pass does not verify approvals, pickers, app layout, force-quit behavior or the Shortcuts app handoff.
 
