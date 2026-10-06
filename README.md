@@ -16,7 +16,7 @@ file into a workspace on the device, runs it, and tells you what happened.
 * **Survives the app being killed.** Every turn is appended to a JSONL session log, so
   `--resume` picks up exactly where iOS interrupted you.
 
-**Latest published release: v1.0.8.** The local v1.0.9 candidate adds managed execution, in-app approvals, interruption recovery, interactive previews, saved programs, validated inputs, project memory and responsive chat. The local v1.0.10 candidate adds platform-aware agent guidance and read-only Objective-C recipes. The local v1.0.11 candidate adds an explicitly opted-in, model-free Shortcuts path for saved batch programs, the complete novice desktop acceptance pack, and an organizer Apply/Undo flow. No v1.0.9–v1.0.11 GitHub release has been published yet, and native Pyto/iOS acceptance remains pending. See the [v1.0.9 notes](RELEASE-NOTES-v1.0.9.md), [v1.0.10 notes](RELEASE-NOTES-v1.0.10.md), and [v1.0.11 notes](RELEASE-NOTES-v1.0.11.md).
+**Latest published release: v1.0.11.** It adds managed execution, in-app approvals, interruption recovery, interactive previews, saved programs and inputs, project memory, responsive phone chat, platform-aware guidance, read-only Objective-C recipes, an opt-in saved-program Shortcuts path, and novice workflow safeguards. The release passed 875 desktop tests; native Pyto/iOS acceptance remains pending. See the [release notes](RELEASE-NOTES-v1.0.11.md) and [device goal checklists](harness/projects/easy-device-programming/goals/).
 
 ---
 
@@ -26,7 +26,7 @@ Choose one option. Each Python block is a complete script: copy the whole block 
 
 ### Option A — Install the latest release (recommended)
 
-This automatically finds the newest stable release on GitHub. It currently installs v1.0.8, and the same script will keep working for later releases.
+This automatically finds the newest stable release on GitHub. It currently installs v1.0.11, and the same script will keep working for later releases.
 
 ```python
 import json
@@ -51,7 +51,7 @@ sys.argv = ["install.py", "--ref", tag]
 runpy.run_path("install.py", run_name="__main__")
 ```
 
-### Option B — Install v1.0.8 exactly
+### Option B — Install v1.0.11 exactly
 
 Use this if you want this specific release, even after a newer one is available.
 
@@ -60,7 +60,7 @@ import runpy
 import sys
 import urllib.request
 
-tag = "v1.0.8"
+tag = "v1.0.11"
 installer_url = "https://raw.githubusercontent.com/unkloud/pyto-agent/" + tag + "/install.py"
 with urllib.request.urlopen(installer_url, timeout=120) as response:
     with open("install.py", "wb") as installer:
@@ -70,12 +70,12 @@ sys.argv = ["install.py", "--ref", tag]
 runpy.run_path("install.py", run_name="__main__")
 ```
 
-### Option C — Install from files in Files or AirDrop
+### Option C — Install v1.0.11 from Files or AirDrop
 
 Use this if you downloaded the files in Safari or received them from someone else. Download both files to Files, then run the script below. Pyto will ask you to choose the installer first and the ZIP file second. You do not need to rename either file or type a path.
 
-- [Download the v1.0.8 installer](https://raw.githubusercontent.com/unkloud/pyto-agent/v1.0.8/install.py)
-- [Download the v1.0.8 source ZIP](https://github.com/unkloud/pyto-agent/archive/refs/tags/v1.0.8.zip)
+- [Download the v1.0.11 installer](https://raw.githubusercontent.com/unkloud/pyto-agent/v1.0.11/install.py)
+- [Download the v1.0.11 source ZIP](https://github.com/unkloud/pyto-agent/archive/refs/tags/v1.0.11.zip)
 
 ```python
 import file_system as fs
@@ -591,7 +591,7 @@ applies the repairs a machine can and prints a before/after report. `--repair "<
 lets the model change the harness's own source, subject to a path jail, an AST/stdlib
 pre-check, a snapshot with hashes, and the offline test suite as the gate: a red suite
 reverts the edit byte-for-byte and hands back the failure verbatim. A bounded gate (~3 s,
-232 tests) is the default; `--deep-tests` asks for all 762.
+232 tests) is the default; `--deep-tests` asks for all 875.
 
 **The full story — the three tiers, the guardrail list, what is deliberately not automated,
 and a worked transcript — is in [SELF-REPAIR.md](SELF-REPAIR.md).**
@@ -680,7 +680,7 @@ harness/
   repair.py            self-repair: path-jailed, snapshot-first, test-gated source edits
   pyto_api.py          Pyto library grounding: 25 modules / 160 members, curated + introspected
   errors.py            error taxonomy with retryability
-tests/                 811 desktop tests, including a stdlib mock OpenAI server
+tests/                 875 desktop tests, including a stdlib mock OpenAI server
 examples/              three programs the agent is expected to be able to write
 stdlib_audit.py        proves "stdlib only" and "parses as Python 3.10"
 ```
@@ -711,7 +711,7 @@ read so their snapshots stay restorable.
 ## 10. Verifying it yourself
 
 ```bash
-python3 -m unittest discover -s tests -t .     # 762 tests, offline, no external network
+python3 -m unittest discover -s tests -t .     # 875 tests, offline, no external network
 python3 stdlib_audit.py                        # third_party_modules: [], 22 files parse at (3,10)
 python3 run.py --dry-run "hello"               # prints the request, sends nothing
 python3 run.py --paths                         # every resolved path and the rule that chose it
