@@ -21,7 +21,7 @@ from harness import programs
 from harness.loop import make_policy
 from harness.tools import ToolDef
 from harness.ui import UIApprover
-from harness.web import LocalWebServer, WebController, _BackgroundKeepalive, run_web
+from harness.web import LocalWebServer, WebController, WebState, _BackgroundKeepalive, run_web
 
 from .mock_provider import MockProvider, text_response, tool_response
 from .support import TempDirTestCase, make_client, make_options
@@ -126,6 +126,10 @@ class TestWebFrontEnd(TempDirTestCase):
             self.assertEqual(asset_status, 200)
             self.assertIn(mime, asset_headers["Content-Type"])
             self.assertTrue(asset_body)
+            if asset == "app.js":
+                self.assertIn(b"document.createTextNode", asset_body)
+                self.assertIn(b"safeMarkdownHref", asset_body)
+                self.assertNotIn(b"innerHTML", asset_body)
 
         status, _headers, body = self.request(server, "api/state", token="wrong-token")
         self.assertEqual(status, 401)
@@ -164,9 +168,48 @@ class TestWebFrontEnd(TempDirTestCase):
             lambda state, events: any(item["type"] == "operation_finished" for item in events),
         )
         self.assertTrue(any(item["type"] == "user" and item["data"]["text"] == "say hello" for item in events))
-        self.assertTrue(any(item["type"] == "output" and "Hello from the mock" in item["data"]["text"] for item in events))
+        assistant = next(
+            item for item in events
+            if item["type"] == "output" and "Hello from the mock" in item["data"]["text"]
+        )
+        self.assertEqual(assistant["data"]["format"], "markdown")
+        self.assertEqual(
+            assistant["data"]["markdown"],
+            [["paragraph", [["text", "Hello from the mock"]]]],
+        )
         with provider.lock:
             self.assertEqual(len(provider.requests), 1)
+
+    def test_assistant_markdown_keeps_hostile_markup_as_text_and_links_inert(self) -> None:
+        response_text = '<img src=x onerror="bad()"> **bold** [unsafe](javascript:bad())'
+        controller, _provider, _registry = self.make_controller([text_response(response_text)])
+        server = self.start_server(controller)
+
+        status, result = self.post_json(server, "api/chat", {"prompt": "show formatting"})
+        self.assertEqual(status, 202, result)
+        _state, events = self.wait_for(
+            server,
+            lambda state, collected: any(
+                item["type"] == "output" and item["data"].get("format") == "markdown"
+                for item in collected
+            ),
+        )
+        assistant = next(item for item in events if item["type"] == "output" and item["data"].get("format") == "markdown")
+        nodes = assistant["data"]["markdown"][0][1]
+        self.assertEqual(nodes[0], ["text", '<img src=x onerror="bad()"> '])
+        self.assertEqual(nodes[1][0], "strong")
+        self.assertEqual(nodes[2][0], "text")
+        self.assertEqual(nodes[3][0], "link")
+        self.assertIsNone(nodes[3][1])
+
+    def test_oversized_markdown_tree_falls_back_to_bounded_plain_text(self) -> None:
+        state = WebState()
+        text = "**x** " * 2000
+        state.publish("output", {"text": text, "format": "markdown"})
+        event = state.snapshot(0)["events"][0]
+        self.assertEqual(event["data"]["text"], text)
+        self.assertNotIn("format", event["data"])
+        self.assertNotIn("markdown", event["data"])
 
     def test_stop_turn_cancels_a_provider_request(self) -> None:
         controller, provider, _registry = self.make_controller([{"delay": 2.0}])

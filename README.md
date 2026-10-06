@@ -16,7 +16,7 @@ file into a workspace on the device, runs it, and tells you what happened.
 * **Survives the app being killed.** Every turn is appended to a JSONL session log, so
   `--resume` picks up exactly where iOS interrupted you.
 
-**Latest published release: v1.0.18.** Adds an optional, token-protected browser interface for chat, approvals, saved programs, and session history on the same device. The desktop checks pass; Safari and Pyto lifecycle acceptance still needs a real device. See the [release notes](RELEASE-NOTES-v1.0.18.md) and [browser interface guide](docs/web-interface.md).
+**Latest published release: v1.0.19.** Adds safe Markdown formatting for assistant replies in the optional, token-protected browser interface. Raw HTML and images remain inert; only HTTP, HTTPS, and mailto links are active. See the [release notes](RELEASE-NOTES-v1.0.19.md) and [browser interface guide](docs/web-interface.md).
 
 ---
 
@@ -26,7 +26,7 @@ Choose one option. Each Python block is a complete script: copy the whole block 
 
 ### Option A — Install the latest release (recommended)
 
-This automatically finds the newest stable release on GitHub. It installs v1.0.18, which includes the optional `--web` interface.
+This automatically finds the newest stable release on GitHub. It installs v1.0.19, which includes the optional `--web` interface.
 
 ```python
 import json
@@ -52,7 +52,7 @@ sys.argv = ["install.py", "--ref", tag]
 runpy.run_path("install.py", run_name="__main__")
 ```
 
-### Option B — Install v1.0.18 exactly
+### Option B — Install v1.0.19 exactly
 
 Use this if you want this specific release, even after a newer one is available.
 
@@ -61,7 +61,7 @@ import runpy
 import sys
 import urllib.request
 
-tag = "v1.0.18"
+tag = "v1.0.19"
 installer_url = "https://raw.githubusercontent.com/unkloud/pyto-agent/" + tag + "/install.py"
 with urllib.request.urlopen(installer_url, timeout=120) as response:
     with open("install.py", "wb") as installer:
@@ -71,12 +71,12 @@ sys.argv = ["install.py", "--ref", tag]
 runpy.run_path("install.py", run_name="__main__")
 ```
 
-### Option C — Install v1.0.18 from Files or AirDrop
+### Option C — Install v1.0.19 from Files or AirDrop
 
 Use this if you downloaded the files in Safari or received them from someone else. Download the installer and source ZIP to Files, then run the script below. Pyto will ask you to choose the installer first and the ZIP file second. You do not need to rename either file or type a path.
 
-- [Download the v1.0.18 installer](https://raw.githubusercontent.com/unkloud/pyto-agent/v1.0.18/install.py)
-- [Download the v1.0.18 source ZIP](https://github.com/unkloud/pyto-agent/archive/refs/tags/v1.0.18.zip)
+- [Download the v1.0.19 installer](https://raw.githubusercontent.com/unkloud/pyto-agent/v1.0.19/install.py)
+- [Download the v1.0.19 source ZIP](https://github.com/unkloud/pyto-agent/archive/refs/tags/v1.0.19.zip)
 - [Download the v1.0.17 device diagnostic](https://github.com/unkloud/pyto-agent/releases/download/v1.0.17/device_release_diagnostic_v1.0.17.py) (this does not test the web interface)
 
 ```python
@@ -88,7 +88,7 @@ installer_path = fs.import_file()
 archive_path = fs.import_file()
 sys.argv = [
     installer_path,
-    "--ref", "v1.0.18",
+    "--ref", "v1.0.19",
     "--zip", archive_path,
 ]
 runpy.run_path(installer_path, run_name="__main__")

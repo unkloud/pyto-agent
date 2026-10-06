@@ -19,11 +19,13 @@ from collections import deque
 from typing import Any, Dict, Mapping, Optional, Tuple
 
 from . import program_inputs, programs
+from .markdown import parse_markdown
 from .security import scrub_secrets, scrub_value
 from .ui import Printer, UIApprover, format_history_page, run_turn_sync
 
 WEB_EVENT_LIMIT = 500
 WEB_EVENT_TEXT_LIMIT = 12000
+WEB_MARKDOWN_EVENT_LIMIT = 24 * 1024
 WEB_BODY_LIMIT = 64 * 1024
 WEB_PROMPT_LIMIT = 8192
 WEB_HISTORY_PAGE_SIZE = 12
@@ -53,12 +55,23 @@ class WebState:
 
     def publish(self, kind: str, data: Optional[Mapping[str, Any]] = None) -> int:
         safe = scrub_value(dict(data or {}))
+        if kind == "output" and isinstance(safe, dict) and safe.get("format") == "markdown":
+            text = safe.get("text")
+            if isinstance(text, str):
+                safe["markdown"] = parse_markdown(text)
         try:
             rendered = json.dumps(safe, ensure_ascii=False, separators=(",", ":"))
         except (TypeError, ValueError):
             safe = {"text": scrub_secrets(str(data or ""))[:WEB_EVENT_TEXT_LIMIT]}
             rendered = json.dumps(safe, ensure_ascii=False, separators=(",", ":"))
-        if len(rendered) > WEB_EVENT_TEXT_LIMIT:
+        payload_limit = WEB_MARKDOWN_EVENT_LIMIT if kind == "output" else WEB_EVENT_TEXT_LIMIT
+        if len(rendered) > payload_limit and isinstance(safe, dict) and "markdown" in safe:
+            # Keep the bounded raw response available as plain text if pathological
+            # formatting would make the syntax tree too large for the event stream.
+            safe.pop("markdown", None)
+            safe.pop("format", None)
+            rendered = json.dumps(safe, ensure_ascii=False, separators=(",", ":"))
+        if len(rendered) > payload_limit:
             safe = {"text": scrub_secrets(rendered[: WEB_EVENT_TEXT_LIMIT - 32]) + "… [shortened]"}
         with self._lock:
             event_id = self._next_id
@@ -114,6 +127,14 @@ class _WebStream:
     def write(self, text: str) -> int:
         if text:
             self.state.publish("output", {"text": scrub_secrets(str(text))[:WEB_EVENT_TEXT_LIMIT]})
+        return len(text)
+
+    def write_assistant(self, text: str) -> int:
+        if text:
+            self.state.publish(
+                "output",
+                {"text": scrub_secrets(str(text))[:WEB_EVENT_TEXT_LIMIT], "format": "markdown"},
+            )
         return len(text)
 
     def flush(self) -> None:

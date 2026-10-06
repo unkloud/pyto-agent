@@ -43,7 +43,115 @@
     toastTimer = window.setTimeout(() => box.classList.remove("show"), 3400);
   }
 
-  function addBubble(label, text, kind = "assistant") {
+  function safeMarkdownHref(value) {
+    if (typeof value !== "string" || /[\\\u0000-\u0020\u007f]/.test(value)) return null;
+    try {
+      const url = new URL(value);
+      return ["http:", "https:", "mailto:"].includes(url.protocol) ? value : null;
+    } catch (_error) {
+      return null;
+    }
+  }
+
+  function appendMarkdownInline(parent, nodes, budget) {
+    if (!Array.isArray(nodes)) return false;
+    for (const node of nodes) {
+      budget.count += 1;
+      if (budget.count > budget.limit || !Array.isArray(node) || typeof node[0] !== "string") return false;
+      const type = node[0];
+      if (type === "text" || type === "code") {
+        if (typeof node[1] !== "string") return false;
+        if (type === "text") {
+          parent.append(document.createTextNode(node[1]));
+        } else {
+          const code = document.createElement("code");
+          code.textContent = node[1];
+          parent.append(code);
+        }
+        continue;
+      }
+      if (type === "strong" || type === "em") {
+        const element = document.createElement(type);
+        if (!appendMarkdownInline(element, node[1], budget)) return false;
+        parent.append(element);
+        continue;
+      }
+      if (type === "link") {
+        const href = safeMarkdownHref(node[1]);
+        if (!href) {
+          if (!appendMarkdownInline(parent, node[2], budget)) return false;
+          continue;
+        }
+        const link = document.createElement("a");
+        link.href = href;
+        link.target = "_blank";
+        link.rel = "noopener noreferrer";
+        if (!appendMarkdownInline(link, node[2], budget)) return false;
+        parent.append(link);
+        continue;
+      }
+      return false;
+    }
+    return true;
+  }
+
+  function appendMarkdownBlocks(parent, blocks, budget) {
+    if (!Array.isArray(blocks)) return false;
+    for (const block of blocks) {
+      budget.count += 1;
+      if (budget.count > budget.limit || !Array.isArray(block) || typeof block[0] !== "string") return false;
+      const type = block[0];
+      if (type === "paragraph") {
+        const paragraph = document.createElement("p");
+        if (!appendMarkdownInline(paragraph, block[1], budget)) return false;
+        parent.append(paragraph);
+      } else if (type === "heading") {
+        const level = Number(block[1]);
+        if (!Number.isInteger(level) || level < 1 || level > 6) return false;
+        const heading = document.createElement(`h${level}`);
+        if (!appendMarkdownInline(heading, block[2], budget)) return false;
+        parent.append(heading);
+      } else if (type === "quote") {
+        const quote = document.createElement("blockquote");
+        if (!appendMarkdownBlocks(quote, block[1], budget)) return false;
+        parent.append(quote);
+      } else if (type === "list") {
+        if ((block[1] !== "ol" && block[1] !== "ul") || !Number.isInteger(block[2]) || !Array.isArray(block[3])) return false;
+        const list = document.createElement(block[1]);
+        if (block[1] === "ol") {
+          if (block[2] < 0 || block[2] > 999999999) return false;
+          list.start = block[2];
+        }
+        for (const item of block[3]) {
+          budget.count += 1;
+          if (budget.count > budget.limit) return false;
+          const entry = document.createElement("li");
+          if (!appendMarkdownBlocks(entry, item, budget)) return false;
+          list.append(entry);
+        }
+        parent.append(list);
+      } else if (type === "code_block") {
+        if (typeof block[1] !== "string") return false;
+        const pre = document.createElement("pre");
+        const code = document.createElement("code");
+        code.textContent = block[1];
+        pre.append(code);
+        parent.append(pre);
+      } else {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  function renderMarkdown(body, blocks) {
+    const fragment = document.createDocumentFragment();
+    if (!appendMarkdownBlocks(fragment, blocks, { count: 0, limit: 4096 })) return false;
+    body.append(fragment);
+    return true;
+  }
+
+  function addBubble(label, text, kind = "assistant", markdown = null) {
     const bubble = document.createElement("article");
     bubble.className = `bubble ${kind}`;
     const title = document.createElement("div");
@@ -51,7 +159,15 @@
     title.textContent = label;
     const body = document.createElement("div");
     body.className = "preserve";
-    body.textContent = text;
+    if (Array.isArray(markdown)) {
+      body.className = "markdown-content";
+      if (!renderMarkdown(body, markdown)) {
+        body.className = "preserve";
+        body.textContent = text;
+      }
+    } else {
+      body.textContent = text;
+    }
     bubble.append(title, body);
     transcript.appendChild(bubble);
     transcript.scrollTop = transcript.scrollHeight;
@@ -98,7 +214,15 @@
     const data = event.data || {};
     switch (event.type) {
       case "user": addBubble("You", data.text || "", "user"); break;
-      case "output": if (data.text) addBubble("Harness", data.text); break;
+      case "output":
+        if (data.text) {
+          if (data.format === "markdown" && Array.isArray(data.markdown)) {
+            addBubble("Harness", data.text, "assistant", data.markdown);
+          } else {
+            addBubble("Harness", data.text);
+          }
+        }
+        break;
       case "approval": showApproval(data); break;
       case "approval_answered": showApproval(null); addBubble("Approval", data.allow ? "Allowed" : "Denied", "system"); break;
       case "program_started": addBubble("Saved program", `Running ${data.title || data.id}…`, "system"); break;

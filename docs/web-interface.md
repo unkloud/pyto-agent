@@ -20,6 +20,21 @@ its existing behavior and bypasses approvals. Use **Stop web session** to cancel
 approvals, stop the web server, and end the foreground run. Stopping the Pyto script also
 closes the server through normal cleanup.
 
+## Formatted assistant replies
+
+Assistant prose in Chat renders a small Markdown subset: headings, paragraphs, strong and
+emphasized text, inline code, fenced code blocks, links, blockquotes, and ordered or
+unordered lists. Fenced code keeps its whitespace and is horizontally scrollable on narrow
+screens. Nested lists and ordered-list starting numbers are retained. Tool progress, errors,
+approvals, saved-program output, and session history remain plain text.
+
+Raw HTML and Markdown images are not interpreted. The browser builds elements from a
+bounded syntax tree using DOM APIs; all text is inserted as text nodes. Links are active
+only for `http`, `https`, and `mailto` destinations. Other or malformed destinations show
+their label without a link. No Markdown library or other resource is loaded from a CDN.
+Malformed Markdown remains readable, and a very large formatted event falls back to plain
+text to keep the event stream bounded.
+
 ## Local server and browser boundary
 
 The HTTP server binds only to `127.0.0.1` and chooses an ephemeral port. The URL includes

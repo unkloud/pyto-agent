@@ -186,6 +186,14 @@ class Printer:
         self.stream.write(text + ("\n" if newline else ""))
         self.stream.flush()
 
+    def _write_assistant(self, text: str) -> None:
+        """Write assistant prose, allowing a front end to format it separately."""
+        formatter = getattr(self.stream, "write_assistant", None)
+        if callable(formatter):
+            formatter(text)
+        else:
+            self.write(text)
+
     def handle(self, event: Event) -> None:
         kind = event.kind
         data = event.data
@@ -203,7 +211,7 @@ class Printer:
                     self.write("  {}".format(line))
             if content:
                 # Display the scrubbed, complete body once for both provider modes.
-                self.write(content)
+                self._write_assistant(content)
             latest = content
             self._last_message = _message_key(latest) if latest else None
         elif kind == "tool.started":
@@ -245,7 +253,7 @@ class Printer:
             message = scrub_secrets(str(data.get("message", ""))).strip()
             message_key = _message_key(message) if message else None
             if message and message_key != self._last_message:
-                self.write(message)
+                self._write_assistant(message)
                 self.transcript.add(message)
             if message_key is not None:
                 self._last_message = message_key
