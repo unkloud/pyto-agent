@@ -46,32 +46,22 @@ Readable output comes first because it improves the current default terminal exp
 
 Treat implementation complete, automated verification complete and device verification complete as separate facts. Do not mark a goal fully verified when its required native checks are unavailable. Record results and any remaining device checks beside each goal or in a linked result note.
 
-Goal 02 is implemented for v1.0.7 and has desktop contract/lifecycle coverage. Its real-device acceptance remains open; see the [implementation record and device checklist](goals/02-working-chat-gui.md).
+Implementation work for Goals 01–12 and the desktop acceptance pack for Goal 13 are included in the published v1.0.17 source. The goal-specific implementation notes and manual procedures remain in each linked goal file. The device report below records what the automated scripts verified; it does not promote manual/native checklist items to PASS.
 
-Goal 03 is implemented in the local v1.0.9 candidate with desktop execution/concurrency coverage. Its Pyto device acceptance remains open; see the [implementation record and device checklist](goals/03-safe-program-execution.md).
+## Current device revalidation — 6 October 2026
 
-Goal 04 is implemented in the same local candidate with GUI approvals, queued request handling and cancellation coverage. Its Pyto device acceptance remains open; see the [implementation record and device checklist](goals/04-in-app-approvals.md).
+The v1.0.17 diagnostic report is from an iPhone running iOS 26.6.2 and Pyto 19.0.1 (438). The Objective-C bridge probe passed, the offline doctor passed (23 OK, 0 fixed, 0 needing attention), and all seven focused behavior rows passed:
 
-Goal 08 is implemented in the same local candidate with durable tool intent/results and no-replay recovery. Its Pyto interruption acceptance remains open; see the [implementation record and device checklist](goals/08-interruption-recovery.md).
+| Goal | Device-script result | Scope limit |
+| --- | --- | --- |
+| 03 — Managed program execution | PASS, 5 cases | Does not certify every UI-launched run or native-blocked operation. |
+| 06 — Saved-program library | PASS, 2 cases | Does not cover the full chat library/restart interaction. |
+| 07 — Program inputs | PASS, 3 cases | Does not open real Pyto file/folder pickers. |
+| 08 — Interruption recovery | PASS, 2 simulated cases | Does not force-quit Pyto or establish an unknown native side effect. |
+| 09 — Project context | PASS, 2 cases | Does not cover long-history UI behavior or every restart path. |
+| 11 — Objective-C recipes | PASS | Read-only Foundation/UIKit recipe only; does not verify agent workflow, permissions or entitlements. |
+| 12 — Shortcuts saved-run contract | PASS, 6 cases | Does not launch the Shortcuts app or verify a real Run Script handoff. |
 
-Goal 05 is implemented in the local v1.0.9 candidate with a no-batch-timeout PytoUI preview path, callback tracking, a reusable app scaffold and desktop lifecycle coverage. Its native presentation and callback checks remain open; see the [implementation record and device checklist](goals/05-interactive-preview.md).
+The report's manual checklist still marks all 13 entries `NOT RUN` by design. Goals 01, 02, 04, 05, 10 and 13 have no focused behavior-script row and rely on the deferred UI/interaction checks. The native portions of Goals 03, 06–09, 11 and 12 also remain unverified as described above.
 
-Goal 06 is implemented in the same local candidate: a versioned workspace library, persistent listing and registration, direct Run actions that make no model request, and Edit actions that pass the selected program context to the agent. The 811-test desktop suite covers persistence, malformed metadata, duplicate titles, file recovery, verification updates, CLI no-key execution and chat/terminal commands. Pyto restart and UI acceptance remain open; see the [implementation record and device checklist](goals/06-saved-program-library.md).
-
-Goal 07 is implemented in the same local candidate with typed ephemeral input forms, terminal prompts, CLI assignments, picker-backed paths and a folder-organizer preview/apply example. Its desktop checks cover validation, cancellation, path handling, app/batch `main(inputs)` execution and collision-safe apply. Pyto picker, form and file-provider acceptance remains open; see the [implementation record and device checklist](goals/07-simple-program-inputs.md).
-
-Goal 09 is implemented in the same local candidate with versioned per-program briefs, selected-program loading in `/edit`, and a separate provider-request byte budget that preserves the complete local session. The 845-test desktop suite covers brief migration/isolation, compaction persistence, stale file reporting, oversized tool results, current-request preservation and tool-call integrity. Pyto restart and long-history checks remain open; see the [implementation record and device checklist](goals/09-durable-project-context.md).
-
-Goal 10 is implemented in the same candidate with a bounded 80,000-character chat display, coalesced TextView updates, paged session history and PytoUI autoresizing flags. Its 37 focused desktop tests cover batching, final flush, close safety and History navigation. Native keyboard, rotation and small-screen checks remain open; see the [implementation record and device checklist](goals/10-responsive-phone-chat.md).
-
-Goal 11 is implemented in the local v1.0.10 candidate with platform-aware prompts, one-time/batch/app workflow separation, registration before final verification, and a documented read-only Objective-C recipe. Desktop coverage includes mocked conversations and Foundation/UIKit bridge fakes. Pyto prompt behavior, framework imports, and native interaction remain device checks; see the [Goal 11 record and checklist](goals/11-agent-workflow.md).
-
-Goal 12 is implemented in the local v1.0.11 candidate with an opt-in, model-free Shortcuts entry point for saved batch programs. Desktop coverage checks explicit unattended consent, validated inputs, picker refusal and app-mode refusal. Pyto's Run Script argument mapping, output and scheduling behavior remain device checks; see the [Goal 12 record and checklist](goals/12-shortcut-handoff.md).
-
-Goal 13's desktop acceptance pack is implemented in the local v1.0.11 candidate. It joins saved clipboard-notebook reruns, selected-program edit context, organizer preview/apply/undo, the persistent counter and form with mocked networking, permission denial, and interruption recovery. The reproducible command and result matrix are in [the acceptance pack](acceptance/README.md). The complete novice measures and all Pyto/iOS checks remain pending a real device session; see the [Goal 13 record and checklist](goals/13-usability-release-gate.md).
-
-## Current revalidation — 6 October 2026
-
-The focused desktop suite for Goals 03, 04, 05, 06, 07, 08, 09, 11 and 12 passed **233 tests** in 41.083 seconds on CPython 3.12.3 / Linux. It covers in-process run ownership and cleanup, chat approvals, interruption recovery, preview callbacks, saved-program persistence/edit context, validated inputs and model-free Shortcut runs. Goal 13's desktop pack separately passed **19 tests**; the full desktop suite passed **871 tests**.
-
-This host has no Pyto, PytoUI, Foundation or UIKit modules, and the connected app inventory contains no iPhone/iPad runtime. Consequently the device checklists above remain pending; these desktop results do not verify native presentation, permission prompts, file-provider behavior, interruption on iOS, or Shortcuts execution on Pyto. The currently published GitHub release remains v1.0.8; later candidates are not published.
+Network checks (`network_reachable`, `api_auth`, `model_accepted`) were disabled in this run; `selftest` was skipped because it requires `--deep`; memory headroom is unavailable through this Pyto interpreter. These are coverage limits, not reported failures. For the user's current scope—automated on-device checks with UI interaction deferred—there are no failing scripted checks or release blockers.
