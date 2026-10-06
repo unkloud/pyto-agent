@@ -557,7 +557,7 @@ class TestSystemPrompt(TempDirTestCase):
         prompt = self.render()
         for name in ("pasteboard", "photos", "notifications", "pyto_ui", "calendar_events", "background"):
             self.assertIn(name, prompt, "the prompt does not mention {}".format(name))
-        self.assertIn("Pyto's own modules", prompt)
+        self.assertIn("Pyto modules reported by the local reference", prompt)
         self.assertIn("pip install", prompt)
 
     def test_the_prompt_carries_the_look_it_up_rule(self) -> None:
@@ -578,7 +578,7 @@ class TestSystemPrompt(TempDirTestCase):
         listed = [
             line
             for line in prompt.splitlines()
-            if line.startswith("- The Python standard library is installed")
+            if line.startswith("- Pyto modules reported by the local reference:")
         ]
         self.assertEqual(len(listed), 1, "the module list line is missing")
         self.assertNotIn("usernotification", listed[0])

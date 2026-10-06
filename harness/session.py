@@ -55,6 +55,7 @@ TELEMETRY_TYPES = frozenset(
         "turn.failed",
         "turn.limit",
         "usage",
+        "tool.intent",
         "tool.started",
         "tool.completed",
         "tool.denied",
@@ -188,8 +189,18 @@ def assistant_message_event(message: Mapping[str, Any]) -> Dict[str, Any]:
     return {"message": dict(message), "projectionShape": PROJECTION_SHAPE}
 
 
-def tool_message_event(message: Mapping[str, Any]) -> Dict[str, Any]:
-    return {"message": dict(message), "projectionShape": PROJECTION_SHAPE}
+def tool_message_event(
+    message: Mapping[str, Any], *, recovery: Optional[Mapping[str, Any]] = None
+) -> Dict[str, Any]:
+    event = {"message": dict(message), "projectionShape": PROJECTION_SHAPE}
+    if recovery is not None:
+        event["recovery"] = dict(recovery)
+    return event
+
+
+def completed_tool_event(message: Mapping[str, Any], **details: Any) -> Dict[str, Any]:
+    """Persist a tool result and its provider message in one durable event."""
+    return {"message": dict(message), "projectionShape": PROJECTION_SHAPE, **details}
 
 
 # --------------------------------------------------------------------------------------
@@ -218,18 +229,75 @@ def _prune_orphan_tool_messages(messages: Sequence[Dict[str, Any]]) -> List[Dict
 
 
 def project(events: Iterable[SessionEvent]) -> List[Dict[str, Any]]:
-    """Pure projection: events -> provider messages.  Deterministic by construction."""
-    messages: List[Dict[str, Any]] = []
-    for event in events:
-        if event.type not in PROJECTED_TYPES:
+    """Pure projection: events -> provider messages.  Deterministic by construction.
+
+    New tool results live in their ``tool.completed`` event so the result and completion
+    marker cannot be separated by an app kill. Older logs stored a separate
+    ``message.tool`` event. Associate either form with its assistant declaration and place
+    it immediately after that declaration in provider history.
+    """
+    accepted = list(events)
+    results: Dict[Tuple[int, int], Dict[str, Any]] = {}
+    assistant_messages: Dict[int, Dict[str, Any]] = {}
+
+    for event in accepted:
+        if event.type != "message.assistant" or event.data.get("projectionShape") != PROJECTION_SHAPE:
+            continue
+        message = event.data.get("message")
+        if isinstance(message, dict) and message.get("role") == "assistant":
+            assistant_messages[event.seq] = message
+
+    # Match each result to the earliest preceding declaration for that id. Provider call
+    # ids are expected to be unique, but this remains well-defined for old or synthetic
+    # logs that reuse one.
+    pending: Dict[str, List[Tuple[int, int]]] = {}
+    result_events: Dict[int, List[Tuple[str, Dict[str, Any]]]] = {}
+    for event in accepted:
+        message = None
+        if event.type in ("message.tool", "tool.completed", "tool.reconciled"):
+            if event.data.get("projectionShape") == PROJECTION_SHAPE:
+                candidate = event.data.get("message")
+                if isinstance(candidate, dict) and candidate.get("role") == "tool":
+                    message = candidate
+        if message is None:
+            continue
+        call_id = message.get("tool_call_id")
+        if isinstance(call_id, str) and call_id:
+            result_events.setdefault(event.seq, []).append((call_id, message))
+
+    for event in accepted:
+        if event.type == "message.assistant" and event.seq in assistant_messages:
+            for index, call in enumerate(assistant_messages[event.seq].get("tool_calls") or ()):
+                if not isinstance(call, Mapping):
+                    continue
+                call_id = call.get("id")
+                if isinstance(call_id, str) and call_id:
+                    pending.setdefault(call_id, []).append((event.seq, index))
+        for call_id, message in result_events.get(event.seq, ()):
+            waiting = pending.get(call_id) or []
+            if waiting:
+                results[waiting.pop(0)] = message
+
+    projected: List[Dict[str, Any]] = []
+    for event in accepted:
+        if event.type not in ("message.user", "message.assistant"):
             continue
         if event.data.get("projectionShape") != PROJECTION_SHAPE:
             continue
         message = event.data.get("message")
-        if isinstance(message, dict) and "role" in message:
-            # Deep copy via JSON so a caller mutating the result cannot corrupt the log.
-            messages.append(json.loads(json.dumps(message)))
-    return _prune_orphan_tool_messages(messages)
+        if not isinstance(message, dict) or "role" not in message:
+            continue
+        # Deep copy via JSON so a caller mutating the result cannot corrupt the log.
+        copied = json.loads(json.dumps(message))
+        projected.append(copied)
+        if message.get("role") == "assistant":
+            for index, call in enumerate(message.get("tool_calls") or ()):
+                if not isinstance(call, Mapping):
+                    continue
+                result = results.get((event.seq, index))
+                if result is not None:
+                    projected.append(json.loads(json.dumps(result)))
+    return _prune_orphan_tool_messages(projected)
 
 
 # --------------------------------------------------------------------------------------
@@ -377,6 +445,99 @@ class SessionLog:
         """Rebuild the provider message list.  Pure in the accepted event slice."""
         accepted = self._events if up_to is None else [e for e in self._events if e.seq <= up_to]
         return project(accepted)
+
+    def reconcile_tool_calls(self) -> List[Dict[str, str]]:
+        """Close interrupted assistant tool calls without replaying their handlers.
+
+        A durable ``tool.started`` event means the handler may have made a side effect.
+        Without a durable result, that outcome is unknown. A declaration with no start
+        record was never launched. Both cases get a provider-valid tool message, persisted
+        as one event so another interruption cannot repeat the reconciliation.
+        """
+        pending: Dict[str, Dict[str, Any]] = {}
+        for event in self._events:
+            if event.type == "message.assistant":
+                if event.data.get("projectionShape") != PROJECTION_SHAPE:
+                    continue
+                assistant = event.data.get("message")
+                if not isinstance(assistant, Mapping):
+                    continue
+                for call in assistant.get("tool_calls") or ():
+                    if not isinstance(call, Mapping):
+                        continue
+                    call_id = call.get("id")
+                    function = call.get("function")
+                    name = function.get("name") if isinstance(function, Mapping) else "tool"
+                    if isinstance(call_id, str) and call_id:
+                        pending[call_id] = {
+                            "name": str(name or "tool"),
+                            "started": False,
+                            "denied": "",
+                            "completion_without_result": False,
+                        }
+            elif event.type == "tool.started":
+                call_id = event.data.get("id")
+                if isinstance(call_id, str) and call_id in pending:
+                    pending[call_id]["started"] = True
+            elif event.type == "tool.denied":
+                call_id = event.data.get("id")
+                if isinstance(call_id, str) and call_id in pending:
+                    pending[call_id]["denied"] = str(event.data.get("reason") or "")
+            elif event.type in ("message.tool", "tool.completed", "tool.reconciled"):
+                message = event.data.get("message")
+                call_id = None
+                if isinstance(message, Mapping) and message.get("role") == "tool":
+                    call_id = message.get("tool_call_id")
+                if call_id is None:
+                    call_id = event.data.get("id")
+                if isinstance(call_id, str) and call_id in pending:
+                    if isinstance(message, Mapping) and message.get("role") == "tool":
+                        pending.pop(call_id, None)
+                    elif event.type == "tool.completed":
+                        pending[call_id]["completion_without_result"] = True
+
+        reconciled: List[Dict[str, str]] = []
+        for call_id, record in pending.items():
+            name = str(record["name"])
+            denied = str(record["denied"] or "")
+            if denied and not record["started"]:
+                state = "denied"
+                content = "Not run: approval was denied. The action was not replayed after the interruption."
+                message = "The interrupted {} action was denied and was not run.".format(name.replace("_", " "))
+            elif record["started"] or record["completion_without_result"]:
+                state = "unknown"
+                content = (
+                    "Outcome unknown: Pyto stopped after recording that this operation was starting, "
+                    "but before saving its result. It was not run again to avoid duplicating a side effect. "
+                    "Check the device or workspace for its effects before deciding whether to retry."
+                )
+                message = (
+                    "After interruption, the outcome of {} is unknown. It was not run again; check the "
+                    "device or workspace for effects before retrying."
+                ).format(name.replace("_", " "))
+            else:
+                state = "not_started"
+                content = (
+                    "Not run: Pyto stopped before this operation was launched. It was not replayed. "
+                    "Send a new request if you still want it."
+                )
+                message = "After interruption, {} had not started and was not run. Send a new request if you still want it.".format(
+                    name.replace("_", " ")
+                )
+            self.append(
+                "message.tool",
+                tool_message_event(
+                    {
+                        "role": "tool",
+                        "tool_call_id": call_id,
+                        "name": name,
+                        "content": content,
+                    },
+                    recovery={"state": state, "reason": denied},
+                ),
+            )
+            reconciled.append({"tool": name, "state": state, "message": message})
+        return reconciled
 
     def replay(self) -> Dict[str, Any]:
         """Deterministic digest of the log, used by tests and resume diagnostics."""

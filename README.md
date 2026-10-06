@@ -9,17 +9,14 @@ programs for you. You describe a chore — "rename my screenshots by date", "sum
 week's notes", "put the thing I just copied into a note" — and the agent writes a `.py`
 file into a workspace on the device, runs it, and tells you what happened.
 
-* **The harness uses only Python's standard library.** Pyto may include extra libraries on
-  a particular device; the agent can check before it depends on one. Every claim in this
-  README is checked by `stdlib_audit.py` and the offline test suite.
+* **The harness uses Python's standard library only.** It needs no `pip install`, `requests` or `pydantic`. Pyto can include extra Python libraries on a particular device; the agent can check before depending on one. Every claim in this README is checked by `stdlib_audit.py` and the offline test suite.
 * **Python 3.10**, the version Pyto ships. Verified on real CPython 3.10.22 and 3.12.
 * **OpenAI-compatible API** — DeepSeek by default (`deepseek-chat`), anything
   chat-completions-shaped otherwise.
 * **Survives the app being killed.** Every turn is appended to a JSONL session log, so
   `--resume` picks up exactly where iOS interrupted you.
 
-**Current release: v1.0.8.** See the [release notes](RELEASE-NOTES-v1.0.8.md) for Pyto-aware
-Unix commands, optional library discovery, and persistent custom tools.
+**Latest published release: v1.0.8.** The local v1.0.9 candidate adds managed execution, in-app approvals, interruption recovery, interactive previews, saved programs, validated inputs, project memory and responsive chat. The local v1.0.10 candidate adds platform-aware agent guidance and read-only Objective-C recipes. The local v1.0.11 candidate adds an explicitly opted-in, model-free Shortcuts path for saved batch programs, the complete novice desktop acceptance pack, and an organizer Apply/Undo flow. No v1.0.9–v1.0.11 GitHub release has been published yet, and native Pyto/iOS acceptance remains pending. See the [v1.0.9 notes](RELEASE-NOTES-v1.0.9.md), [v1.0.10 notes](RELEASE-NOTES-v1.0.10.md), and [v1.0.11 notes](RELEASE-NOTES-v1.0.11.md).
 
 ---
 
@@ -222,9 +219,9 @@ contains `api_key`, `token`, `secret`, `password` or `authorization`.
 ## 3. Running it
 
 **On the device, start this harness by running a Pyto script.** Pyto has an embedded shell,
-but there is no separate terminal app session where you type `python run.py`. Open
-**`start.py`** — the launcher the installer wrote next to `run.py` — and press Run. For flags
-and arguments, use the one-line form the installer prints:
+but there is no separate terminal session where you type `python run.py`. Open **`start.py`** —
+the launcher the installer wrote next to `run.py` — and press Run. For flags and arguments,
+use the one-line form the installer prints:
 
 ```python
 import os, runpy, sys
@@ -243,6 +240,8 @@ python run.py --resume <session.jsonl> "and July too?"
 python run.py --dry-run "..."                     # print the request, contact nothing
 python run.py --capabilities                      # what this device can actually do
 python run.py --tools                             # list the tools and their timeouts
+python run.py --programs                          # list saved programs; no model request
+python run.py --run-saved <program-id>             # run one saved program; no model request or API key
 python run.py --yolo "..."                        # skip approvals (see §7)
 python run.py --allow-unattended-programs "..."     # headless Shortcuts: run programs, still deny sharing/URLs
 python run.py --workspace ~/Documents/agent       # somewhere else to work
@@ -258,7 +257,7 @@ python run.py --restore <backup_id>               # put one back (also gated)
 The same arguments work in both forms — only the `sys.argv = [...]` line changes.
 
 Flags: `--model`, `--api-base`, `--api-key`, `--max-turns`, `--no-stream`, `--no-compact`,
-`--verbose`, `--init`, `--version`, `--doctor`, `--fix`, `--deep`, `--deep-tests`,
+`--verbose`, `--init`, `--version`, `--programs`, `--run-saved`, `--doctor`, `--fix`, `--deep`, `--deep-tests`,
 `--no-network`, `--no-doctor`, `--repair`, `--backups`, `--restore`.
 
 **The first normal run of a day also runs a fast, local health pass** and prints one line:
@@ -285,9 +284,10 @@ server and asserts the mock received zero requests.
 
 A generated program is not limited to the standard library: Pyto ships its own modules
 (`pasteboard`, `photos`, `notifications`, `pyto_ui`, `background`, `calendar_events`,
-`file_system`, `speech`, `location`, `motion`, `apps`, `xcallback`, and more), and they are
-usually the only way to reach the clipboard, the photo library, the calendar, the share
-sheet, Shortcuts or a real UIKit window.
+`file_system`, `speech`, `location`, `motion`, `apps`, `xcallback`, and more). They are the
+best starting point for the clipboard, photo library, calendar, share sheet, Shortcuts and
+PytoUI windows; direct Objective-C calls are a lower-level option when a wrapper does not cover
+the task.
 
 The model does not know that API from training, and guessing it (`photos.save_photo` instead
 of `photos.save_image`, `pasteboard.set_clipboard` instead of `pasteboard.set_string`) costs
@@ -299,8 +299,8 @@ ask  ->  pyto_api(module="pasteboard")  ->  write_program  ->  run_program  ->  
 
 | Tool | What it gives the model |
 |---|---|
-| `pyto_api` | The grounding call. With no argument: the Pyto modules that import on **this** device plus the list of what Pyto does not have (Reminders, HealthKit, Bluetooth, speech recognition, `pip install` of C extensions, a daemon, a PTY, real `subprocess`, git/ffmpeg/wget/make). With `module=` : that module's real members, signatures, a minimal snippet, caveats and an `unverified` mark on anything the catalogue could not confirm from Pyto's docs or source. `member=` narrows further. Read-only, no approval needed, capped at 8 000 characters. |
-| `python_module_capabilities` | Checks whether named optional Python libraries such as `numpy` or `PIL` are findable in this runtime without importing them. Pyto and desktop installations can differ, so a result from a computer does not prove availability on the phone. |
+| `pyto_api` | The grounding call for Pyto's higher-level Python modules. With no argument it lists the modules that import on **this** device and features without a supported Pyto wrapper. With `module=` it returns that module's real members, signatures, a minimal snippet and caveats. `member=` narrows further. Read-only, no approval needed, capped at 8 000 characters. It does not yet inventory arbitrary Objective-C framework classes or selectors. |
+| `python_module_capabilities` | Checks whether named optional Python libraries such as `numpy` or `PIL` are findable here without importing them. A computer result does not prove availability on the phone. |
 | `write_program` | Writes the program into the workspace so you can re-run it later. |
 | `run_program` | Runs it and returns stdout/stderr. If stderr contains `module 'X' has no attribute 'Y'`, `cannot import name 'Y' from 'X'` or `No module named 'X'` for a Pyto module, the result gets an appended **Pyto API hint**: the closest real member names (`difflib`), whether the module is even available here, and the `pyto_api` call to make. The original traceback is never rewritten. |
 
@@ -322,9 +322,67 @@ or its `Lib/*.py` source, and entries that could not be confirmed that way are m
 `verified: false` (they are rendered with an `[unverified]` tag and the tool says so on
 device).
 
+Pyto separately documents direct Objective-C framework imports through its Rubicon-ObjC bridge;
+the framework list includes Foundation, UIKit, Vision and CoreLocation. That list shows what Pyto
+exposes for import, not whether a particular API has the needed iOS permission, entitlement or a
+working flow in the installed app. Prefer a Pyto wrapper when one covers the task. For a direct
+framework call, use a narrow documented recipe and verify its import, permission prompt and result
+on the target iPhone/iPad before calling the feature supported. See the
+[Pyto Objective-C guide](https://pyto.readthedocs.io/en/latest/Objective-C.html) and
+[Rubicon-ObjC reference](https://rubicon-objc.beeware.org/en/latest/). The read-only
+[`objc_framework_recipes.py`](examples/objc_framework_recipes.py) sample shows a Pyto-documented
+Foundation bundle lookup and a UIKit device-information lookup. It demonstrates import and selector
+syntax; it does not verify arbitrary Objective-C APIs or replace device checks.
+
 ---
 
-## 3b. Unix commands and saved tools
+## 3b. Saved-program library
+
+When a program should be reusable, the agent calls `register_program` after it writes the
+source. The library stores a title, purpose, workspace-relative entry file, `batch` or `app`
+mode, required capabilities and the latest verification result in
+`pyto-programs.json` inside the workspace. Program source stays in its original file.
+
+In chat, tap **Programs** to see saved entries, then use `/run ID` or
+`/edit ID <requested change>`. The terminal REPL accepts the same commands. Listing and
+running from the command line does not need provider credentials:
+
+```bash
+python run.py --programs
+python run.py --run-saved <program-id>
+```
+
+`--run-saved` runs the registered entry through the normal managed runner and makes no model
+request. App-mode entries open the interactive preview. After a harness-mediated source edit,
+the old verification is cleared; a new run records the result. Missing files stay listed and
+can be repaired by calling `register_program` with the same id and the file's new workspace
+path. Duplicate titles are refused, and malformed metadata is left intact for inspection.
+Saved scripts still run with Pyto's app permissions, so review a program before running it.
+
+For a reusable program that needs values, `register_program` can store an `input_schema` with
+`text`, `number`, `choice`, `file` and `folder` fields. Its entry implements `def main(inputs)`.
+The chat Run action opens a form; terminal `/run ID` prompts for values, and Pyto uses its file
+and folder pickers. Values are validated for each run and are not stored in the program library.
+Only a stable, non-sensitive choice can have a stored default; text, numbers and paths are asked
+for each run. A terminal run can also receive explicit values:
+
+```bash
+python run.py --run-saved <program-id> \
+  --input folder=@pick \
+  --input group_by=extension \
+  --input collection_name=Organized \
+  --input max_files=200
+```
+
+`@pick` opens Pyto's picker for a file or folder field. Pass explicit values for other required
+fields on the command line; the terminal chat `/run ID` command prompts for missing values. A
+canceled form or picker does not start the program. The
+[`folder_organizer_app.py`](examples/folder_organizer_app.py) example previews each planned move
+and waits for a separate **Apply these moves** action before changing anything.
+
+---
+
+## 3c. Unix commands and saved tools
 
 Pyto embeds an `ios_system` command set and documents running commands with
 `subprocess.Popen`. The harness checks this Pyto build's `help` output with
@@ -363,15 +421,54 @@ is not importable, `--ui` prints why and exits with code 3 — you get the termi
 instead.
 
 The one design rule that matters: **the model call never runs on the UI thread.** The
-button handler starts a `threading.Thread`, and that thread pushes text back through
-`pyto_ui.main_thread`. A Pyto button handler that calls an API endpoint freezes the app
-until the response lands, which is how you get the watchdog to kill your process.
+button handler starts a `threading.Thread`, and Pyto's documented high-level PytoUI views
+can be updated from that worker while `ui.show_view` keeps the script alive. A Pyto button
+handler that calls an API endpoint freezes the app until the response lands.
 
 ---
 
 ## 5. Wiring iOS Shortcuts
 
-### (a) A Shortcut that runs the harness
+Pyto documents a **Run Script** action with script arguments, a **Show Console** setting,
+and a **Get Script Output** action. With the console hidden, scripts run asynchronously;
+Shortcuts can wait for the result with Get Script Output. See Pyto's
+[Shortcuts and x-callback documentation](https://pyto.readthedocs.io/en/latest/automation.html)
+for the behavior supported by the installed Pyto version.
+
+### (a) Run a saved batch program directly, without a model request
+
+First run and review the saved program in Pyto, then create a Shortcut:
+
+1. Add **Ask for Input** or **Choose from Menu** actions for the values the program needs.
+2. Add Pyto's **Run Script** action and choose this installation's `run.py`.
+3. Add these as separate script arguments: `--shortcut-run`, the saved program id,
+   `--allow-unattended-saved-programs`. For each declared field, add `--input` and a
+   `name=value` argument; pass a dynamic Shortcut value in place of `value`.
+4. Add **Get Script Output** to wait for and display the program's result.
+
+For example, with a saved program id `a1b2c3d4e5f6` and a required `title` field, its
+arguments are:
+
+```
+--shortcut-run a1b2c3d4e5f6 --allow-unattended-saved-programs --input title=<Shortcut Input>
+```
+
+In the Run Script action, configure each token/value as its own argument; do not build a
+shell command. Argument values are passed to the existing input validator, so spaces,
+Unicode and `=` characters are preserved. Required inputs must be supplied; invalid or
+missing values stop before the saved file is run. File and folder inputs must be paths
+Pyto can read. `NAME=@pick` is unavailable here because an unattended Shortcut cannot
+answer a picker; use a Pyto Run action for programs that need the native picker. Interactive
+app programs are also unavailable through this entry point.
+
+The `--allow-unattended-saved-programs` argument is a deliberate opt-in: the Shortcut runs
+that saved batch program without asking for approval on every invocation. Review its Python
+source before adding the flag. Saved Python executes in Pyto's app process and is not
+sandboxed. This option does not enable model-generated programs, `--yolo`, extra iOS
+permissions, or background daemons. If you cancel the Shortcut before its Run Script action,
+the program is not invoked; Pyto/iOS can still suspend or stop background work.
+
+### (b) A Shortcut that runs the harness
 
 This is the normal entry point: **Shortcuts → Automation → Run Script, with "Show
 Console" off.** The Shortcut passes its input on `sys.stdin`, and reads the script's
@@ -425,7 +522,7 @@ can execute code on your device without you seeing it, so use the flag only for 
 whose task and inputs you control — but prefer it to `--yolo`, which removes every
 approval.
 
-### (b) A Shortcut the harness runs
+### (c) A Shortcut the harness runs
 
 The agent has two tools for this. Both build a URL and hand it to iOS:
 
@@ -443,7 +540,7 @@ shortcuts://x-callback-url/run-shortcut?name=<name>&input=text&text=<input>&x-su
   *block* waiting for that round trip, so the tool reports the URL and where the answer
   will arrive rather than pretending it already has it.
 
-### (c) Other URL schemes the harness uses
+### (d) Other URL schemes the harness uses
 
 | Purpose | URL |
 |---|---|
@@ -468,9 +565,9 @@ Everything the agent can reach from these is listed by `python run.py --capabili
 | No `multiprocessing` | No parallelism across processes | Tool calls overlap on threads inside one process |
 | Scripts are stopped when free memory nears **~500 MB** (Pyto stops *all* of them) | An unbounded log or a chatty program crashes the session | Session logs compact near 4 000 events / 4 MB; tool output is capped and spilled; `memory_status` reports `os_proc_available_memory()` |
 | No background daemon; the app is **suspended then killed** | Nothing runs while you are elsewhere | Everything durable is a file; `keepalive_start` uses `background.BackgroundTask` for a short reprieve |
-| No PTY; Pyto's embedded shell commands run in-process | `input()`, curses and progress bars misbehave; commands cannot be reliably force-stopped | The harness offers a confirmed, read-only command subset with separate arguments and bounded inputs; programs get plain pipes |
+| No PTY; Pyto commands run in-process | `input()`, curses and progress bars misbehave; a command cannot be reliably force-stopped | The harness offers a confirmed, read-only subset with separate arguments and bounded inputs |
 | Clipboard works **only in the foreground** | Reading it from a background task fails | Documented in the tool description; the adapter reports the failure instead of guessing |
-| No Reminders / HealthKit / Bluetooth module | Those tasks are impossible from Python | Route them through a Shortcut you build; `shortcut_run` triggers it |
+| No supported high-level Reminders / HealthKit / Bluetooth wrapper | A framework name in Pyto's Objective-C list alone does not establish required permissions, entitlements or a working app flow | Prefer a Shortcut or exported data; add a direct bridge recipe only after an on-device check |
 | Optional third-party libraries vary; compiled packages cannot be added with `pip` | A package may not be installed on this device | `python_module_capabilities` checks candidates; use the standard library or another available module as a fallback |
 | Photo library, calendar, notifications, speech need **permission** | First call may be denied | Adapters report the denial; nothing is retried silently |
 | `background.BackgroundTask` is a **store-review grey area** (it plays silence to stay alive) | Apple has rejected apps for abusing it | Opt-in, labelled as such, and stopped as soon as the work is done |
@@ -494,7 +591,7 @@ applies the repairs a machine can and prints a before/after report. `--repair "<
 lets the model change the harness's own source, subject to a path jail, an AST/stdlib
 pre-check, a snapshot with hashes, and the offline test suite as the gate: a red suite
 reverts the edit byte-for-byte and hands back the failure verbatim. A bounded gate (~3 s,
-232 tests) is the default; `--deep-tests` asks for all 745.
+232 tests) is the default; `--deep-tests` asks for all 762.
 
 **The full story — the three tiers, the guardrail list, what is deliberately not automated,
 and a worked transcript — is in [SELF-REPAIR.md](SELF-REPAIR.md).**
@@ -569,10 +666,7 @@ harness/
   llm.py               chat-completions client: SSE, retries, cancellation, non-streaming fallback
   schema.py            JSON-Schema-subset validator (bool is not an integer)
   tools.py             tool registry: validation, approval, bounded timeout, concurrent dispatch
-  tools_ios.py         the 41 model-facing tools, including Unix and reusable custom tools
-  unix_tools.py        Pyto-aware command discovery and bounded read-only commands
-  custom_tools.py      persistent Python tools with schemas and per-run approval
-  module_tools.py      optional package availability checks without importing packages
+  tools_ios.py         the 44 model-facing tools, including saved programs, Unix and custom tools
   ios.py               device capability adapters, all degrading gracefully off-device
   loop.py              agent loop, system prompt, approval policy, result truncation
   session.py           append-only JSONL log: append, resume, projection, compaction
@@ -581,11 +675,12 @@ harness/
   budget.py            the size limits that keep iOS from killing the process
   textbudget.py        head/tail truncation with spill-to-file
   ui.py                Pyto UI window, terminal REPL, terminal approval prompt
+  programs.py          versioned, workspace-local saved-program metadata and actions
   doctor.py            self-diagnosis: 22 structured checks + the fixes a machine can apply
   repair.py            self-repair: path-jailed, snapshot-first, test-gated source edits
   pyto_api.py          Pyto library grounding: 25 modules / 160 members, curated + introspected
   errors.py            error taxonomy with retryability
-tests/                 745 offline tests against localhost mock servers
+tests/                 811 desktop tests, including a stdlib mock OpenAI server
 examples/              three programs the agent is expected to be able to write
 stdlib_audit.py        proves "stdlib only" and "parses as Python 3.10"
 ```
@@ -599,6 +694,7 @@ pyto_harness/                     the state directory (no leading dot: Files sho
   backups/                        signed source snapshots (harness/ + run.py only)
   health.json, capabilities.json  the last health pass, and what this device can do
 pyto_harness_workspace/           the agent's own files: programs, memory.json, tool-output/
+  pyto-programs.json              titles, entry paths, modes and latest verification results
 pyto_harness_home.txt             inside the install: the home this run remembered
 ```
 
@@ -615,7 +711,7 @@ read so their snapshots stay restorable.
 ## 10. Verifying it yourself
 
 ```bash
-python3 -m unittest discover -s tests -t .     # 745 tests, offline, no external network (~41 s)
+python3 -m unittest discover -s tests -t .     # 762 tests, offline, no external network
 python3 stdlib_audit.py                        # third_party_modules: [], 22 files parse at (3,10)
 python3 run.py --dry-run "hello"               # prints the request, sends nothing
 python3 run.py --paths                         # every resolved path and the rule that chose it

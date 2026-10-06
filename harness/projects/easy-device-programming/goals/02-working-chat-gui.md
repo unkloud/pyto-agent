@@ -24,7 +24,7 @@ Implemented 5 October 2026. The chat now presents through Pyto's documented `ui.
 
 The API check used the [Pyto UI guide](https://pyto.readthedocs.io/en/latest/library/pyto_ui.html), [Pyto's `pyto_ui` source](https://github.com/ColdGrub1384/Pyto/blob/main/Lib/pyto_ui.py) and [the separate `mainthread` API](https://pyto.readthedocs.io/en/latest/library/mainthread.html). Pyto documents that `show_view` blocks the Python script until the view closes and allows another thread to update PytoUI views. The harness uses only those high-level PytoUI wrappers; it does not call UIKit directly. No installed Pyto runtime or iOS device was available, so this source check does not establish behavior on the user's installed version.
 
-Desktop contract/lifecycle coverage verifies callback setup before presentation, consecutive turns, Stop, Close during a pending turn, the stream write barrier and session lifetime. The full suite passed: 721 tests in 40.432 seconds. The focused UI lifecycle set passed 4 tests.
+Desktop contract/lifecycle coverage verifies callback setup before presentation, consecutive turns, Stop, Close during a pending turn, the stream write barrier and session lifetime. The full suite passed: 738 tests in 39.706 seconds. The focused UI set passed 18 tests.
 
 ### Device acceptance checklist — still unverified
 

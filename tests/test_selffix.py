@@ -229,6 +229,7 @@ class TestRepairCommand(SelfFixTestCase):
             code, out = self.run_cli(
                 "--repair",
                 "make the model name wrong",
+                "--verbose",
                 "--api-base",
                 provider.api_base,
                 "--api-key",

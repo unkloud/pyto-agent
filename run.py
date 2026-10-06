@@ -29,12 +29,12 @@ import tempfile
 import threading
 import time
 import urllib.parse
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 # Allow `python run.py` from anywhere: the harness package sits next to this file.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from harness import __version__, doctor, home, ios, repair  # noqa: E402
+from harness import __version__, doctor, home, ios, program_inputs, programs, repair  # noqa: E402
 from harness.config import (  # noqa: E402
     Config,
     ConfigError,
@@ -60,7 +60,8 @@ from harness.loop import (  # noqa: E402
 from harness.session import SessionLog  # noqa: E402
 from harness.tools import ToolRegistry  # noqa: E402
 from harness.tools_ios import build_registry, default_context  # noqa: E402
-from harness.ui import Printer, TerminalApprover, open_session, run_turn_sync  # noqa: E402
+from harness.ui import Printer, TerminalApprover, UIApprover, open_session, run_turn_sync  # noqa: E402
+from harness.security import scrub_secrets  # noqa: E402
 
 #: Tools the ``--repair`` turn may use without an approval prompt.
 #:
@@ -205,6 +206,68 @@ def run_restore_command(args: argparse.Namespace) -> int:
     if result.warnings and any("LOUD" in warning for warning in result.warnings):
         print("\nThe restore completed, but the harness is still not healthy.", file=sys.stderr)
     return 0 if result.ok else 1
+
+
+def run_saved_program_command(
+    config: Config,
+    program_id: str = "",
+    *,
+    input_assignments: Sequence[str] = (),
+    shortcut: bool = False,
+    allow_unattended_saved_programs: bool = False,
+) -> int:
+    """List or explicitly run a registered program without creating a model client."""
+    if shortcut and not allow_unattended_saved_programs:
+        print(
+            "Shortcuts run without per-run approval. Review the saved Python source, then "
+            "add --allow-unattended-saved-programs to this Shortcut only if you intend "
+            "it to run unattended.",
+            file=sys.stderr,
+        )
+        return 2
+    if not shortcut and allow_unattended_saved_programs:
+        print("--allow-unattended-saved-programs is only valid with --shortcut-run PROGRAM_ID", file=sys.stderr)
+        return 2
+    try:
+        workspace_path = ensure_workspace(config)
+        context = default_context(workspace_path, config.spill_dir, config=config)
+        if not program_id:
+            if input_assignments:
+                raise programs.ProgramLibraryError("--input is only valid with --run-saved PROGRAM_ID")
+            print(scrub_secrets(programs.render_listing(context.workspace)))
+            return 0
+        record = programs.find_program(context.workspace, program_id)
+        if not record.get("entry_exists"):
+            raise programs.ProgramLibraryError(
+                "the entry file {} is missing. Restore it or update this record with register_program using id {} and its new workspace-relative path.".format(
+                    record["entry_file"], record["id"]
+                )
+                )
+        if shortcut and record.get("mode") != "batch":
+            raise programs.ProgramLibraryError(
+                "Shortcuts can launch saved batch programs only. This program is an interactive app; "
+                "run it from Pyto with --run-saved {} instead.".format(record["id"])
+            )
+        registry = build_registry(context)
+        input_values = None
+        if record.get("input_schema"):
+            try:
+                input_values = program_inputs.parse_cli_values(
+                    record["input_schema"], input_assignments, allow_picker=not shortcut
+                )
+            except program_inputs.ProgramInputError as exc:
+                raise programs.ProgramLibraryError(
+                    "{} Use --input NAME=VALUE for each required field; for a file or folder, use NAME=@pick."
+                    .format(exc)
+                ) from exc
+        elif input_assignments:
+            raise programs.ProgramLibraryError("this saved program has no input_schema, so --input is not accepted")
+        tool_result = programs.execute_saved(registry, record, input_values=input_values)
+        print(scrub_secrets(tool_result.content))
+        return 1 if tool_result.is_error else 0
+    except (ConfigError, OSError, programs.ProgramLibraryError) as exc:
+        print("saved-program action failed: {}".format(exc), file=sys.stderr)
+        return 1
 
 
 class RepairPrinter(Printer):
@@ -364,6 +427,9 @@ def build_parser() -> argparse.ArgumentParser:
             "  python run.py --doctor --fix\n"
             "  python run.py --repair \"the api_base keeps 404ing\"\n"
             "  python run.py --ui\n"
+            "  python run.py --programs\n"
+            "  python run.py --run-saved <program-id>\n"
+            "  python run.py --shortcut-run <program-id> --allow-unattended-saved-programs\n"
         ),
     )
     parser.add_argument("task", nargs="*", help="what the user wants done; omit for a chat REPL")
@@ -389,7 +455,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--workspace", help="workspace directory (default ~/pyto_harness_workspace)")
     parser.add_argument("--max-turns", type=int, help="model round trips per task (default 8)")
     parser.add_argument("--no-stream", action="store_true", help="use the non-streaming request path")
-    parser.add_argument("--verbose", action="store_true", help="show reasoning, usage and turn numbers")
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="show reasoning, usage, turn numbers, tool arguments, results and timings",
+    )
     parser.add_argument(
         "--no-compact",
         action="store_true",
@@ -403,6 +473,27 @@ def build_parser() -> argparse.ArgumentParser:
         "state, workspace, sessions, the pointer file and any duplicates",
     )
     parser.add_argument("--tools", action="store_true", help="list the tools and exit")
+    saved_group = parser.add_mutually_exclusive_group()
+    saved_group.add_argument("--programs", action="store_true", help="list saved programs and exit (no model request)")
+    saved_group.add_argument("--run-saved", metavar="PROGRAM_ID", help="run one saved program and exit (no model request or API key required)")
+    saved_group.add_argument(
+        "--shortcut-run",
+        metavar="PROGRAM_ID",
+        help="run one saved batch program for a Pyto Shortcuts Run Script action (requires the explicit unattended flag)",
+    )
+    parser.add_argument(
+        "--allow-unattended-saved-programs",
+        action="store_true",
+        help="with --shortcut-run, explicitly allow this saved Python program to run without per-run approval",
+    )
+    parser.add_argument(
+        "--input",
+        dest="program_inputs",
+        action="append",
+        default=[],
+        metavar="NAME=VALUE",
+        help="with --run-saved or --shortcut-run, submit a saved form value; use NAME=@pick for an interactive Pyto picker",
+    )
     parser.add_argument("--init", action="store_true", help="write a starter config file and exit")
     parser.add_argument(
         "--force",
@@ -591,6 +682,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     # the task text, so they are removed before parsing and read separately.
     cleaned = [item for item in raw_argv if not item.startswith("task=")]
     args = parser.parse_args(cleaned)
+    if args.allow_unattended_saved_programs and not args.shortcut_run:
+        parser.error("--allow-unattended-saved-programs requires --shortcut-run PROGRAM_ID")
     url_task = task_from_environment(raw_argv) or ""
     warn_about_argv_key(args)
 
@@ -640,7 +733,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         return run_restore_command(args)
 
     try:
-        config = resolve_config(args)
+        if args.programs or args.run_saved or args.shortcut_run:
+            config, config_error = resolve_config_lenient(args)
+            if config_error:
+                print("configuration warning: {} (using the resolved workspace anyway)".format(config_error), file=sys.stderr)
+        else:
+            config = resolve_config(args)
     except ConfigError as exc:
         print("configuration error: {}".format(exc), file=sys.stderr)
         return 2
@@ -659,6 +757,22 @@ def main(argv: Optional[List[str]] = None) -> int:
             print("\n{}  (timeout={}s)".format(tool.name, tool.timeout))
             print("  {}".format(tool.description))
         return 0
+
+    if args.programs:
+        return run_saved_program_command(config, input_assignments=args.program_inputs)
+    if args.run_saved:
+        return run_saved_program_command(config, args.run_saved, input_assignments=args.program_inputs)
+    if args.shortcut_run:
+        return run_saved_program_command(
+            config,
+            args.shortcut_run,
+            input_assignments=args.program_inputs,
+            shortcut=True,
+            allow_unattended_saved_programs=args.allow_unattended_saved_programs,
+        )
+    if args.program_inputs:
+        print("--input is only valid with --run-saved PROGRAM_ID", file=sys.stderr)
+        return 2
 
     task = " ".join(args.task).strip()
     if not task:
@@ -703,7 +817,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         print("could not open the session: {}".format(exc), file=sys.stderr)
         return 2
 
-    prompter = None if config.yolo else TerminalApprover()
+    prompter = None if config.yolo else (UIApprover() if args.ui else TerminalApprover())
     factory = make_options_factory(config, prompter=prompter, verbose=args.verbose, ui=bool(args.ui))
 
     approvals_line = (
@@ -727,7 +841,12 @@ def main(argv: Optional[List[str]] = None) -> int:
             from harness.ui import run_ui
 
             try:
-                run_ui(options_factory=factory, session=session)
+                run_ui(
+                    options_factory=factory,
+                    session=session,
+                    verbose=args.verbose,
+                    approver=prompter if isinstance(prompter, UIApprover) else None,
+                )
             except UnsupportedCapability as exc:
                 print("--ui is not available: {}".format(exc.message), file=sys.stderr)
                 print(banner)

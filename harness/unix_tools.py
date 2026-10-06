@@ -14,6 +14,7 @@ import shlex
 import shutil
 import subprocess
 import threading
+import time
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from . import ios
@@ -33,7 +34,122 @@ MAX_LINES = 1000
 MAX_FILE_BYTES = 1024 * 1024
 MAX_DIRECTORY_ENTRIES = 500
 MAX_FIND_ENTRIES = 500
-IN_PROCESS_EXECUTION_LOCK = threading.RLock()
+class _ExecutionLease:
+    """Ownership token for process-wide work that cannot be safely interrupted."""
+
+    def __init__(self, lane: "InProcessExecutionLane", operation: str) -> None:
+        self._lane = lane
+        self.operation = operation
+        self.started_at = time.monotonic()
+        self.worker: Optional[threading.Thread] = None
+        self.worker_started = False
+        self.deadline_exceeded = False
+        self.deadline_reason = ""
+        self.released = False
+
+    def bind_worker(self, worker: threading.Thread) -> None:
+        self._lane._bind(self, worker)
+
+    def mark_deadline_exceeded(self, reason: str = "the operation exceeded its wait limit") -> None:
+        self._lane._mark_deadline_exceeded(self, reason)
+
+    def release(self) -> None:
+        self._lane._release(self)
+
+
+class InProcessExecutionLane:
+    """Single owner for Pyto work that shares interpreter or native process state.
+
+    Unlike a lock held by the caller, this lease can outlive a timed-out wait. The
+    program worker releases it only after it has restored cwd, streams, argv and env.
+    New conflicting operations fail clearly while that worker is still alive.
+    """
+
+    def __init__(self) -> None:
+        self._guard = threading.Lock()
+        self._active: Optional[_ExecutionLease] = None
+
+    def _prune_locked(self) -> None:
+        # Only the worker that owns the lease releases it. A dead thread reference can
+        # briefly be visible while a replacement monitor is being attached.
+        return None
+
+    def acquire(self, operation: str) -> _ExecutionLease:
+        with self._guard:
+            self._prune_locked()
+            active = self._active
+            if active is not None:
+                age = max(0.0, time.monotonic() - active.started_at)
+                if active.deadline_exceeded:
+                    reason = active.deadline_reason or "it exceeded its wait limit"
+                    detail = "{} is still active because {} ({:.1f}s elapsed)".format(
+                        active.operation, reason, age
+                    )
+                else:
+                    detail = "{} is still active".format(active.operation)
+                raise ToolError(
+                    "cannot start {} while {}; wait for it to finish. If it does not finish, "
+                    "restart Pyto to restore a clean interpreter".format(operation, detail)
+                )
+            lease = _ExecutionLease(self, operation)
+            self._active = lease
+            return lease
+
+    def ensure_idle(self, operation: str) -> None:
+        """Refuse workspace reads while a timed-out in-process program may still write."""
+        with self._guard:
+            self._prune_locked()
+            active = self._active
+            if active is None:
+                return
+            if active.deadline_exceeded:
+                raise ToolError(
+                    "cannot {} while {} is still active because {}; its outcome may still "
+                    "change workspace files. Wait for it to finish or restart Pyto".format(
+                        operation, active.operation, active.deadline_reason or "it exceeded its wait limit"
+                    )
+                )
+
+    def _bind(self, lease: _ExecutionLease, worker: threading.Thread) -> None:
+        with self._guard:
+            if self._active is lease and not lease.released:
+                lease.worker = worker
+                lease.worker_started = True
+
+    def _mark_deadline_exceeded(self, lease: _ExecutionLease, reason: str) -> None:
+        with self._guard:
+            if self._active is lease and not lease.released:
+                lease.deadline_exceeded = True
+                lease.deadline_reason = str(reason)
+
+    def _release(self, lease: _ExecutionLease) -> None:
+        with self._guard:
+            lease.released = True
+            if self._active is lease:
+                self._active = None
+
+    def hold(self, operation: str):
+        """Return a context manager holding the lane for a synchronous operation."""
+        return _ExecutionLaneContext(self, operation)
+
+
+class _ExecutionLaneContext:
+    def __init__(self, lane: InProcessExecutionLane, operation: str) -> None:
+        self.lane = lane
+        self.operation = operation
+        self.lease: Optional[_ExecutionLease] = None
+
+    def __enter__(self) -> _ExecutionLease:
+        self.lease = self.lane.acquire(self.operation)
+        self.lease.bind_worker(threading.current_thread())
+        return self.lease
+
+    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+        if self.lease is not None:
+            self.lease.release()
+
+
+IN_PROCESS_EXECUTION_LANE = InProcessExecutionLane()
 
 _HELP_TOKEN = re.compile(r"(?<![A-Za-z0-9_-])([A-Za-z][A-Za-z0-9_-]*)(?![A-Za-z0-9_-])")
 _SHELL_META = re.compile(r"[\x00\r\n]")
@@ -72,7 +188,7 @@ def discover_commands(workspace: str) -> Dict[str, Any]:
     """Return commands confirmed by Pyto's `help` command or this desktop's PATH."""
     if ios.is_pyto():
         try:
-            with IN_PROCESS_EXECUTION_LOCK:
+            with IN_PROCESS_EXECUTION_LANE.hold("Pyto command discovery"):
                 process = subprocess.Popen(
                     ["help"],
                     cwd=workspace,
@@ -304,7 +420,7 @@ def run_command(
         raise ToolError("{} does not accept stdin_text".format(command))
 
     pyto = ios.is_pyto()
-    lock = IN_PROCESS_EXECUTION_LOCK if pyto else _NullLock()
+    lock = IN_PROCESS_EXECUTION_LANE.hold("Pyto command '{}'".format(command)) if pyto else _NullLock()
     with lock:
         process = subprocess.Popen(
             argv,

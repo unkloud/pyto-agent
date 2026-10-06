@@ -85,6 +85,33 @@ class _QuietServer(ThreadingHTTPServer):
         super().handle_error(request, client_address)
 
 
+def _invalid_tool_sequence(messages: Any) -> Optional[str]:
+    """Reject histories whose assistant tool calls lack exactly one result each."""
+    pending = set()
+    for index, message in enumerate(messages if isinstance(messages, list) else ()):
+        if not isinstance(message, dict):
+            continue
+        role = message.get("role")
+        if pending and role != "tool":
+            return "assistant tool calls are missing results before message {}".format(index)
+        if role == "assistant":
+            for call in message.get("tool_calls") or ():
+                call_id = call.get("id") if isinstance(call, dict) else None
+                if not isinstance(call_id, str) or not call_id:
+                    return "assistant tool call is missing an id"
+                if call_id in pending:
+                    return "assistant tool call id is duplicated: {}".format(call_id)
+                pending.add(call_id)
+        elif role == "tool":
+            call_id = message.get("tool_call_id")
+            if call_id not in pending:
+                return "tool result has no pending assistant declaration: {}".format(call_id)
+            pending.remove(call_id)
+    if pending:
+        return "assistant tool calls are missing results: {}".format(", ".join(sorted(pending)))
+    return None
+
+
 class _Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     server_version = "MockOpenAI/1.0"
@@ -110,6 +137,11 @@ class _Handler(BaseHTTPRequestHandler):
         with server.lock:
             server.requests.append(record)
             index = len(server.requests) - 1
+        if server.strict_tool_protocol:  # type: ignore[attr-defined]
+            invalid = _invalid_tool_sequence(body.get("messages")) if isinstance(body, dict) else None
+            if invalid:
+                self._send_json(400, {"error": {"message": "invalid tool-call sequence: {}".format(invalid)}})
+                return
         spec = server.spec_for(index, body)
         if spec is None:
             self._send_json(500, {"error": {"message": "mock script exhausted"}})
@@ -225,16 +257,19 @@ class MockProvider:
         *,
         repeat_last: bool = True,
         verbose: bool = False,
+        strict_tool_protocol: bool = False,
     ) -> None:
         self.script: List[Any] = list(script or [text_response("ok")])
         self.repeat_last = repeat_last
         self.verbose = verbose
+        self.strict_tool_protocol = strict_tool_protocol
         self.requests: List[Dict[str, Any]] = []
         # Reentrant: `messages_sent` and `tool_names_sent` are called in sequence by
         # tests, and a non-reentrant lock deadlocks the test runner itself.
         self.lock = threading.RLock()
         self._httpd = _QuietServer(("127.0.0.1", 0), _Handler)
         self._httpd.verbose = verbose  # type: ignore[attr-defined]
+        self._httpd.strict_tool_protocol = bool(strict_tool_protocol)  # type: ignore[attr-defined]
         self._httpd.lock = self.lock  # type: ignore[attr-defined]
         self._httpd.requests = self.requests  # type: ignore[attr-defined]
         self._httpd.spec_for = self._spec_for  # type: ignore[attr-defined]

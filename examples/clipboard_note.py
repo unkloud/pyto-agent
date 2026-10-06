@@ -26,7 +26,7 @@ import datetime
 import os
 import re
 import sys
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 URL = re.compile(r"https?://[^\s<>\"')]+")
 EMAIL = re.compile(r"[\w.+-]+@[\w-]+\.[\w.]+")
@@ -135,7 +135,39 @@ def default_note_path(workspace: str) -> str:
     return os.path.join(workspace, "notes", "{}.md".format(datetime.date.today().isoformat()))
 
 
-def main(argv: Optional[List[str]] = None) -> int:
+def append_note(target: str, text: str, note: str) -> str:
+    target = os.path.abspath(os.path.expanduser(target))
+    os.makedirs(os.path.dirname(target) or ".", exist_ok=True)
+    is_new = not os.path.exists(target)
+    with open(target, "a", encoding="utf-8") as handle:
+        if is_new:
+            handle.write("# Notes for {}\n\n".format(datetime.date.today().isoformat()))
+        handle.write(note)
+        handle.write("\n")
+    return "{} {} ({} line(s) classified).".format(
+        "Created" if is_new else "Appended to", target, len(text.splitlines())
+    )
+
+
+def main(argv: Optional[Any] = None) -> int:
+    """Run as a CLI script or as a registered ``main(inputs)`` batch program."""
+    if isinstance(argv, Mapping):
+        supplied_text = argv.get("text")
+        if supplied_text is None:
+            text, source = clipboard_text()
+        else:
+            text, source = str(supplied_text), "saved-program input"
+        text = text.strip()
+        if not text:
+            print("Nothing to file: the clipboard or text input was empty.", file=sys.stderr)
+            return 1
+        tags_value = argv.get("tags")
+        tags = [tag.strip() for tag in str(tags_value or "").split(",") if tag.strip()]
+        note = render_note(text, str(argv.get("title") or ""), tags, source)
+        target = default_note_path(os.path.dirname(os.path.abspath(__file__)))
+        print(append_note(target, text, note))
+        return 0
+
     parser = argparse.ArgumentParser(description="Turn the clipboard into a structured note.")
     parser.add_argument("--title", default="", help="heading for this entry")
     parser.add_argument("--tags", default="", help="comma-separated tags")
@@ -173,15 +205,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(note)
         return 0
 
-    target = os.path.abspath(os.path.expanduser(args.out or default_note_path(args.workspace)))
-    os.makedirs(os.path.dirname(target) or ".", exist_ok=True)
-    is_new = not os.path.exists(target)
-    with open(target, "a", encoding="utf-8") as handle:
-        if is_new:
-            handle.write("# Notes for {}\n\n".format(datetime.date.today().isoformat()))
-        handle.write(note)
-        handle.write("\n")
-    print("{} {} ({} line(s) classified).".format("Created" if is_new else "Appended to", target, len(text.splitlines())))
+    target = args.out or default_note_path(args.workspace)
+    print(append_note(target, text, note))
     return 0
 
 

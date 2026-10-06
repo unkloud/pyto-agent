@@ -12,6 +12,7 @@ from harness.session import (
     SessionHeader,
     SessionLog,
     assistant_message_event,
+    completed_tool_event,
     project,
     read_log,
     redact,
@@ -148,6 +149,87 @@ class TestProjection(TempDirTestCase):
         log.close()
         self.assertEqual([m["role"] for m in messages], ["user", "assistant", "tool"])
         self.assertEqual(messages[1]["tool_calls"][0]["id"], "c1")
+
+
+class TestInterruptedToolRecovery(TempDirTestCase):
+    @staticmethod
+    def assistant_with_calls(*call_ids_and_names):
+        return assistant_message_event(
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": call_id,
+                        "type": "function",
+                        "function": {"name": name, "arguments": "{}"},
+                    }
+                    for call_id, name in call_ids_and_names
+                ],
+            }
+        )
+
+    def test_intent_without_start_is_not_replayed_and_reconciliation_is_idempotent(self) -> None:
+        log = self.make_session()
+        log.append("message.user", user_message_event("do the action"))
+        log.append("message.assistant", self.assistant_with_calls(("c1", "write_program")))
+        log.append("tool.intent", {"id": "c1", "name": "write_program", "arguments": {"path": "x.py"}})
+
+        recovered = log.reconcile_tool_calls()
+        self.assertEqual([row["state"] for row in recovered], ["not_started"])
+        projected = log.project()
+        self.assertEqual([message["role"] for message in projected], ["user", "assistant", "tool"])
+        self.assertIn("before this operation was launched", projected[-1]["content"])
+        self.assertEqual(log.events[-1].data["recovery"]["state"], "not_started")
+        log.close()
+
+        resumed = SessionLog.resume(log.path)
+        self.assertEqual(resumed.reconcile_tool_calls(), [])
+        self.assertEqual(resumed.project(), projected)
+        resumed.close()
+
+    def test_started_action_without_saved_result_is_reported_as_unknown(self) -> None:
+        log = self.make_session()
+        log.append("message.user", user_message_event("do the action"))
+        log.append("message.assistant", self.assistant_with_calls(("c1", "calendar_add_event")))
+        log.append("tool.intent", {"id": "c1", "name": "calendar_add_event"})
+        log.append("tool.started", {"id": "c1", "name": "calendar_add_event"})
+
+        recovered = log.reconcile_tool_calls()
+        self.assertEqual([row["state"] for row in recovered], ["unknown"])
+        self.assertIn("not run again", recovered[0]["message"])
+        self.assertIn("Outcome unknown", log.project()[-1]["content"])
+        log.close()
+
+    def test_partial_batch_projects_saved_results_and_marks_only_missing_result_unknown(self) -> None:
+        log = self.make_session()
+        log.append("message.user", user_message_event("run two actions"))
+        log.append(
+            "message.assistant",
+            self.assistant_with_calls(("c1", "write_program"), ("c2", "run_program")),
+        )
+        log.append("tool.intent", {"id": "c1", "name": "write_program"})
+        log.append("tool.started", {"id": "c1", "name": "write_program"})
+        log.append(
+            "tool.completed",
+            completed_tool_event(
+                {"role": "tool", "tool_call_id": "c1", "name": "write_program", "content": "saved file"},
+                id="c1",
+                name="write_program",
+                is_error=False,
+            ),
+        )
+        log.append("tool.intent", {"id": "c2", "name": "run_program"})
+        log.append("tool.started", {"id": "c2", "name": "run_program"})
+
+        recovered = log.reconcile_tool_calls()
+        self.assertEqual([(row["tool"], row["state"]) for row in recovered], [("run_program", "unknown")])
+        projected = log.project()
+        self.assertEqual([message["role"] for message in projected], ["user", "assistant", "tool", "tool"])
+        self.assertEqual([message["tool_call_id"] for message in projected[2:]], ["c1", "c2"])
+        self.assertEqual(projected[2]["content"], "saved file")
+        self.assertIn("Outcome unknown", projected[3]["content"])
+        log.close()
 
     def test_telemetry_never_projects(self) -> None:
         log = self.make_session()

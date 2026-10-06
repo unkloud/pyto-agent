@@ -107,6 +107,14 @@ class ToolDef:
     #: Human-readable hazard note, surfaced by the approval prompt and the policy.
     danger: Optional[str] = None
     is_async: bool = False
+    #: Workspace/process resources read or written by the tool. Within one model batch,
+    #: reads can overlap; a write waits for prior readers and writers, then blocks later
+    #: accesses until it finishes.
+    resource_reads: Tuple[str, ...] = ()
+    resource_writes: Tuple[str, ...] = ()
+    #: True when the handler itself reserves/releases the Pyto execution lane, or owns
+    #: a nested program runner that does so.
+    manages_execution_lane: bool = False
 
     def schema(self) -> Dict[str, Any]:
         """The OpenAI ``tools[]`` entry for this tool."""
@@ -169,6 +177,9 @@ class ToolRegistry:
         timeout: Optional[float] = DEFAULT_TOOL_TIMEOUT,
         inline: bool = False,
         danger: Optional[str] = None,
+        resource_reads: Sequence[str] = (),
+        resource_writes: Sequence[str] = (),
+        manages_execution_lane: bool = False,
     ) -> Callable[[ToolHandler], ToolHandler]:
         """Decorator form of :meth:`register`."""
 
@@ -182,6 +193,9 @@ class ToolRegistry:
                     timeout=timeout,
                     inline=inline,
                     danger=danger,
+                    resource_reads=tuple(dict.fromkeys(str(item) for item in resource_reads if item)),
+                    resource_writes=tuple(dict.fromkeys(str(item) for item in resource_writes if item)),
+                    manages_execution_lane=bool(manages_execution_lane),
                 )
             )
             return handler
@@ -405,7 +419,35 @@ class ToolRegistry:
             return await self._bounded_async(tool, tool.handler(**dict(args)))
         if tool.inline:
             return self._finish(tool.handler(**dict(args)))
-        return await asyncio.to_thread(_invoke_bounded, tool.handler, dict(args), tool.timeout, tool.name)
+
+        def invoke() -> ToolResult:
+            # The guard runs inside `_invoke_bounded`'s target thread, so the lease
+            # remains owned if the registry has to abandon that thread after a timeout.
+            return _invoke_bounded(guarded, dict(args), tool.timeout, tool.name)
+
+        def guarded(**call_args: Any) -> Any:
+            # Called by `_invoke_bounded`'s target thread, so the execution lease remains
+            # owned by that thread until the actual handler has returned.
+            try:
+                from . import ios, unix_tools
+
+                if ios.is_pyto() and not tool.manages_execution_lane:
+                    if tool.resource_writes and (
+                        "workspace" in tool.resource_writes or "pyto_process" in tool.resource_writes
+                    ):
+                        with unix_tools.IN_PROCESS_EXECUTION_LANE.hold(
+                            "{} operation".format(tool.name.replace("_", " "))
+                        ):
+                            return tool.handler(**call_args)
+                    if "workspace" in tool.resource_reads:
+                        unix_tools.IN_PROCESS_EXECUTION_LANE.ensure_idle(
+                            "read the workspace with {}".format(tool.name.replace("_", " "))
+                        )
+            except ImportError:
+                pass
+            return tool.handler(**call_args)
+
+        return await asyncio.to_thread(invoke)
 
     async def _bounded_async(self, tool: ToolDef, awaitable: Any) -> ToolResult:
         if tool.timeout is None:
@@ -440,14 +482,52 @@ class ToolRegistry:
         "the model asked for 12 reads" not become 12 simultaneous file handles.
         """
         semaphore = asyncio.Semaphore(max(1, max_parallel))
+        last_writers: Dict[str, "asyncio.Task[Any]"] = {}
+        active_readers: Dict[str, List["asyncio.Task[Any]"]] = {}
 
-        async def run(call_id: str, name: str, args: Mapping[str, Any]) -> Tuple[str, ToolResult]:
+        async def run(
+            call_id: str,
+            name: str,
+            args: Mapping[str, Any],
+            dependencies: Sequence["asyncio.Task[Any]"],
+        ) -> Tuple[str, ToolResult]:
+            if dependencies:
+                await asyncio.gather(*dependencies, return_exceptions=True)
             async with semaphore:
                 # `invoke` (not `execute`): a batch caller has not consulted the policy,
                 # so the registry must.
                 return call_id, await self.invoke(name, args)
 
-        tasks = [asyncio.ensure_future(run(cid, name, args)) for cid, name, args in calls]
+        tasks: List["asyncio.Task[Any]"] = []
+        for call_id, name, args in calls:
+            try:
+                tool = self.get(name)
+            except ToolError:
+                reads: Tuple[str, ...] = ()
+                writes: Tuple[str, ...] = ()
+            else:
+                writes = tool.resource_writes
+                reads = tuple(resource for resource in tool.resource_reads if resource not in writes)
+            dependencies: List["asyncio.Task[Any]"] = []
+            for resource in reads:
+                prior = last_writers.get(resource)
+                if prior is not None and prior not in dependencies:
+                    dependencies.append(prior)
+            for resource in writes:
+                prior = last_writers.get(resource)
+                if prior is not None and prior not in dependencies:
+                    dependencies.append(prior)
+                for reader in active_readers.get(resource, ()):
+                    if reader not in dependencies:
+                        dependencies.append(reader)
+
+            task = asyncio.ensure_future(run(call_id, name, args, dependencies))
+            tasks.append(task)
+            for resource in reads:
+                active_readers.setdefault(resource, []).append(task)
+            for resource in writes:
+                last_writers[resource] = task
+                active_readers[resource] = []
         if not tasks:
             return []
         gathered = await asyncio.gather(*tasks, return_exceptions=True)

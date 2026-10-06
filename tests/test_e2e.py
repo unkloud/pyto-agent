@@ -12,10 +12,10 @@ import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from unittest import mock
 
-from harness import home
+from harness import home, programs
 from harness.loop import LoopOptions, run_turn
 from harness.session import SessionLog
-from harness.tools_ios import build_registry, default_context
+from harness.tools_ios import Workspace, build_registry, default_context
 
 from .mock_provider import MockProvider, text_response, tool_response
 from .support import ROOT, TempDirTestCase, make_client
@@ -55,7 +55,7 @@ class TestDryRun(TempDirTestCase):
 
     def test_dry_run_lists_the_tools_that_would_be_offered(self) -> None:
         _, out, _ = self.run_cli("--dry-run", "anything")
-        for tool in ("write_program", "run_program", "finish", "shortcut_run", "memory_write"):
+        for tool in ("write_program", "register_program", "list_saved_programs", "run_program", "finish", "shortcut_run", "memory_write"):
             self.assertIn(tool, out)
 
     def test_dry_run_never_leaks_the_key(self) -> None:
@@ -105,6 +105,7 @@ class TestDryRun(TempDirTestCase):
         self.assertEqual(code, 0)
         self.assertIn("write_program", out)
 
+
     def test_missing_key_is_an_error_with_instructions(self) -> None:
         code, out, err = self.run_cli("do something", env={"DEEPSEEK_API_KEY": ""})
         self.assertEqual(code, 2)
@@ -124,6 +125,70 @@ class TestDryRun(TempDirTestCase):
     def test_yolo_shows_in_the_preview(self) -> None:
         _, out, _ = self.run_cli("--dry-run", "--yolo", "hello")
         self.assertIn("bypassed (--yolo)", out)
+
+
+class TestSavedProgramCli(TempDirTestCase):
+    def make_saved_program(self) -> str:
+        workspace = Workspace(self.workspace_dir)
+        path = workspace.resolve("hello saved.py")
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write("print('model credentials are not needed')\n")
+        return programs.register(
+            workspace,
+            title="Hello saved",
+            purpose="Print a short confirmation.",
+            entry_file="hello saved.py",
+            mode="batch",
+        )["id"]
+
+    def run_cli(self, *args: str):
+        import run as runner
+
+        stdout, stderr = io.StringIO(), io.StringIO()
+        saved = dict(os.environ)
+        os.environ.clear()
+        os.environ.update({"PYTO_HARNESS_CONFIG": self.path("missing-config.json"), "PYTO_HARNESS_NO_DOCTOR": "1"})
+        try:
+            with redirect_stdout(stdout), redirect_stderr(stderr):
+                code = runner.main(list(args) + ["--workspace", self.workspace_dir])
+        finally:
+            os.environ.clear()
+            os.environ.update(saved)
+        return code, stdout.getvalue(), stderr.getvalue()
+
+    def test_program_list_is_available_without_a_model_key(self) -> None:
+        identifier = self.make_saved_program()
+        code, out, err = self.run_cli("--programs")
+        self.assertEqual(code, 0, err)
+        self.assertIn(identifier, out)
+        self.assertIn("Hello saved", out)
+
+    def test_saved_batch_run_is_available_without_provider_credentials_or_request(self) -> None:
+        import run as runner
+
+        identifier = self.make_saved_program()
+        with mock.patch.object(runner, "client_from_config", side_effect=AssertionError("must not create a model client")):
+            code, out, err = self.run_cli("--run-saved", identifier)
+        self.assertEqual(code, 0, err)
+        self.assertIn("model credentials are not needed", out)
+        self.assertNotIn("No API key found", err)
+
+    def test_saved_input_program_runs_with_cli_values_without_provider_credentials(self) -> None:
+        workspace = Workspace(self.workspace_dir)
+        path = workspace.resolve("typed_input.py")
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write("def main(inputs):\n    print(type(inputs['count']).__name__, inputs['count'])\n")
+        identifier = programs.register(
+            workspace,
+            title="Typed input",
+            purpose="Print a validated number.",
+            entry_file="typed_input.py",
+            mode="batch",
+            input_schema=[{"name": "count", "label": "Count", "type": "number", "integer": True}],
+        )["id"]
+        code, out, err = self.run_cli("--run-saved", identifier, "--input", "count=9")
+        self.assertEqual(code, 0, err)
+        self.assertIn("int 9", out)
 
 
 class TestCliEndToEnd(TempDirTestCase):

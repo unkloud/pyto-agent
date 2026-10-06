@@ -37,6 +37,7 @@ class TestUIStream(unittest.TestCase):
         view = self.TextView()
         output = _UIStream(view)
         output.write("before")
+        output.flush(force=True)
         output.close()
         assignments = view.assignment_count
         output.write("after")
@@ -54,8 +55,10 @@ class TestUIStream(unittest.TestCase):
             def text(self, _value):
                 raise RuntimeError("view update failed")
 
+        output = _UIStream(BrokenView())
+        output.write("chat text")
         with self.assertRaisesRegex(RuntimeError, "view update failed"):
-            _UIStream(BrokenView()).write("chat text")
+            output.flush(force=True)
 
 
 class TestPytoChatLifecycle(unittest.TestCase):
@@ -125,6 +128,10 @@ class TestPytoChatLifecycle(unittest.TestCase):
         def __init__(self) -> None:
             self.closed = False
             self.events = []
+            self.messages = []
+
+        def project(self):
+            return list(self.messages)
 
         def append(self, event: str) -> None:
             if self.closed:
