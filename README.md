@@ -16,7 +16,7 @@ file into a workspace on the device, runs it, and tells you what happened.
 * **Survives the app being killed.** Every turn is appended to a JSONL session log, so
   `--resume` picks up exactly where iOS interrupted you.
 
-**Latest published release: v1.0.11.** It adds managed execution, in-app approvals, interruption recovery, interactive previews, saved programs and inputs, project memory, responsive phone chat, platform-aware guidance, read-only Objective-C recipes, an opt-in saved-program Shortcuts path, and novice workflow safeguards. The release passed 875 desktop tests; native Pyto/iOS acceptance remains pending. See the [release notes](RELEASE-NOTES-v1.0.11.md) and [device goal checklists](harness/projects/easy-device-programming/goals/).
+**Latest published release: v1.0.12.** It includes the v1.0.11 harness changes and adds the Pyto device diagnostic script to the tagged source package. The underlying harness passed 875 desktop tests in v1.0.11; native Pyto/iOS acceptance remains pending. See the [release notes](RELEASE-NOTES-v1.0.12.md) and [device goal checklists](harness/projects/easy-device-programming/goals/).
 
 ---
 
@@ -26,7 +26,7 @@ Choose one option. Each Python block is a complete script: copy the whole block 
 
 ### Option A — Install the latest release (recommended)
 
-This automatically finds the newest stable release on GitHub. It currently installs v1.0.11, and the same script will keep working for later releases.
+This automatically finds the newest stable release on GitHub. It currently installs v1.0.12, whose source archive includes `device_release_diagnostic.py` beside `run.py` and `harness/`.
 
 ```python
 import json
@@ -48,25 +48,11 @@ with urllib.request.urlopen(installer_url, timeout=120) as response:
     with open("install.py", "wb") as installer:
         installer.write(response.read())
 
-bundle_name = "pyto-agent-" + tag + "-diagnostic-bundle.zip"
-bundle = next((item for item in release.get("assets", []) if item.get("name") == bundle_name), None)
-if bundle:
-    bundle_path = "pyto-agent-release.zip"
-    request = urllib.request.Request(bundle["browser_download_url"], headers={"User-Agent": "pyto-harness"})
-    with urllib.request.urlopen(request, timeout=180) as response:
-        with open(bundle_path, "wb") as archive:
-            archive.write(response.read())
-    sys.argv = ["install.py", "--ref", tag, "--zip", bundle_path]
-    digest = bundle.get("digest", "")
-    if digest.startswith("sha256:"):
-        sys.argv.extend(["--sha256", digest.split(":", 1)[1]])
-    print("Installing the diagnostic-inclusive release bundle.")
-else:
-    sys.argv = ["install.py", "--ref", tag]
+sys.argv = ["install.py", "--ref", tag]
 runpy.run_path("install.py", run_name="__main__")
 ```
 
-### Option B — Install v1.0.11 exactly
+### Option B — Install v1.0.12 exactly
 
 Use this if you want this specific release, even after a newer one is available.
 
@@ -75,33 +61,23 @@ import runpy
 import sys
 import urllib.request
 
-tag = "v1.0.11"
+tag = "v1.0.12"
 installer_url = "https://raw.githubusercontent.com/unkloud/pyto-agent/" + tag + "/install.py"
 with urllib.request.urlopen(installer_url, timeout=120) as response:
     with open("install.py", "wb") as installer:
         installer.write(response.read())
 
-bundle_url = "https://github.com/unkloud/pyto-agent/releases/download/v1.0.11/pyto-agent-v1.0.11-diagnostic-bundle.zip"
-with urllib.request.urlopen(bundle_url, timeout=180) as response:
-    with open("pyto-agent-v1.0.11-diagnostic-bundle.zip", "wb") as archive:
-        archive.write(response.read())
-
-sys.argv = [
-    "install.py",
-    "--ref", tag,
-    "--zip", "pyto-agent-v1.0.11-diagnostic-bundle.zip",
-    "--sha256", "4c886c281533628b5ad93d0069221c95a67dfe921ae81330ff352ee7880d8ee2",
-]
+sys.argv = ["install.py", "--ref", tag]
 runpy.run_path("install.py", run_name="__main__")
 ```
 
-### Option C — Install v1.0.11 from Files or AirDrop
+### Option C — Install v1.0.12 from Files or AirDrop
 
-Use this if you downloaded the files in Safari or received them from someone else. The bundle includes `device_release_diagnostic.py` beside `run.py` and `harness/`. Download both files to Files, then run the script below. Pyto will ask you to choose the installer first and the ZIP file second. You do not need to rename either file or type a path.
+Use this if you downloaded the files in Safari or received them from someone else. The source ZIP includes `device_release_diagnostic.py` beside `run.py` and `harness/`. Download both files to Files, then run the script below. Pyto will ask you to choose the installer first and the ZIP file second. You do not need to rename either file or type a path.
 
-- [Download the v1.0.11 installer](https://raw.githubusercontent.com/unkloud/pyto-agent/v1.0.11/install.py)
-- [Download the v1.0.11 diagnostic-inclusive bundle](https://github.com/unkloud/pyto-agent/releases/download/v1.0.11/pyto-agent-v1.0.11-diagnostic-bundle.zip)
-- [Download only the diagnostic script](https://github.com/unkloud/pyto-agent/releases/download/v1.0.11/device_release_diagnostic_v1.0.11.py)
+- [Download the v1.0.12 installer](https://raw.githubusercontent.com/unkloud/pyto-agent/v1.0.12/install.py)
+- [Download the v1.0.12 source ZIP](https://github.com/unkloud/pyto-agent/archive/refs/tags/v1.0.12.zip)
+- [Download only the diagnostic script](https://github.com/unkloud/pyto-agent/releases/download/v1.0.12/device_release_diagnostic_v1.0.12.py)
 
 ```python
 import file_system as fs
@@ -112,9 +88,8 @@ installer_path = fs.import_file()
 archive_path = fs.import_file()
 sys.argv = [
     installer_path,
-    "--ref", "v1.0.11",
+    "--ref", "v1.0.12",
     "--zip", archive_path,
-    "--sha256", "4c886c281533628b5ad93d0069221c95a67dfe921ae81330ff352ee7880d8ee2",
 ]
 runpy.run_path(installer_path, run_name="__main__")
 ```
