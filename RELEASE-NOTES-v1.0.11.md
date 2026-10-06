@@ -1,8 +1,7 @@
-# pyto-harness v1.0.11 candidate
+# pyto-harness v1.0.11
 
-Prepared 6 October 2026; not released. The latest published release is
-v1.0.8. This candidate includes the execution, approval, recovery, preview, saved-program,
-input, project-memory, phone-chat and agent-workflow changes recorded in the
+Released 6 October 2026. This release includes the execution, approval, recovery, preview,
+saved-program, input, project-memory, phone-chat and agent-workflow changes recorded in the
 [v1.0.9 notes](RELEASE-NOTES-v1.0.9.md) and [v1.0.10 notes](RELEASE-NOTES-v1.0.10.md).
 
 ## Run saved batch programs from Shortcuts
