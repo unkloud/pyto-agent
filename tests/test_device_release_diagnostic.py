@@ -55,6 +55,27 @@ class TestDeviceReleaseDiagnostic(unittest.TestCase):
         self.assertEqual(report.count("**Status:** `NOT RUN`"), len(diagnostic.MANUAL_CHECKS))
         self.assertEqual(report.count("| **PASS** | one fixture passed |"), len(diagnostic.SCRIPTED_TEST_GROUPS))
 
+    def test_safe_test_failure_keeps_exception_detail_and_redacts_private_values(self) -> None:
+        class FailedCase:
+            @staticmethod
+            def id() -> str:
+                return "suite.TestDeviceCase.test_failure"
+
+        summary = diagnostic._safe_test_failure(
+            FailedCase(),
+            "Traceback (most recent call last):\n"
+            "  File '/private/var/mobile/user data/test.py', line 12\n"
+            "AssertionError: got /private/var/mobile/user data sk-12345678901234567890 "
+            "https://user:pass@example.test/path",
+        )
+        self.assertIn("test_failure (AssertionError:", summary)
+        self.assertIn("<path>", summary)
+        self.assertIn("<redacted>", summary)
+        self.assertIn("<URL>", summary)
+        self.assertNotIn("/private/var/mobile", summary)
+        self.assertNotIn("sk-12345678901234567890", summary)
+        self.assertNotIn("user:pass", summary)
+
 
 if __name__ == "__main__":
     unittest.main()

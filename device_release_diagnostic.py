@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Create a private, shareable Pyto/iOS acceptance report for release v1.0.15.
+"""Create a private, shareable Pyto/iOS acceptance report for release v1.0.16.
 
 Save this file beside ``run.py`` in the installed pyto-agent folder, open it in Pyto,
 and press Run. It uses only the standard library and the harness already in that folder.
@@ -36,7 +36,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 
-RELEASE_VERSION = "1.0.15"
+RELEASE_VERSION = "1.0.16"
 
 # These are deliberately narrow, offline checks. They run in Pyto's Python process against
 # disposable test workspaces; they do not simulate or certify native UI behavior. Keep the
@@ -300,9 +300,12 @@ def _run_test_group(title: str, scope: str, cases: Sequence[str]) -> Dict[str, s
         detail = "No scripted cases ran. {}".format(scope)
     elif result.failures or result.errors:
         status = "FAIL"
-        failed = [test.id().rsplit(".", 1)[-1] for test, _message in result.failures + result.errors]
-        detail = "{} case(s) failed or errored: {}. Failure text omitted to avoid recording local paths. {}".format(
-            len(failed), ", ".join(failed), scope
+        failures = [
+            _safe_test_failure(test, message)
+            for test, message in result.failures + result.errors
+        ]
+        detail = "{} case(s) failed or errored: {}. Safe failure summaries omit local paths and credentials. {}".format(
+            len(failures), "; ".join(failures), scope
         )
     elif result.skipped:
         status = "WARN"
@@ -313,6 +316,22 @@ def _run_test_group(title: str, scope: str, cases: Sequence[str]) -> Dict[str, s
         status = "PASS"
         detail = "{} case(s) passed in {} ms. {}".format(result.testsRun, elapsed_ms, scope)
     return {"title": title, "status": status, "detail": detail}
+
+
+def _safe_test_failure(test: Any, traceback_text: str) -> str:
+    """Keep a short exception summary useful for device debugging without local secrets."""
+    lines = [line.strip() for line in str(traceback_text).splitlines() if line.strip()]
+    exception = lines[-1] if lines else "unknown test failure"
+    try:
+        from harness import security
+
+        exception = security.scrub_secrets(exception)
+    except Exception:
+        pass
+    exception = _redact(exception, None)
+    exception = exception[:180] + ("..." if len(exception) > 180 else "")
+    name = test.id().rsplit(".", 1)[-1]
+    return "{} ({})".format(name, exception)
 
 
 def _run_objc_recipe(root: Path) -> Dict[str, str]:
