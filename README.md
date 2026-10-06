@@ -16,7 +16,7 @@ file into a workspace on the device, runs it, and tells you what happened.
 * **Survives the app being killed.** Every turn is appended to a JSONL session log, so
   `--resume` picks up exactly where iOS interrupted you.
 
-**Latest published release: v1.0.14.** It follows Pyto's property-style `UIDevice.currentDevice` access, keeps the documented `file_system` sharing fix, and reports Objective-C probe stages independently. Native Pyto/iOS acceptance remains pending. See the [release notes](RELEASE-NOTES-v1.0.14.md) and [device goal checklists](harness/projects/easy-device-programming/goals/).
+**Latest published release: v1.0.15.** Its device diagnostic now runs seven focused, offline behavior checks on the installed Pyto runtime and keeps native UI acceptance separate. See the [release notes](RELEASE-NOTES-v1.0.15.md) and [device goal checklists](harness/projects/easy-device-programming/goals/).
 
 ---
 
@@ -26,7 +26,7 @@ Choose one option. Each Python block is a complete script: copy the whole block 
 
 ### Option A — Install the latest release (recommended)
 
-This automatically finds the newest stable release on GitHub. It installs v1.0.14, whose source archive includes `device_release_diagnostic.py` beside `run.py` and `harness/`.
+This automatically finds the newest stable release on GitHub. It installs v1.0.15, whose source archive includes `device_release_diagnostic.py` beside `run.py` and `harness/`.
 
 ```python
 import json
@@ -52,7 +52,7 @@ sys.argv = ["install.py", "--ref", tag]
 runpy.run_path("install.py", run_name="__main__")
 ```
 
-### Option B — Install v1.0.14 exactly
+### Option B — Install v1.0.15 exactly
 
 Use this if you want this specific release, even after a newer one is available.
 
@@ -61,7 +61,7 @@ import runpy
 import sys
 import urllib.request
 
-tag = "v1.0.14"
+tag = "v1.0.15"
 installer_url = "https://raw.githubusercontent.com/unkloud/pyto-agent/" + tag + "/install.py"
 with urllib.request.urlopen(installer_url, timeout=120) as response:
     with open("install.py", "wb") as installer:
@@ -71,13 +71,13 @@ sys.argv = ["install.py", "--ref", tag]
 runpy.run_path("install.py", run_name="__main__")
 ```
 
-### Option C — Install v1.0.14 from Files or AirDrop
+### Option C — Install v1.0.15 from Files or AirDrop
 
 Use this if you downloaded the files in Safari or received them from someone else. The source ZIP includes `device_release_diagnostic.py` beside `run.py` and `harness/`. Download both files to Files, then run the script below. Pyto will ask you to choose the installer first and the ZIP file second. You do not need to rename either file or type a path.
 
-- [Download the v1.0.14 installer](https://raw.githubusercontent.com/unkloud/pyto-agent/v1.0.14/install.py)
-- [Download the v1.0.14 source ZIP](https://github.com/unkloud/pyto-agent/archive/refs/tags/v1.0.14.zip)
-- [Download only the diagnostic script](https://github.com/unkloud/pyto-agent/releases/download/v1.0.14/device_release_diagnostic_v1.0.14.py)
+- [Download the v1.0.15 installer](https://raw.githubusercontent.com/unkloud/pyto-agent/v1.0.15/install.py)
+- [Download the v1.0.15 source ZIP](https://github.com/unkloud/pyto-agent/archive/refs/tags/v1.0.15.zip)
+- [Download only the diagnostic script](https://github.com/unkloud/pyto-agent/releases/download/v1.0.15/device_release_diagnostic_v1.0.15.py)
 
 ```python
 import file_system as fs
@@ -88,7 +88,7 @@ installer_path = fs.import_file()
 archive_path = fs.import_file()
 sys.argv = [
     installer_path,
-    "--ref", "v1.0.14",
+    "--ref", "v1.0.15",
     "--zip", archive_path,
 ]
 runpy.run_path(installer_path, run_name="__main__")
@@ -119,6 +119,12 @@ The installer asks for your API key. Paste it at the prompt; it will not be show
 When setup finishes, open the new start.py file in Pyto and tap Run to start the agent. You do not need to copy a printed command.
 
 Your settings, chat history and programs stay in their own folders when you update the app.
+
+### Run the on-device diagnostic
+
+After installing v1.0.15, open `device_release_diagnostic.py` from the pyto-agent folder in Pyto and tap Run. It writes a Markdown report beside the script. The report includes seven offline behavior checks for execution, saved programs, inputs, simulated recovery, project context, Objective-C recipes and the Shortcuts saved-run contract. They use disposable test data and make no model or network requests.
+
+The report keeps native UI checks as `NOT RUN`; a scripted pass does not verify approvals, pickers, app layout, force-quit behavior or the Shortcuts app handoff.
 
 ### Update an existing installation
 
@@ -588,7 +594,7 @@ resuming a conversation after the app was killed.
 
 ## 6a. Diagnosing and repairing itself
 
-`--doctor` runs 22 checks (interpreter, imports, stdlib-only, the home folder and its
+`--doctor` runs 23 checks (interpreter, imports, stdlib-only, the home folder and its
 state directory, config, key shape, DNS/TLS, auth, model, workspace, session-log integrity,
 memory, iOS modules and call shapes, Shortcuts wiring, and the offline suite with
 `--deep`) and reports each as `ok`, `warn`,
@@ -597,7 +603,7 @@ applies the repairs a machine can and prints a before/after report. `--repair "<
 lets the model change the harness's own source, subject to a path jail, an AST/stdlib
 pre-check, a snapshot with hashes, and the offline test suite as the gate: a red suite
 reverts the edit byte-for-byte and hands back the failure verbatim. A bounded gate (~3 s,
-232 tests) is the default; `--deep-tests` asks for all 875.
+232 tests) is the default; `--deep-tests` asks for all 880.
 
 **The full story — the three tiers, the guardrail list, what is deliberately not automated,
 and a worked transcript — is in [SELF-REPAIR.md](SELF-REPAIR.md).**
@@ -686,7 +692,7 @@ harness/
   repair.py            self-repair: path-jailed, snapshot-first, test-gated source edits
   pyto_api.py          Pyto library grounding: 25 modules / 160 members, curated + introspected
   errors.py            error taxonomy with retryability
-tests/                 875 desktop tests, including a stdlib mock OpenAI server
+tests/                 880 desktop tests, including a stdlib mock OpenAI server
 examples/              three programs the agent is expected to be able to write
 stdlib_audit.py        proves "stdlib only" and "parses as Python 3.10"
 ```
@@ -717,7 +723,7 @@ read so their snapshots stay restorable.
 ## 10. Verifying it yourself
 
 ```bash
-python3 -m unittest discover -s tests -t .     # 875 tests, offline, no external network
+python3 -m unittest discover -s tests -t .     # 880 tests, offline, no external network
 python3 stdlib_audit.py                        # third_party_modules: [], 22 files parse at (3,10)
 python3 run.py --dry-run "hello"               # prints the request, sends nothing
 python3 run.py --paths                         # every resolved path and the rule that chose it

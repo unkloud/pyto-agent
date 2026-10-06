@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
-"""Create a private, shareable Pyto/iOS acceptance report for release v1.0.14.
+"""Create a private, shareable Pyto/iOS acceptance report for release v1.0.15.
 
 Save this file beside ``run.py`` in the installed pyto-agent folder, open it in Pyto,
 and press Run. It uses only the standard library and the harness already in that folder.
 
-Automatic checks make no network requests and apply no doctor fixes. The built-in doctor
+Automatic checks make no network requests and apply no doctor fixes. The focused behavior
+suite runs selected offline tests inside the installed Python process, using disposable
+temporary folders. It does not use the user's workspace, call the configured model, or open
+the Shortcuts, file picker, approval or other native UI. The built-in doctor
 may make and remove a temporary workspace write-probe file and retains the app's normal
 legacy state-directory migration. It reads configuration metadata and scans a bounded
 number of recent session logs for integrity; log contents are not copied into the report.
@@ -18,17 +21,85 @@ records results.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import datetime as _datetime
 import importlib
+import io
 import os
 import platform
 import re
+import shutil
 import sys
+import time
+import unittest
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 
-RELEASE_VERSION = "1.0.14"
+RELEASE_VERSION = "1.0.15"
+
+# These are deliberately narrow, offline checks. They run in Pyto's Python process against
+# disposable test workspaces; they do not simulate or certify native UI behavior. Keep the
+# case list explicit so a new test module cannot accidentally introduce network, subprocess,
+# permission-prompt or user-workspace activity into this device diagnostic.
+SCRIPTED_TEST_GROUPS: Tuple[Tuple[str, str, Tuple[str, ...]], ...] = (
+    (
+        "03 · Managed program execution",
+        "Run isolation, output capture, process-state restoration, concurrency and timeout recovery.",
+        (
+            "tests.test_tools_ios.TestRunProgram.test_arguments_are_passed",
+            "tests.test_tools_ios.TestRunProgram.test_in_process_captures_stdout_and_exit_code",
+            "tests.test_tools_ios.TestRunProgram.test_in_process_runs_do_not_overlap_or_mix_output",
+            "tests.test_tools_ios.TestRunProgram.test_in_process_survivor_holds_the_lane_until_it_exits",
+            "tests.test_tools_ios.TestRunProgram.test_in_process_waits_for_program_threads_and_restores_state_after_error",
+        ),
+    ),
+    (
+        "06 · Saved-program library",
+        "Check persistence across a workspace reload and a saved batch run without a model client.",
+        (
+            "tests.test_programs.TestProgramLibrary.test_records_survive_workspace_reopen_and_keep_unicode_and_spaces",
+            "tests.test_programs.TestProgramLibrary.test_explicit_saved_run_uses_registered_runner_without_model_client",
+        ),
+    ),
+    (
+        "07 · Program input validation",
+        "Check typed values, validation failures and Unicode/equals-sign argument parsing; no real picker is opened.",
+        (
+            "tests.test_program_inputs.TestProgramInputSchema.test_values_are_typed_validated_and_not_saved_anywhere",
+            "tests.test_program_inputs.TestProgramInputSchema.test_terminal_prompt_and_cli_values_parse_numbers_choices_and_path_picker",
+            "tests.test_tools_ios.TestRunProgram.test_registered_input_program_uses_validated_main_contract",
+        ),
+    ),
+    (
+        "08 · Simulated interruption recovery",
+        "Check that recorded-but-unfinished work is reconciled and unknown side effects are not replayed.",
+        (
+            "tests.test_session.TestInterruptedToolRecovery.test_started_action_without_saved_result_is_reported_as_unknown",
+            "tests.test_session.TestInterruptedToolRecovery.test_intent_without_start_is_not_replayed_and_reconciliation_is_idempotent",
+        ),
+    ),
+    (
+        "09 · Project context persistence",
+        "Check project-brief isolation and persistence through a resumed edit session.",
+        (
+            "tests.test_programs.TestProgramLibrary.test_project_briefs_are_isolated_and_show_live_files_and_verification",
+            "tests.test_programs.TestProgramLibrary.test_project_requirement_survives_compaction_and_a_new_edit_session",
+        ),
+    ),
+    (
+        "12 · Shortcuts saved-run contract",
+        "Check saved-run opt-in, typed arguments and refusals without invoking the Shortcuts app.",
+        (
+            "tests.test_shortcut_saved_run.TestShortcutSavedRun.test_shortcut_arguments_parse_without_shell_or_url_decoding",
+            "tests.test_shortcut_saved_run.TestShortcutSavedRun.test_shortcut_requires_explicit_unattended_opt_in_before_execution",
+            "tests.test_shortcut_saved_run.TestShortcutSavedRun.test_shortcut_runs_trusted_batch_program_with_validated_unicode_input_without_api_key",
+            "tests.test_shortcut_saved_run.TestShortcutSavedRun.test_shortcut_rejects_invalid_or_missing_input_before_running_code",
+            "tests.test_shortcut_saved_run.TestShortcutSavedRun.test_shortcut_does_not_open_file_picker_for_at_pick",
+            "tests.test_shortcut_saved_run.TestShortcutSavedRun.test_shortcut_rejects_interactive_apps_without_running_them",
+        ),
+    ),
+)
 
 MANUAL_CHECKS: Tuple[Tuple[str, str, str], ...] = (
     (
@@ -190,6 +261,150 @@ def _device_probe() -> Dict[str, str]:
     return {"status": status, "detail": detail, **values}
 
 
+def _skipped_behavior_checks(reason: str) -> List[Dict[str, str]]:
+    checks = [
+        {"title": title, "status": "SKIPPED", "detail": reason}
+        for title, _scope, _cases in SCRIPTED_TEST_GROUPS
+    ]
+    checks.insert(
+        5,
+        {
+            "title": "11 · Read-only Objective-C recipes",
+            "status": "SKIPPED",
+            "detail": reason,
+        },
+    )
+    return checks
+
+
+def _run_test_group(title: str, scope: str, cases: Sequence[str]) -> Dict[str, str]:
+    started = time.monotonic()
+    try:
+        suite = unittest.TestSuite()
+        loader = unittest.defaultTestLoader
+        for case_name in cases:
+            suite.addTests([loader.loadTestsFromName(case_name)])
+        output = io.StringIO()
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            result = unittest.TextTestRunner(stream=output, verbosity=0).run(suite)
+    except Exception as exc:
+        return {
+            "title": title,
+            "status": "ERROR",
+            "detail": "The scripted checks could not start ({}). {}".format(type(exc).__name__, scope),
+        }
+
+    elapsed_ms = int((time.monotonic() - started) * 1000)
+    if result.testsRun == 0:
+        status = "ERROR"
+        detail = "No scripted cases ran. {}".format(scope)
+    elif result.failures or result.errors:
+        status = "FAIL"
+        failed = [test.id().rsplit(".", 1)[-1] for test, _message in result.failures + result.errors]
+        detail = "{} case(s) failed or errored: {}. Failure text omitted to avoid recording local paths. {}".format(
+            len(failed), ", ".join(failed), scope
+        )
+    elif result.skipped:
+        status = "WARN"
+        detail = "{} case(s) ran; {} skipped in {} ms. {}".format(
+            result.testsRun, len(result.skipped), elapsed_ms, scope
+        )
+    else:
+        status = "PASS"
+        detail = "{} case(s) passed in {} ms. {}".format(result.testsRun, elapsed_ms, scope)
+    return {"title": title, "status": status, "detail": detail}
+
+
+def _run_objc_recipe(root: Path) -> Dict[str, str]:
+    title = "11 · Read-only Objective-C recipes"
+    recipe_path = root / "examples" / "objc_framework_recipes.py"
+    if not recipe_path.is_file():
+        return {"title": title, "status": "SKIPPED", "detail": "The Objective-C recipe file is not in this installation."}
+    original_path = list(sys.path)
+    try:
+        sys.path.insert(0, str(root))
+        module = importlib.import_module("examples.objc_framework_recipes")
+        bundle_path = module.app_bundle_path()
+        device = module.device_summary()
+        if not bundle_path or not all(device.get(key) for key in ("model", "system", "version")):
+            raise ValueError("a read-only recipe returned an empty value")
+    except Exception as exc:
+        return {
+            "title": title,
+            "status": "FAIL",
+            "detail": "A read-only Foundation/UIKit recipe failed with {}. Returned device values and paths are withheld.".format(
+                type(exc).__name__
+            ),
+        }
+    finally:
+        sys.path[:] = original_path
+    return {
+        "title": title,
+        "status": "PASS",
+        "detail": "Foundation bundle path and UIKit device properties were read. Values and paths are withheld; no permission or entitlement was tested.",
+    }
+
+
+def run_device_behavior_checks(root: Optional[Path], source_version: str) -> List[Dict[str, str]]:
+    """Run focused, offline behavior checks only in a matching Pyto installation."""
+    if not _is_ios_runtime():
+        return _skipped_behavior_checks(
+            "Not run: this report was generated outside iOS/Pyto, so it cannot count as device evidence."
+        )
+    if root is None:
+        return _skipped_behavior_checks("Not run: the installed harness source folder was not found.")
+    if source_version != RELEASE_VERSION:
+        return _skipped_behavior_checks(
+            "Not run: diagnostic v{} requires matching harness source; found v{}. Update the installed source first.".format(
+                RELEASE_VERSION, source_version or "unknown"
+            )
+        )
+    if not (root / "tests").is_dir():
+        return _skipped_behavior_checks(
+            "Not run: the focused test files are missing. Use the complete release installation or source ZIP."
+        )
+
+    original_env = dict(os.environ)
+    original_cwd = os.getcwd()
+    original_argv = sys.argv
+    original_argv_value = list(sys.argv)
+    original_stdout = sys.stdout
+    original_stderr = sys.stderr
+    original_path = list(sys.path)
+    original_dont_write_bytecode = sys.dont_write_bytecode
+    checks: List[Dict[str, str]] = []
+    try:
+        sys.path.insert(0, str(root))
+        sys.dont_write_bytecode = True
+        for title, scope, cases in SCRIPTED_TEST_GROUPS:
+            checks.append(_run_test_group(title, scope, cases))
+        checks.insert(5, _run_objc_recipe(root))
+    except Exception as exc:
+        skipped = _skipped_behavior_checks(
+            "The behavior suite stopped with {}.".format(type(exc).__name__)
+        )
+        completed_titles = {item["title"] for item in checks}
+        checks.extend(item for item in skipped if item["title"] not in completed_titles)
+    finally:
+        support = sys.modules.get("tests.support")
+        test_home = getattr(support, "_HARNESS_HOME", "") if support else ""
+        if test_home:
+            shutil.rmtree(test_home, ignore_errors=True)
+        try:
+            os.chdir(original_cwd)
+        except OSError:
+            pass
+        os.environ.clear()
+        os.environ.update(original_env)
+        original_argv[:] = original_argv_value
+        sys.argv = original_argv
+        sys.stdout = original_stdout
+        sys.stderr = original_stderr
+        sys.path[:] = original_path
+        sys.dont_write_bytecode = original_dont_write_bytecode
+    return checks
+
+
 def _redact(text: str, ctx: Any) -> str:
     try:
         from harness import doctor
@@ -287,6 +502,7 @@ def build_report(script_path: Path, explicit_root: Optional[str]) -> str:
     root = find_harness_root(script_path, explicit_root)
     device = _device_probe()
     doctor_result = run_local_doctor(root)
+    behavior_checks = run_device_behavior_checks(root, doctor_result.get("version", ""))
     generated = _datetime.datetime.now(_datetime.timezone.utc).replace(microsecond=0).isoformat()
     runtime = "iOS / Pyto candidate" if _is_ios_runtime() else "non-iOS runtime"
     version = doctor_result.get("version", "unknown")
@@ -344,6 +560,27 @@ def build_report(script_path: Path, explicit_root: Optional[str]) -> str:
     lines.extend(
         [
             "",
+            "### Focused on-device behavior scripts",
+            "",
+            "These seven scripted checks run only when this diagnostic matches the installed harness version and the runtime identifies as iOS. Test programs use disposable temporary folders. They make no provider/network requests and do not open the Shortcuts app, pickers, approval prompts or other native UI. Some cases use test fixtures to check harness logic; a scripted PASS does not establish native UI acceptance, force-quit behavior or real Shortcuts handoff.",
+            "",
+            "| Goal | Status | Result |",
+            "|---|---|---|",
+        ]
+    )
+    for item in behavior_checks:
+        lines.append(
+            "| {} | **{}** | {} |".format(
+                _safe_markdown(item["title"]),
+                _safe_markdown(item["status"]),
+                _safe_markdown(item["detail"]),
+            )
+        )
+    lines.extend(
+        [
+            "",
+            "Scripted results do not change the manual checklist statuses below. Update those only after performing the listed on-device interaction and recording evidence.",
+            "",
             "## Device acceptance checklist",
             "",
             "Use a disposable workspace and sample files. After each check, replace `NOT RUN` with `PASS`, `FAIL`, or `BLOCKED`, then add brief evidence and timing. Do not use desktop/mock results to mark a device check passed.",
@@ -370,7 +607,7 @@ def build_report(script_path: Path, explicit_root: Optional[str]) -> str:
         [
             "## Sharing this report",
             "",
-            "The report omits API key contents, environment variables, session logs, and diagnostic evidence payloads. Review your manually added notes before sharing; do not paste credentials, private URLs, copied task text, or personal file contents.",
+            "The report omits API key contents, environment variables, session logs, test output and diagnostic evidence payloads. The focused checks may create and remove disposable temporary test folders. Review your manually added notes before sharing; do not paste credentials, private URLs, copied task text, or personal file contents.",
             "",
         ]
     )
