@@ -33,6 +33,19 @@ On Linux / CPython 3.12.3, the fresh-process saved-notebook runs measured 122.3 
 115.4 ms. This measures the local process start and saved action, not novice effort or iPhone
 performance.
 
+## Device diagnostic and report
+
+[`device_release_diagnostic.py`](device_release_diagnostic.py) creates a Markdown report
+with offline doctor results and a device acceptance checklist for Goals 01–13. Save it beside
+`run.py` and `harness/` in the installed release folder, open it in Pyto, and press Run. The
+same script is attached as a [v1.0.11 release asset](https://github.com/unkloud/pyto-agent/releases/download/v1.0.11/device_release_diagnostic_v1.0.11.py).
+
+The doctor makes no network requests and applies no fixes. It reads configuration metadata
+and checks recent session-log integrity; it may create and remove a temporary workspace probe
+file and follows normal legacy state-directory migration behavior. On iOS, the script imports
+documented `Foundation` and `UIKit` modules and reads `UIDevice` properties. The manual device
+checks start as **NOT RUN** and remain pending until performed on the phone.
+
 ## Verification
 
 - `python3 -m unittest discover -s tests -t .`: **875 tests passed** in 91.136 seconds, including the four retained lifecycle regression tests. The
