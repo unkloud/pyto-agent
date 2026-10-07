@@ -43,6 +43,7 @@ launch method accepts script arguments, these are also available:
 
 ```text
 --list
+--setup
 --case A1
 --suite basic
 --suite stress
@@ -53,14 +54,18 @@ launch method accepts script arguments, these are also available:
 Every Shortcut call displays the exact fixture name and requires typing `RUN`. The script
 refuses names outside the `pyto-harness-test-` prefix. It never enumerates or invokes
 personal Shortcuts. A random timestamped missing name is used for A14 and is shown for
-confirmation before the URL is opened. You can always skip by pressing Return.
+confirmation before the URL is opened. You can always skip by pressing Return. Use
+`--setup` to print all fixture recipes in Pyto; when you run a specific case, the script
+prints only the setup instructions for the fixtures that case needs before it asks you to
+type `RUN`. The A1 import link is included in both places. Pyto cannot create or import
+Shortcuts from Python, so each other fixture is a one-time setup in Apple's Shortcuts app.
 
 ## Create the harmless fixtures
 
 In Apple's Shortcuts app, create only the fixtures you intend to test. Keep them local and
 deterministic; do not add network actions, personal data, or actions that change user data.
-Use the exact names below. For return fixtures, make the expected text the Shortcut's final
-output (or use its output action if your iOS version presents one).
+Use the exact names below. The script's `--setup` output and per-case prompts provide the
+step-by-step recipes, including the exact return text or input variable to use.
 
 | Fixture name | Actions and expected behavior |
 |---|---|

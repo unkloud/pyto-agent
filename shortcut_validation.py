@@ -73,6 +73,78 @@ MANUAL_INSTRUCTIONS = {
     "A19": "Run the same harmless fixture once with Pyto foregrounded and once through a user-created Shortcuts automation with Show Console off. Record whether the x-callback call succeeds, prompts, suspends, or resumes.",
 }
 
+# Printed in Pyto before a case asks permission to launch a fixture. These recipes use
+# only local, synthetic data. Shortcuts cannot be authored by this Python script; A1 is
+# available as a shared iCloud import, while other fixtures are created once in Shortcuts.
+FIXTURE_SETUP: Dict[str, str] = {
+    STATIC_OK: """1. If it is not installed, open the link below in Safari.
+2. Tap Get Shortcut and return to Pyto.
+3. This fixture returns the fixed text PYTO_HARNESS_OK.""",
+    ECHO: """1. In Shortcuts, tap + and name the shortcut exactly pyto-harness-test-echo.
+2. Add a Text action.
+3. In the Text field, insert the Shortcut Input magic variable; do not type those words literally.
+4. Leave that Text action last and save. This echoes only the synthetic input supplied by this script.""",
+    ERROR: """1. In Files, create a dedicated empty local folder named pyto-harness-test-empty.
+2. In Shortcuts, tap + and name the shortcut exactly pyto-harness-test-error.
+3. Add Get File from Folder; select the empty folder and a filename that is not present: pyto-harness-test-missing.txt.
+4. Turn off any document picker or interactive selection option, then save.
+5. Run it once from Shortcuts. It must fail locally without asking you to choose a file.
+6. If it prompts, succeeds, or cannot be configured to fail predictably, cancel and skip A2.""",
+    CANCEL: """1. In Shortcuts, tap + and name the shortcut exactly pyto-harness-test-cancel.
+2. Add Ask for Input and choose Text.
+3. Use a harmless prompt such as: Cancel this test when Pyto opens Shortcuts.
+4. Save. During A3, tap Cancel in the prompt; do not enter personal information.""",
+    WAIT: """1. In Shortcuts, tap + and name the shortcut exactly pyto-harness-test-wait.
+2. Add Wait and set it to 60 seconds.
+3. Add a final Text action containing PYTO_HARNESS_WAIT_DONE, then save.
+4. A6 can wait for the full minute; A7/A8 use this fixture in a separate disposable harness session.""",
+    SEMANTIC_FAILURE: """1. In Shortcuts, tap + and name the shortcut exactly pyto-harness-test-semantic-failure.
+2. Add a final Text action containing exactly PYTO_HARNESS_SEMANTIC_FAILURE.
+3. Save. It performs no other action; the text is a marker, not a real failure.""",
+    PERMISSION: """1. In Shortcuts, tap + and name the shortcut exactly pyto-harness-test-permission.
+2. Add Show Notification with fixed text such as: Pyto harness permission check.
+3. Save. It contains no personal data. Run A18 only when ready to observe or accept the iOS notification permission prompt.""",
+    PREFIX + "path": """1. In Shortcuts, tap + and name the shortcut exactly pyto-harness-test-path.
+2. Add a local Files action that reads the file at the path supplied by the Shortcut Input variable; disable document-picker interaction.
+3. Convert/read the file contents as text and make that text the final output.
+4. Save. The script supplies and later removes a temporary file containing only PYTO_HARNESS_PATH_PROBE.
+5. If your Files action cannot accept the supplied path without prompting, skip A12 and record that limitation.""",
+}
+
+
+def _fixture_setup_text(fixture: str) -> str:
+    if fixture in FIXTURE_SETUP:
+        return FIXTURE_SETUP[fixture]
+    if fixture.startswith(PREFIX + "space fixture") or fixture.startswith(PREFIX + "中文") or fixture.startswith(PREFIX + "emoji-"):
+        return "Create a shortcut with this exact name, then follow the pyto-harness-test-echo recipe above: add a final Text action containing the Shortcut Input magic variable."
+    return "No fixture setup is needed for this name."
+
+
+def _print_fixture_setup(fixtures: Sequence[str]) -> None:
+    for fixture in fixtures:
+        print("\nSETUP {}".format(fixture))
+        print(_fixture_setup_text(fixture))
+        if fixture == STATIC_OK:
+            print("Install link: {}".format(STATIC_OK_INSTALL_URL))
+
+
+def _print_setup_guide() -> None:
+    print("Shortcut fixture setup — do this once in Apple's Shortcuts app")
+    print("The Python script cannot create or import Shortcuts. It prints these recipes locally; create only fixtures you plan to run.")
+    print("Use synthetic data only. Never rename or run a personal Shortcut for these checks.")
+    print("\nA1: install the shared pyto-harness-test-return fixture, then tap Get Shortcut:")
+    print(STATIC_OK_INSTALL_URL)
+    print("\nShared recipe for echo fixtures (A4, A5, A9–A11, A13):")
+    print(FIXTURE_SETUP[ECHO])
+    print("\nOther fixtures:")
+    for fixture in (ERROR, CANCEL, WAIT, PREFIX + "path", PERMISSION, SEMANTIC_FAILURE):
+        print("\n{}".format(fixture))
+        print(FIXTURE_SETUP[fixture])
+    print("\nA15 additionally needs these exact-name copies of the echo fixture:")
+    for fixture in (PREFIX + "space fixture", PREFIX + "中文", PREFIX + "emoji-🧪"):
+        print("  - {} — {}".format(fixture, _fixture_setup_text(fixture)))
+    print("\nA2 safety check: run the local missing-file fixture from Shortcuts once first. If it prompts or succeeds, skip A2.")
+
 
 def _runtime() -> Dict[str, str]:
     return {
@@ -220,13 +292,16 @@ def _confirm_fixtures(case_id: str, fixtures: Sequence[str]) -> bool:
     print("This case will call only these explicitly named test fixtures:")
     for fixture in fixtures:
         print("  - {}".format(fixture))
-        if fixture == STATIC_OK:
-            print("    Install URL (tap Get Shortcut): {}".format(STATIC_OK_INSTALL_URL))
+    _print_fixture_setup(fixtures)
     answer = input("Type RUN to continue, or press Return to skip: ").strip()
     return answer == "RUN"
 
 
 def _manual(case_id: str, report_path: str) -> None:
+    if case_id in ("A7", "A8"):
+        _print_fixture_setup((WAIT,))
+    elif case_id == "A19":
+        _print_fixture_setup((STATIC_OK,))
     print("MANUAL {} — {}".format(case_id, MANUAL_INSTRUCTIONS[case_id]))
     notes = input("Observation (test data only; leave blank if not run): ").strip()
     status = "observed" if notes else "unknown"
@@ -479,7 +554,7 @@ def _run_case(case_id: str, report_path: str, *, stress: bool, recovery: bool) -
 
 def _usage() -> None:
     print("Pyto Shortcut validation — no LLM or network calls")
-    print("Use --case A1 (A1–A20), --suite basic, stress, recovery, all, --list, or q.")
+    print("Use --setup for fixture instructions; --case A1 (A1–A20); --suite basic, stress, recovery, all; --list; or q.")
     print("Stress and recovery suites require explicit selection. Calls use only the test prefix.")
     print("A report is written beside this script when the folder is writable.")
 
@@ -496,6 +571,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         selection = args[1].strip().upper()
     elif args and args[0].lower() in ("--list", "list"):
         selection = "LIST"
+    elif args and args[0].lower() in ("--setup", "setup"):
+        selection = "SETUP"
     elif args:
         selection = args[0].strip().upper()
     else:
@@ -505,6 +582,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if selection == "LIST":
         for case_id, case in CASES.items():
             print("{}  {} [{}]".format(case_id, case["title"], case["kind"]))
+        return 0
+    if selection == "SETUP":
+        _print_setup_guide()
         return 0
 
     if selection in CASES:
@@ -518,7 +598,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "ALL": list(CASES),
     }
     if selection not in suites:
-        print("Unknown selection. Choose A1–A20, basic, stress, recovery, list, or q.")
+        print("Unknown selection. Choose setup, A1–A20, basic, stress, recovery, list, or q.")
         return 2
     if selection in ("STRESS", "RECOVERY", "ALL"):
         expected = "RUN " + selection

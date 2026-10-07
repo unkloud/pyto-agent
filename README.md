@@ -16,7 +16,7 @@ file into a workspace on the device, runs it, and tells you what happened.
 * **Survives the app being killed.** Every turn is appended to a JSONL session log, so
   `--resume` picks up exactly where iOS interrupted you.
 
-**Latest published release: v1.0.24.** Includes a one-tap iCloud install link for the A1 return fixture. A1 results also include the kit version and a short, URL-redacted exception detail when the call fails. See the [release notes](RELEASE-NOTES-v1.0.24.md), [Shortcut bridge guide](docs/shortcut-bridge.md), and [browser interface guide](docs/web-interface.md).
+**Latest published release: v1.0.25.** The Pyto Shortcut validation script now prints step-by-step fixture setup instructions with `--setup` and before each selected case. See the [release notes](RELEASE-NOTES-v1.0.25.md), [Shortcut bridge guide](docs/shortcut-bridge.md), and [browser interface guide](docs/web-interface.md).
 
 ---
 
@@ -584,7 +584,9 @@ enforce policy or prevent generated Python from importing Pyto modules directly.
 returned by `xcallback.open_url`, and Shortcut output is semantically opaque to the model.
 The installer downloads the complete source tree, including `shortcut_validation.py`
 beside `run.py`. To start the no-LLM device check, open that installed script in Pyto and
-tap Run; no separate download or copy is needed. For the quick A1 callback check, install
+tap Run; no separate download or copy is needed. Choose `--setup` to print the fixture
+recipes in Pyto, or select a case and the script prints setup steps for only the fixtures
+that case needs. For the quick A1 callback check, install
 the [`pyto-harness-test-return` fixture from iCloud](https://www.icloud.com/shortcuts/c3a68bc19a4c4efdae906603f5dc434b)
 and choose `A1`. The link requires a one-time network connection and tapping **Get Shortcut**;
 the validation script itself makes no network calls.

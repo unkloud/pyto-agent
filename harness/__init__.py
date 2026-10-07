@@ -23,5 +23,5 @@ Layering (no cycles)::
 files and is the only module allowed to, gated by the offline test suite.
 """
 
-__version__ = "1.0.24"
+__version__ = "1.0.25"
 __all__ = ["__version__"]
