@@ -7,7 +7,10 @@
   const el = (id) => document.getElementById(id);
   const transcript = el("transcript");
   let cursor = 0;
+  let sessionGeneration = 0;
+  let currentSessionId = "";
   let busy = false;
+  let sessionChanging = false;
   let pendingApproval = null;
   let historyOffset = 0;
   let historyHasOlder = false;
@@ -176,10 +179,13 @@
 
   function setBusy(value) {
     busy = Boolean(value);
-    el("send").disabled = busy || stopping;
-    el("prompt").disabled = busy || stopping;
+    const blocked = busy || sessionChanging || stopping;
+    el("send").disabled = blocked;
+    el("prompt").disabled = blocked;
     el("stop-turn").disabled = !busy || stopping;
-    document.querySelectorAll(".run-program").forEach((button) => { button.disabled = busy || stopping; });
+    el("all-chats-link").setAttribute("aria-disabled", String(blocked));
+    document.querySelectorAll(".run-program").forEach((button) => { button.disabled = blocked; });
+    document.querySelectorAll("#session-start button").forEach((button) => { button.disabled = blocked; });
   }
 
   function showApproval(approval) {
@@ -240,8 +246,10 @@
   }
 
   async function poll() {
+    const generation = sessionGeneration;
     try {
       const state = await api(`state?since=${cursor}`);
+      if (generation !== sessionGeneration) return;
       el("connection").textContent = state.stopping ? "Stopping…" : "Connected";
       if (state.reset) {
         cursor = state.next_id;
@@ -398,13 +406,22 @@
 
   function showSelectedSession(response) {
     if (!response || !response.selected) return;
+    const sessionId = String((response.session || {}).id || "");
+    if (sessionId !== currentSessionId) {
+      currentSessionId = sessionId;
+      sessionGeneration += 1;
+    }
+    if (Number.isSafeInteger(response.event_cursor)) cursor = response.event_cursor;
     sessionReady = true;
     el("session-start").hidden = true;
     el("workspace-tabs").hidden = false;
+    el("all-chats-link").hidden = false;
+    document.body.classList.add("chat-active");
     const chat = el("view-chat");
     chat.hidden = false;
     chat.classList.add("active");
     el("active-session").textContent = sessionMetadata(response.session || {});
+    historyOffset = 0;
     transcript.replaceChildren();
     for (const message of response.messages || []) {
       const isUser = message.role === "user";
@@ -413,17 +430,18 @@
     loadHistory();
   }
 
-  function renderSessionChoices(sessions) {
+  function renderSessionChoices(sessions, activeId = "") {
     const list = el("session-list");
     const continueButton = el("continue-session");
     const loading = el("session-loading");
     list.replaceChildren();
     loading.hidden = true;
     continueButton.hidden = !sessions.length;
+    el("return-to-chat").hidden = !sessionReady;
     if (!sessions.length) {
       const empty = document.createElement("p");
       empty.className = "muted";
-      empty.textContent = "No previous sessions are available.";
+      empty.textContent = sessionReady ? "No other saved sessions are available." : "No previous sessions are available.";
       list.append(empty);
       return;
     }
@@ -432,24 +450,46 @@
     continueButton.textContent = `Continue most recent · ${mostRecent.preview || sessionDate(mostRecent.updated_at)}`;
     continueButton.onclick = () => chooseSession(mostRecent.id);
     for (const session of sessions) {
+      const isCurrent = session.id === activeId;
+      const row = document.createElement("div");
+      row.className = "session-row";
       const button = document.createElement("button");
       button.type = "button";
-      button.className = "session-choice";
+      button.className = `session-choice${isCurrent ? " current" : ""}`;
+      if (isCurrent) button.setAttribute("aria-current", "true");
       const title = document.createElement("span");
       title.className = "session-choice-title";
       title.textContent = session.preview || "Session with no messages yet";
+      if (isCurrent) {
+        const current = document.createElement("span");
+        current.className = "session-current";
+        current.textContent = "Current";
+        title.append(current);
+      }
       const meta = document.createElement("span");
       meta.className = "session-choice-meta";
       meta.textContent = sessionMetadata(session);
       button.append(title, meta);
       button.addEventListener("click", () => chooseSession(session.id));
-      list.append(button);
+      row.append(button);
+      if (!isCurrent) {
+        const remove = document.createElement("button");
+        remove.type = "button";
+        remove.className = "session-remove";
+        remove.textContent = "Delete";
+        remove.setAttribute("aria-label", `Delete chat: ${session.preview || sessionDate(session.updated_at)}`);
+        remove.addEventListener("click", () => removeSession(session));
+        row.append(remove);
+      }
+      list.append(row);
     }
+    setBusy(busy);
   }
 
   async function chooseSession(id) {
-    const buttons = [el("continue-session"), el("new-session"), ...el("session-list").querySelectorAll("button")];
-    buttons.forEach((button) => { button.disabled = true; });
+    if (busy || sessionChanging || stopping) return;
+    sessionChanging = true;
+    setBusy(busy);
     el("session-error").hidden = true;
     try {
       const response = await api("session", { method: "POST", body: JSON.stringify({ id }) });
@@ -457,7 +497,67 @@
     } catch (error) {
       el("session-error").textContent = error.message;
       el("session-error").hidden = false;
-      buttons.forEach((button) => { button.disabled = false; });
+    } finally {
+      sessionChanging = false;
+      setBusy(busy);
+    }
+  }
+
+  async function loadSessionChoices() {
+    el("session-loading").hidden = false;
+    el("session-error").hidden = true;
+    try {
+      const response = await api("sessions");
+      renderSessionChoices(response.sessions || [], response.active_id || "");
+    } catch (error) {
+      el("session-loading").hidden = true;
+      el("session-error").textContent = error.message;
+      el("session-error").hidden = false;
+    }
+  }
+
+  async function showAllChats(event) {
+    if (event) event.preventDefault();
+    if (!sessionReady) return;
+    if (busy || sessionChanging || stopping) {
+      toast("Wait for the current operation to finish before changing sessions.");
+      return;
+    }
+    el("session-start-heading").textContent = "All chats";
+    el("session-start").querySelector(".lede").textContent = "Choose a saved conversation, delete a chat you no longer need, or start a separate session.";
+    el("session-start").hidden = false;
+    el("workspace-tabs").hidden = true;
+    document.querySelectorAll(".view").forEach((view) => { view.hidden = true; view.classList.remove("active"); });
+    el("all-chats-link").hidden = true;
+    document.body.classList.remove("chat-active");
+    await loadSessionChoices();
+  }
+
+  async function returnToCurrentChat() {
+    if (busy || sessionChanging || stopping) return;
+    try {
+      const response = await api("session");
+      showSelectedSession(response);
+    } catch (error) { toast(error.message); }
+  }
+
+  async function removeSession(session) {
+    if (!session || !session.id || session.id === currentSessionId || busy || sessionChanging || stopping) return;
+    const label = session.preview ? `“${session.preview}”` : `the chat from ${sessionDate(session.updated_at)}`;
+    if (!window.confirm(`Permanently delete ${label}?\n\nThis removes the saved conversation log from this device.`)) return;
+    sessionChanging = true;
+    setBusy(busy);
+    try {
+      const response = await api("session/delete", { method: "POST", body: JSON.stringify({ id: session.id }) });
+      renderSessionChoices(response.sessions || [], response.active_id || "");
+      if (sessionReady) loadHistory();
+      toast("Saved chat deleted.");
+    } catch (error) {
+      toast(error.message);
+      await loadSessionChoices();
+    } finally {
+      sessionChanging = false;
+      setBusy(busy);
     }
   }
 
@@ -465,7 +565,7 @@
     try {
       const response = await api("session");
       if (response.selected) showSelectedSession(response);
-      else renderSessionChoices(response.sessions || []);
+      else renderSessionChoices(response.sessions || [], response.active_id || "");
     } catch (error) {
       el("session-loading").hidden = true;
       el("session-error").textContent = error.message;
@@ -475,6 +575,8 @@
   }
 
   document.querySelectorAll(".tab").forEach((tab) => tab.addEventListener("click", () => activateView(tab.dataset.view)));
+  el("all-chats-link").addEventListener("click", showAllChats);
+  el("return-to-chat").addEventListener("click", returnToCurrentChat);
   el("chat-form").addEventListener("submit", async (event) => {
     event.preventDefault();
     window.__pytoPromptLoaded = true;

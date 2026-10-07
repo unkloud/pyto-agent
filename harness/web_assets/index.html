@@ -15,7 +15,10 @@
         <p class="eyebrow">LOCAL SESSION</p>
         <h1>Pyto Harness</h1>
       </div>
-      <div class="connection"><span class="pulse" aria-hidden="true"></span><span id="connection">Connecting…</span></div>
+      <div class="topbar-actions">
+        <a id="all-chats-link" class="all-chats-link" href="#all-chats" hidden>All chats</a>
+        <div class="connection"><span class="pulse" aria-hidden="true"></span><span id="connection">Connecting…</span></div>
+      </div>
     </header>
 
     <nav id="workspace-tabs" class="tabs" aria-label="Workspace views" hidden>
@@ -31,6 +34,7 @@
         <p class="lede">Continue a recent conversation or start fresh. Previous sessions remain saved on this device.</p>
         <p id="session-loading" class="muted">Loading saved sessions…</p>
         <p id="session-error" class="bubble error" hidden></p>
+        <button id="return-to-chat" class="button secondary" type="button" hidden>Back to current chat</button>
         <button id="continue-session" class="button primary" type="button" hidden>Continue most recent</button>
         <div id="session-list" class="session-list" aria-label="Previous sessions"></div>
         <button id="new-session" class="button secondary" type="button">Start a new session</button>

@@ -16,7 +16,7 @@ file into a workspace on the device, runs it, and tells you what happened.
 * **Survives the app being killed.** Every turn is appended to a JSONL session log, so
   `--resume` picks up exactly where iOS interrupted you.
 
-**Latest published release: v1.0.28.** The browser interface can now resume a recent session, choose another saved session, or start a fresh one. See the [release notes](RELEASE-NOTES-v1.0.28.md), [Shortcut bridge guide](docs/shortcut-bridge.md), and [browser interface guide](docs/web-interface.md).
+**Latest stable release: v1.0.28. Testing pre-release: [v1.0.29](https://github.com/unkloud/pyto-agent/releases/tag/v1.0.29).** The browser interface can restore saved sessions, keep long conversations inside the chat panel, return to **All chats** from a chat header, and remove saved chats with confirmation. See the [v1.0.29 release notes](RELEASE-NOTES-v1.0.29.md), [Shortcut bridge guide](docs/shortcut-bridge.md), and [browser interface guide](docs/web-interface.md).
 
 ---
 

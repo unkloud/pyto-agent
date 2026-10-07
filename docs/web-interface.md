@@ -13,13 +13,25 @@ resumes the newest valid local session. The list below it lets you choose anothe
 session, with its last message preview, date, model, and workspace. **Start a new session**
 creates a separate log and leaves the previous sessions unchanged.
 
+While a session is open, use **All chats** in the page header to return to the session list.
+Choose another entry to switch conversations, or use **Back to current chat** to return
+without switching. The current session is marked in the list and cannot be deleted. Use
+**Delete** beside another session to permanently remove its saved conversation log from
+this device; the page asks for confirmation first. A delete request contains only the
+listed session ID, which the server resolves against valid logs in the configured sessions
+directory.
+
 When a session is resumed, its saved conversation is restored as model context and the
 recent user and assistant messages appear in Chat. The History view remains available for
 the full projected conversation. To open a specific session directly and skip the chooser,
 pass its log path to `--resume`; passing a directory resumes its most recently modified
 `.jsonl` session.
 
-The page has three views:
+The conversation transcript scrolls inside the available chat area so the composer and
+workspace navigation remain usable. Long code blocks can scroll horizontally within their
+message. The layout adapts to narrow screens.
+
+The page has three workspace views:
 
 - **Chat** sends messages through the normal harness loop. **Stop turn** requests
   cancellation of the current model/tool operation.
@@ -109,9 +121,14 @@ environment:
    values.
 9. Enter an accessible file or folder path and verify it reaches the saved program.
 10. Open History and confirm messages from this session appear.
-11. Background Pyto while Safari is active, return to Pyto, and confirm the server is still
-   active and cleanup works after **Stop web session**.
-12. Close Safari without pressing Stop, then return and stop the session; separately stop
+11. Use **All chats**, switch to a different saved session, then return to the current chat.
+    Delete an inactive session after confirming; verify the active one cannot be deleted.
+12. Send a long response with a fenced code block and confirm the transcript scrolls within
+    the chat while the composer and **All chats** link remain accessible on desktop and a
+    narrow viewport.
+13. Background Pyto while Safari is active, return to Pyto, and confirm the server is still
+    active and cleanup works after **Stop web session**.
+14. Close Safari without pressing Stop, then return and stop the session; separately stop
     the script from Pyto and confirm the port is released.
 
 Desktop tests exercise the HTTP routes, authentication checks, chat loop, approvals,

@@ -855,15 +855,13 @@ def main(argv: Optional[List[str]] = None) -> int:
         if args.web:
             from harness.web import WebController, run_web
 
-            session_factory = None
-            if session is None:
-                session_factory = lambda resume_path: open_session(
-                    config, resume=resume_path, label=(task[:24] or "chat")
-                )
+            session_factory = lambda resume_path: open_session(
+                config, resume=resume_path, label=(task[:24] or "chat")
+            )
             controller = WebController(
                 options_factory=factory,
                 session=session,
-                sessions_dir=config.sessions_dir if session is None else "",
+                sessions_dir=config.sessions_dir,
                 session_factory=session_factory,
                 approver=prompter if isinstance(prompter, UIApprover) else None,
                 verbose=args.verbose,

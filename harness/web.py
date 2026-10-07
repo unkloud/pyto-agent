@@ -210,10 +210,15 @@ class WebController:
         """Return either the startup choices or the selected session and its transcript."""
         with self._lock:
             session = self.session
+            event_cursor = self.state.snapshot(0)["next_id"]
         if session is None:
             return {
                 "selected": False,
-                "sessions": [summary.public() for summary in list_session_summaries(self.sessions_dir)],
+                "sessions": [summary.public() for summary in list_session_summaries(self.sessions_dir)]
+                if self.sessions_dir
+                else [],
+                "active_id": "",
+                "event_cursor": event_cursor,
             }
 
         path = str(getattr(session, "path", "") or "")
@@ -244,29 +249,79 @@ class WebController:
             "selected": True,
             "session": summary.public(),
             "messages": messages[-WEB_TRANSCRIPT_MESSAGE_LIMIT:],
+            "event_cursor": event_cursor,
         }
 
+    def sessions_payload(self) -> Dict[str, Any]:
+        """List discovered sessions without exposing their on-disk paths."""
+        with self._lock:
+            session = self.session
+            active_id = str(getattr(getattr(session, "header", None), "id", "") or "")
+            sessions = list_session_summaries(self.sessions_dir) if self.sessions_dir else []
+        return {"sessions": [summary.public() for summary in sessions], "active_id": active_id}
+
     def select_session(self, session_id: Any) -> Dict[str, Any]:
-        """Open a new or discovered session. The browser supplies only a session ID."""
+        """Open or switch to a new or discovered session using only its server-side ID."""
         if not isinstance(session_id, str) or not session_id or len(session_id) > 128:
             raise WebInterfaceError("choose a valid session")
         with self._lock:
             if self._closing or self.state.stop_requested.is_set():
                 raise WebInterfaceError("the web session is stopping")
-            if self.session is not None:
-                raise WebInterfaceError("a session is already active")
+            if self._busy:
+                raise WebInterfaceError("wait for the current operation to finish before changing sessions")
+            current = self.session
+            current_id = str(getattr(getattr(current, "header", None), "id", "") or "")
+            if current is not None and session_id != "new" and current_id == session_id:
+                return self.session_payload()
             if session_id == "new":
                 path = None
             else:
+                if not self.sessions_dir or not callable(self.session_factory):
+                    raise WebInterfaceError("session switching is unavailable")
                 summary = find_session_summary(self.sessions_dir, session_id)
                 if summary is None:
                     raise WebInterfaceError("that session is no longer available; reload the session list")
                 path = summary.path
             try:
-                self.session = self.session_factory(path)
+                if not callable(self.session_factory):
+                    raise WebInterfaceError("session switching is unavailable")
+                selected = self.session_factory(path)
             except Exception as exc:  # noqa: BLE001 - do not return local file paths to the browser
                 raise WebInterfaceError("could not open the selected session") from exc
+            if current is not None:
+                try:
+                    current.close()
+                except Exception as exc:  # noqa: BLE001 - retain the old selection on close failure
+                    try:
+                        selected.close()
+                    except Exception:  # noqa: BLE001
+                        pass
+                    raise WebInterfaceError("could not safely close the current session") from exc
+            self.session = selected
         return self.session_payload()
+
+    def delete_session(self, session_id: Any) -> Dict[str, Any]:
+        """Delete one discovered, inactive session log by ID; never accept a path."""
+        if not isinstance(session_id, str) or not session_id or len(session_id) > 128:
+            raise WebInterfaceError("choose a valid session")
+        with self._lock:
+            if self._closing or self.state.stop_requested.is_set():
+                raise WebInterfaceError("the web session is stopping")
+            active_id = str(getattr(getattr(self.session, "header", None), "id", "") or "")
+            if session_id == active_id:
+                raise WebInterfaceError("the active session cannot be deleted")
+            if not self.sessions_dir:
+                raise WebInterfaceError("session removal is unavailable")
+            summary = find_session_summary(self.sessions_dir, session_id)
+            if summary is None:
+                raise WebInterfaceError("that session is no longer available; reload the session list")
+            try:
+                os.unlink(summary.path)
+            except FileNotFoundError as exc:
+                raise WebInterfaceError("that session is no longer available; reload the session list") from exc
+            except OSError as exc:
+                raise WebInterfaceError("could not remove the selected session") from exc
+        return self.sessions_payload()
 
     def _start(self, kind: str, payload: Any) -> bool:
         with self._lock:
@@ -537,6 +592,8 @@ class LocalWebServer:
                         self._send_json(200, parent.controller.state.snapshot(since))
                     elif route == "api/session":
                         self._send_json(200, parent.controller.session_payload())
+                    elif route == "api/sessions":
+                        self._send_json(200, parent.controller.sessions_payload())
                     elif route == "api/history":
                         query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
                         offset = self._query_int(query, "offset", default=0, maximum=100000)
@@ -568,6 +625,9 @@ class LocalWebServer:
                     if route == "api/session":
                         result = parent.controller.select_session(payload.get("id"))
                         self._send_json(200, result)
+                    elif route == "api/session/delete":
+                        result = parent.controller.delete_session(payload.get("id"))
+                        self._send_json(200, {"deleted": True, **result})
                     elif route == "api/chat":
                         started = parent.controller.start_chat(payload.get("prompt"))
                         if not started:

@@ -126,6 +126,7 @@ class TestWebFrontEnd(TempDirTestCase):
         self.assertEqual(status, 200)
         self.assertIn(b"Pyto Harness", body)
         self.assertIn(b"background keepalive", body)
+        self.assertIn(b'id="all-chats-link"', body)
         self.assertIn("default-src 'self'", headers["Content-Security-Policy"])
         self.assertEqual(server.server.server_address[0], "127.0.0.1")
         for asset, mime in (("app.js", "text/javascript"), ("style.css", "text/css")):
@@ -136,7 +137,14 @@ class TestWebFrontEnd(TempDirTestCase):
             if asset == "app.js":
                 self.assertIn(b"document.createTextNode", asset_body)
                 self.assertIn(b"safeMarkdownHref", asset_body)
+                self.assertIn(b"Permanently delete", asset_body)
+                self.assertIn(b"session/delete", asset_body)
                 self.assertNotIn(b"innerHTML", asset_body)
+            if asset == "style.css":
+                self.assertIn(b"body.chat-active .shell", asset_body)
+                self.assertIn(b".all-chats-link[hidden], #workspace-tabs[hidden]", asset_body)
+                self.assertIn(b"min-height: 0; max-height: none; overflow-x: hidden; overflow-y: auto", asset_body)
+                self.assertIn(b"@media (max-width: 600px)", asset_body)
 
         status, _headers, body = self.request(server, "api/state", token="wrong-token")
         self.assertEqual(status, 401)
@@ -239,6 +247,85 @@ class TestWebFrontEnd(TempDirTestCase):
         self.assertEqual(reopened.project()[0]["content"], "Keep this session")
         reopened.close()
         self.assertEqual(len([name for name in os.listdir(sessions_dir) if name.endswith(".jsonl")]), 2)
+
+    def test_all_chats_can_switch_sessions_and_create_a_new_one(self) -> None:
+        controller, _provider, _registry = self.make_controller()
+        controller.session.close()
+        sessions_dir = self.path("session-switching")
+        os.makedirs(sessions_dir)
+        active_path = os.path.join(sessions_dir, "active.jsonl")
+        active_log = SessionLog.create(active_path, header=SessionHeader(id="active-session"))
+        active_log.append("message.user", user_message_event("Current conversation"))
+        previous_path = os.path.join(sessions_dir, "previous.jsonl")
+        previous_log = SessionLog.create(previous_path, header=SessionHeader(id="previous-session"))
+        previous_log.append("message.user", user_message_event("Earlier conversation"))
+        previous_log.close()
+        controller.session = active_log
+        controller.sessions_dir = sessions_dir
+        controller.session_factory = lambda path: SessionLog.resume(path) if path else SessionLog.create(
+            new_session_path(sessions_dir), workspace=self.workspace_dir
+        )
+        self.addCleanup(lambda: controller.session.close() if controller.session is not None else None)
+        server = self.start_server(controller)
+
+        status, _headers, body = self.request(server, "api/sessions")
+        self.assertEqual(status, 200)
+        choices = json.loads(body.decode("utf-8"))
+        self.assertEqual(choices["active_id"], "active-session")
+        self.assertEqual({row["id"] for row in choices["sessions"]}, {"active-session", "previous-session"})
+        self.assertNotIn(active_path, body.decode("utf-8"))
+
+        status, switched = self.post_json(server, "api/session", {"id": "previous-session"})
+        self.assertEqual(status, 200, switched)
+        self.assertTrue(switched["selected"])
+        self.assertEqual(switched["session"]["id"], "previous-session")
+        self.assertIsNone(active_log._handle)
+
+        status, created = self.post_json(server, "api/session", {"id": "new"})
+        self.assertEqual(status, 200, created)
+        self.assertTrue(created["selected"])
+        self.assertNotEqual(created["session"]["id"], "previous-session")
+        reopened = SessionLog.resume(previous_path)
+        self.assertEqual(reopened.project()[0]["content"], "Earlier conversation")
+        reopened.close()
+
+    def test_delete_session_only_removes_a_discovered_inactive_log(self) -> None:
+        controller, _provider, _registry = self.make_controller()
+        controller.session.close()
+        sessions_dir = self.path("session-deletion")
+        os.makedirs(sessions_dir)
+        active_path = os.path.join(sessions_dir, "active.jsonl")
+        active_log = SessionLog.create(active_path, header=SessionHeader(id="active-session"))
+        past_path = os.path.join(sessions_dir, "past.jsonl")
+        past_log = SessionLog.create(past_path, header=SessionHeader(id="past-session"))
+        past_log.append("message.user", user_message_event("Delete this conversation"))
+        past_log.close()
+        outside_path = self.path("outside-sessions.jsonl")
+        outside_log = SessionLog.create(outside_path, header=SessionHeader(id="outside-session"))
+        outside_log.close()
+        controller.session = active_log
+        controller.sessions_dir = sessions_dir
+        self.addCleanup(lambda: controller.session.close() if controller.session is not None else None)
+        server = self.start_server(controller)
+
+        status, result = self.post_json(server, "api/session/delete", {"id": "active-session"})
+        self.assertEqual(status, 400)
+        self.assertIn("active session", result["error"])
+        self.assertTrue(os.path.isfile(active_path))
+
+        status, result = self.post_json(server, "api/session/delete", {"id": "../past.jsonl"})
+        self.assertEqual(status, 400)
+        self.assertTrue(os.path.isfile(past_path))
+
+        status, result = self.post_json(server, "api/session/delete", {"id": "outside-session"})
+        self.assertEqual(status, 400)
+        self.assertTrue(os.path.isfile(outside_path))
+
+        status, result = self.post_json(server, "api/session/delete", {"id": "past-session"})
+        self.assertEqual(status, 200, result)
+        self.assertTrue(result["deleted"])
+        self.assertFalse(os.path.exists(past_path))
+        self.assertEqual([row["id"] for row in result["sessions"]], ["active-session"])
 
     def test_chat_runs_through_provider_and_outputs_events(self) -> None:
         controller, provider, _registry = self.make_controller([text_response("Hello from the mock")])
