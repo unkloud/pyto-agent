@@ -1,8 +1,9 @@
 """Manual, no-LLM Shortcut bridge checks for Pyto.
 
-Run this script in Pyto and select one case at a time. It calls only explicitly named
-``pyto-harness-test-`` fixtures. The default path never runs stress or hang-recovery
-cases. It uses Python's standard library and Pyto's shipped ``xcallback`` module only.
+Run this script in Pyto and select one case or the full batch. The full batch needs one
+``RUN ALL`` confirmation, then calls only explicitly named ``pyto-harness-test-`` fixtures
+without per-case confirmation. The default path never runs stress or hang-recovery cases.
+It uses Python's standard library and Pyto's shipped ``xcallback`` module only.
 
 This is an observation harness, not a reliability guarantee. A blocking x-callback call
 cannot be forcibly stopped by this script; use A6/A8 only when prepared to stop or restart
@@ -16,6 +17,7 @@ import json
 import os
 import platform
 import re
+import secrets
 import sys
 import time
 import urllib.parse
@@ -281,14 +283,17 @@ def _call(
         return "failed", None, type(exc).__name__, time.monotonic() - started, detail
 
 
-def _confirm_fixture(case_id: str, fixture: str) -> bool:
-    return _confirm_fixtures(case_id, (fixture,))
+def _confirm_fixture(case_id: str, fixture: str, *, automatic: bool = False) -> bool:
+    return _confirm_fixtures(case_id, (fixture,), automatic=automatic)
 
 
-def _confirm_fixtures(case_id: str, fixtures: Sequence[str]) -> bool:
+def _confirm_fixtures(case_id: str, fixtures: Sequence[str], *, automatic: bool = False) -> bool:
     if not fixtures or any(not fixture.startswith(PREFIX) for fixture in fixtures):
         print("Refusing to call a Shortcut outside the test prefix.")
         return False
+    if automatic:
+        print("AUTO-RUN {}: covered by the suite-level RUN ALL confirmation.".format(case_id))
+        return True
     print("This case will call only these explicitly named test fixtures:")
     for fixture in fixtures:
         print("  - {}".format(fixture))
@@ -297,19 +302,34 @@ def _confirm_fixtures(case_id: str, fixtures: Sequence[str]) -> bool:
     return answer == "RUN"
 
 
-def _manual(case_id: str, report_path: str) -> None:
-    if case_id in ("A7", "A8"):
+def _manual(case_id: str, report_path: str, *, automatic: bool = False) -> None:
+    if not automatic and case_id in ("A7", "A8"):
         _print_fixture_setup((WAIT,))
-    elif case_id == "A19":
+    elif not automatic and case_id == "A19":
         _print_fixture_setup((STATIC_OK,))
     print("MANUAL {} — {}".format(case_id, MANUAL_INSTRUCTIONS[case_id]))
+    if automatic:
+        _result(
+            case_id,
+            "unknown",
+            "This case needs manual interaction and was skipped by the automatic suite.",
+            report_path,
+            manual_check_required=True,
+        )
+        return
     notes = input("Observation (test data only; leave blank if not run): ").strip()
     status = "observed" if notes else "unknown"
     _result(case_id, status, notes or "No manual observation recorded.", report_path)
 
 
-def _run_call(case_id: str, *, fixture: str, input_text: Optional[str] = None) -> Dict[str, Any]:
-    if not _confirm_fixture(case_id, fixture):
+def _run_call(
+    case_id: str,
+    *,
+    fixture: str,
+    input_text: Optional[str] = None,
+    automatic: bool = False,
+) -> Dict[str, Any]:
+    if not _confirm_fixture(case_id, fixture, automatic=automatic):
         return {"status": "not_run", "state": None, "shortcut": fixture, "value": None}
     print("CALLING {} at {} UTC".format(fixture, datetime.now(timezone.utc).isoformat()))
     state, value, error_type, elapsed, error_message = _call(
@@ -344,11 +364,18 @@ def _record_call(case_id: str, report_path: str, call: Dict[str, Any], observati
         **public_fields,
     )
 
-def _run_case(case_id: str, report_path: str, *, stress: bool, recovery: bool) -> None:
+def _run_case(
+    case_id: str,
+    report_path: str,
+    *,
+    stress: bool,
+    recovery: bool,
+    automatic: bool = False,
+) -> None:
     case = CASES[case_id]
     kind = case["kind"]
     if kind == "manual":
-        _manual(case_id, report_path)
+        _manual(case_id, report_path, automatic=automatic)
         return
     if case_id in STRESS_CASES and not stress:
         _result(case_id, "not_run", "Opt-in stress suite required.", report_path)
@@ -363,7 +390,7 @@ def _run_case(case_id: str, report_path: str, *, stress: bool, recovery: bool) -
             print("A6 can block for up to the fixture's configured wait. There is no enforced timeout here.")
         if case_id in ("A2", "A3", "A6"):
             print("Confirm the fixture is harmless and behaves as documented before running it.")
-        call = _run_call(case_id, fixture=fixture)
+        call = _run_call(case_id, fixture=fixture, automatic=automatic)
         observation = "{} after {}s".format(call.get("transport_state", "not run"), call.get("elapsed_seconds", "n/a"))
         if call.get("error_type"):
             observation += " ({})".format(call["error_type"])
@@ -372,7 +399,7 @@ def _run_case(case_id: str, report_path: str, *, stress: bool, recovery: bool) -
 
     if kind == "unicode":
         value = "中文🙂\nline-two\n"
-        call = _run_call(case_id, fixture=case["fixture"], input_text=value)
+        call = _run_call(case_id, fixture=case["fixture"], input_text=value, automatic=automatic)
         returned = call.get("value")
         exact = _matches_text(returned, value)
         public_fields = {key: item for key, item in call.items() if key not in ("value", "status")}
@@ -386,7 +413,7 @@ def _run_case(case_id: str, report_path: str, *, stress: bool, recovery: bool) -
 
     if kind in ("echo", "echo_json"):
         value = "pyto-harness-test-input-42" if kind == "echo" else '{"fixture":"echo","n":7,"text":"中文🙂"}'
-        call = _run_call(case_id, fixture=case["fixture"], input_text=value)
+        call = _run_call(case_id, fixture=case["fixture"], input_text=value, automatic=automatic)
         returned = call.get("value")
         exact = _matches_text(returned, value)
         public_fields = {key: item for key, item in call.items() if key not in ("value", "status")}
@@ -408,7 +435,7 @@ def _run_case(case_id: str, report_path: str, *, stress: bool, recovery: bool) -
             _result(case_id, "failed", "Could not create the harmless path probe: {}.".format(type(exc).__name__), report_path)
             return
         print("The script created a harmless probe file at: {}".format(probe_path))
-        call = _run_call(case_id, fixture=fixture, input_text=probe_path)
+        call = _run_call(case_id, fixture=fixture, input_text=probe_path, automatic=automatic)
         returned = call.get("value")
         exact = _matches_text(returned, "PYTO_HARNESS_PATH_PROBE")
         try:
@@ -432,7 +459,7 @@ def _run_case(case_id: str, report_path: str, *, stress: bool, recovery: bool) -
 
     if kind == "stress_output":
         fixture = case["fixture"]
-        if not _confirm_fixture(case_id, fixture):
+        if not _confirm_fixture(case_id, fixture, automatic=automatic):
             _result(case_id, "not_run", "User skipped fixture invocation.", report_path, shortcut=fixture)
             return
         samples = []
@@ -455,7 +482,7 @@ def _run_case(case_id: str, report_path: str, *, stress: bool, recovery: bool) -
 
     if kind == "stress_input":
         fixture = case["fixture"]
-        if not _confirm_fixture(case_id, fixture):
+        if not _confirm_fixture(case_id, fixture, automatic=automatic):
             _result(case_id, "not_run", "User skipped fixture invocation.", report_path, shortcut=fixture)
             return
         samples = []
@@ -479,7 +506,7 @@ def _run_case(case_id: str, report_path: str, *, stress: bool, recovery: bool) -
         fixture = case["fixture"]
         successes = 0
         failures = 0
-        if not _confirm_fixture(case_id, fixture):
+        if not _confirm_fixture(case_id, fixture, automatic=automatic):
             _result(case_id, "not_run", "User skipped fixture invocation.", report_path, shortcut=fixture)
             return
         started = time.monotonic()
@@ -504,14 +531,15 @@ def _run_case(case_id: str, report_path: str, *, stress: bool, recovery: bool) -
         return
 
     if kind == "missing":
-        missing_name = PREFIX + "missing-" + str(int(time.time()))
-        call = _run_call(case_id, fixture=missing_name)
+        missing_name = PREFIX + "missing-" + secrets.token_hex(8)
+        print("A14 will attempt this generated name: {}".format(missing_name))
+        call = _run_call(case_id, fixture=missing_name, automatic=automatic)
         _record_call(case_id, report_path, call, "Nonexistent fixture lookup recorded.")
         return
 
     if kind == "names":
         names = (PREFIX + "space fixture", PREFIX + "中文", PREFIX + "emoji-🧪")
-        if not _confirm_fixtures(case_id, names):
+        if not _confirm_fixtures(case_id, names, automatic=automatic):
             _result(case_id, "not_run", "User skipped fixture invocation.", report_path, variants=list(names))
             return
         observations = []
@@ -522,16 +550,23 @@ def _run_case(case_id: str, report_path: str, *, stress: bool, recovery: bool) -
         return
 
     if kind == "permission":
-        print("If this permission was already granted, revoke it in Settings before this check to observe the prompt.")
-        call = _run_call(case_id, fixture=case["fixture"])
-        notes = input("Did an iOS permission prompt appear? Enter yes/no/already-granted/unknown: ").strip().lower()
+        if automatic:
+            print("A previously granted permission may suppress the prompt; the automatic suite will not change Settings.")
+        else:
+            print("If this permission was already granted, revoke it in Settings only if you specifically want to observe the prompt.")
+        call = _run_call(case_id, fixture=case["fixture"], automatic=automatic)
+        if automatic:
+            notes = "requires_manual_observation"
+            print("Record whether iOS showed a notification permission prompt; the suite will continue without asking.")
+        else:
+            notes = input("Did an iOS permission prompt appear? Enter yes/no/already-granted/unknown: ").strip().lower()
         public_fields = {key: value for key, value in call.items() if key not in ("value", "status")}
         public_fields.setdefault("transport_state", call.get("transport_state") or "unknown")
         _result(case_id, call.get("status", "unknown"), "Permission prompt observation recorded.", report_path, permission_prompt=notes or "unknown", **public_fields)
         return
 
     if kind == "semantic":
-        call = _run_call(case_id, fixture=case["fixture"])
+        call = _run_call(case_id, fixture=case["fixture"], automatic=automatic)
         returned = call.get("value")
         semantic_failure = _matches_text(returned, "PYTO_HARNESS_SEMANTIC_FAILURE")
         public_fields = {key: value for key, value in call.items() if key not in ("value", "status")}
@@ -552,10 +587,36 @@ def _run_case(case_id: str, report_path: str, *, stress: bool, recovery: bool) -
     _result(case_id, "unknown", "No runner is defined for this case.", report_path)
 
 
+def _all_suite_fixtures() -> List[str]:
+    fixtures: List[str] = []
+    for case in CASES.values():
+        fixture = case.get("fixture")
+        if fixture and fixture not in fixtures:
+            fixtures.append(fixture)
+    for fixture in (PREFIX + "space fixture", PREFIX + "中文", PREFIX + "emoji-🧪"):
+        if fixture not in fixtures:
+            fixtures.append(fixture)
+    return fixtures
+
+
+def _print_all_suite_plan() -> None:
+    print("Automatic A1–A20 suite plan")
+    print("Required fixtures to create first:")
+    for fixture in _all_suite_fixtures():
+        print("  - {}".format(fixture))
+    print("A14 generates a random missing name; do not create that fixture.")
+    print("Continue only if these exact names belong to your harmless test fixtures, not personal Shortcuts.")
+    print("Before running A2, verify its local missing-file fixture fails safely when launched from Shortcuts.")
+    print("A5/A13 include progressive stress sizes; A6 waits 60 seconds and the x-callback has no enforced timeout.")
+    print("A3 may need you to cancel Ask for Input; A18 may show an iOS permission prompt. Those system prompts may need your tap.")
+    print("A7, A8, A16, A17, and A19 require manual checks and will be logged as unknown without pausing the batch.")
+    print("Type RUN ALL once to begin. Individual Shortcut confirmations are skipped after that.")
+
+
 def _usage() -> None:
     print("Pyto Shortcut validation — no LLM or network calls")
     print("Use --setup for fixture instructions; --case A1 (A1–A20); --suite basic, stress, recovery, all; --list; or q.")
-    print("Stress and recovery suites require explicit selection. Calls use only the test prefix.")
+    print("The all suite runs automatically after one RUN ALL confirmation. Calls use only the test prefix.")
     print("A report is written beside this script when the folder is writable.")
 
 
@@ -601,8 +662,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print("Unknown selection. Choose setup, A1–A20, basic, stress, recovery, list, or q.")
         return 2
     if selection in ("STRESS", "RECOVERY", "ALL"):
-        expected = "RUN " + selection
-        if input("This suite can send large inputs or block Pyto. Type {} to continue: ".format(expected)).strip() != expected:
+        if selection == "ALL":
+            _print_all_suite_plan()
+            expected = "RUN ALL"
+            prompt = "Type RUN ALL to start the full automatic batch: "
+        else:
+            expected = "RUN " + selection
+            prompt = "This suite can send large inputs or block Pyto. Type {} to continue: ".format(expected)
+        if input(prompt).strip() != expected:
             print("Suite skipped.")
             return 0
     for case_id in suites[selection]:
@@ -611,6 +678,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             report_path,
             stress=selection in ("STRESS", "ALL"),
             recovery=selection in ("RECOVERY", "ALL"),
+            automatic=selection == "ALL",
         )
     print("Report: {}".format(report_path))
     return 0

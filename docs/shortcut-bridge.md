@@ -51,14 +51,26 @@ launch method accepts script arguments, these are also available:
 --suite all
 ```
 
-Every Shortcut call displays the exact fixture name and requires typing `RUN`. The script
+When you run one case, every Shortcut call displays the exact fixture name and requires
+typing `RUN`. The full `all` suite instead lists all required fixture names and asks for a
+single `RUN ALL` confirmation; it then runs without per-case confirmations. The script
 refuses names outside the `pyto-harness-test-` prefix. It never enumerates or invokes
-personal Shortcuts. A random timestamped missing name is used for A14 and is shown for
-confirmation before the URL is opened. You can always skip by pressing Return. Use
+personal Shortcuts. A random missing name is generated and shown immediately before A14.
+You can always skip a single case by pressing Return. Use
 `--setup` to print all fixture recipes in Pyto; when you run a specific case, the script
 prints only the setup instructions for the fixtures that case needs before it asks you to
-type `RUN`. The A1 import link is included in both places. Pyto cannot create or import
+type `RUN`. In `all`, fixture setup recipes are available with `setup` before starting the
+batch. The A1 import link is included in both places. Pyto cannot create or import
 Shortcuts from Python, so each other fixture is a one-time setup in Apple's Shortcuts app.
+Before `RUN ALL`, make sure each listed name belongs to the harmless test fixture you
+created; the script cannot inspect Shortcut contents or distinguish a same-named personal
+Shortcut before launching it.
+
+The `all` batch includes stress checks A5/A13 and the 60-second A6 wait. The callback has
+no script-enforced timeout, so a stalled Shortcut can block the run. A3 may require you to
+cancel an iOS input prompt and A18 may show a permission prompt. A7, A8, A16, A17, and A19
+cannot run end-to-end in this standalone script; the batch records them as `unknown` and
+continues instead of waiting for manual notes.
 
 ## Create the harmless fixtures
 

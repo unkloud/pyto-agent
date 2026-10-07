@@ -16,7 +16,7 @@ file into a workspace on the device, runs it, and tells you what happened.
 * **Survives the app being killed.** Every turn is appended to a JSONL session log, so
   `--resume` picks up exactly where iOS interrupted you.
 
-**Latest published release: v1.0.25.** The Pyto Shortcut validation script now prints step-by-step fixture setup instructions with `--setup` and before each selected case. See the [release notes](RELEASE-NOTES-v1.0.25.md), [Shortcut bridge guide](docs/shortcut-bridge.md), and [browser interface guide](docs/web-interface.md).
+**Latest published release: v1.0.26.** The Pyto Shortcut validation script can run the full A1–A20 batch after one `RUN ALL` confirmation, without per-case prompts. See the [release notes](RELEASE-NOTES-v1.0.26.md), [Shortcut bridge guide](docs/shortcut-bridge.md), and [browser interface guide](docs/web-interface.md).
 
 ---
 
@@ -26,7 +26,7 @@ Choose one option. Each Python block is a complete script: copy the whole block 
 
 ### Option A — Install the latest release (recommended)
 
-This automatically finds the newest stable release on GitHub. It installs v1.0.24, including the optional `--web` interface and capability-foundation materials.
+This automatically finds the newest stable release on GitHub. It installs the latest release, including the optional `--web` interface and capability-foundation materials.
 
 ```python
 import json
@@ -52,7 +52,7 @@ sys.argv = ["install.py", "--ref", tag]
 runpy.run_path("install.py", run_name="__main__")
 ```
 
-### Option B — Install v1.0.24 exactly
+### Option B — Install v1.0.26 exactly
 
 Use this if you want this specific release, even after a newer one is available.
 
@@ -61,7 +61,7 @@ import runpy
 import sys
 import urllib.request
 
-tag = "v1.0.24"
+tag = "v1.0.26"
 installer_url = "https://raw.githubusercontent.com/unkloud/pyto-agent/" + tag + "/install.py"
 with urllib.request.urlopen(installer_url, timeout=120) as response:
     with open("install.py", "wb") as installer:
@@ -71,12 +71,12 @@ sys.argv = ["install.py", "--ref", tag]
 runpy.run_path("install.py", run_name="__main__")
 ```
 
-### Option C — Install v1.0.24 from Files or AirDrop
+### Option C — Install v1.0.26 from Files or AirDrop
 
 Use this if you downloaded the files in Safari or received them from someone else. Download the installer and source ZIP to Files, then run the script below. Pyto will ask you to choose the installer first and the ZIP file second. You do not need to rename either file or type a path.
 
-- [Download the v1.0.24 installer](https://raw.githubusercontent.com/unkloud/pyto-agent/v1.0.24/install.py)
-- [Download the v1.0.24 source ZIP](https://github.com/unkloud/pyto-agent/archive/refs/tags/v1.0.24.zip)
+- [Download the v1.0.26 installer](https://raw.githubusercontent.com/unkloud/pyto-agent/v1.0.26/install.py)
+- [Download the v1.0.26 source ZIP](https://github.com/unkloud/pyto-agent/archive/refs/tags/v1.0.26.zip)
 - [Download the v1.0.17 device diagnostic](https://github.com/unkloud/pyto-agent/releases/download/v1.0.17/device_release_diagnostic_v1.0.17.py) (this does not test the web interface)
 
 ```python
@@ -88,7 +88,7 @@ installer_path = fs.import_file()
 archive_path = fs.import_file()
 sys.argv = [
     installer_path,
-    "--ref", "v1.0.24",
+    "--ref", "v1.0.26",
     "--zip", archive_path,
 ]
 runpy.run_path(installer_path, run_name="__main__")
@@ -586,7 +586,9 @@ The installer downloads the complete source tree, including `shortcut_validation
 beside `run.py`. To start the no-LLM device check, open that installed script in Pyto and
 tap Run; no separate download or copy is needed. Choose `--setup` to print the fixture
 recipes in Pyto, or select a case and the script prints setup steps for only the fixtures
-that case needs. For the quick A1 callback check, install
+that case needs. Choose `all` to run the full suite after one `RUN ALL` confirmation; some
+iOS dialogs still need a tap, and manual-only checks are logged as unknown without pausing
+the batch. For the quick A1 callback check, install
 the [`pyto-harness-test-return` fixture from iCloud](https://www.icloud.com/shortcuts/c3a68bc19a4c4efdae906603f5dc434b)
 and choose `A1`. The link requires a one-time network connection and tapping **Get Shortcut**;
 the validation script itself makes no network calls.
