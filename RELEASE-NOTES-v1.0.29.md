@@ -1,4 +1,4 @@
-# pyto-agent v1.0.29 (testing pre-release)
+# pyto-agent v1.0.29
 
 ## Browser chat improvements
 
@@ -7,8 +7,8 @@
 - Add an **All chats** link to the chat page header for a direct return to the saved-session list.
 - Let users permanently delete a saved chat from that list after confirmation. The active chat cannot be deleted.
 
-## Testing
+## Verification
 
 The full offline test suite passed: 886 tests under CPython 3.12. The web interface was also checked in Firefox at a narrow 320 × 760 viewport, including transcript scrolling, code-block overflow, navigation back to all chats, and deletion of an inactive session.
 
-Please treat this as a testing pre-release. Pyto/Safari device behavior has not been verified; use the browser interface device checklist and report any issues before this becomes a stable release.
+Pyto/Safari device behavior has not been verified; use the browser interface device checklist for on-device validation.
