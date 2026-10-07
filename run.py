@@ -820,11 +820,13 @@ def main(argv: Optional[List[str]] = None) -> int:
         )
         return 2
 
-    try:
-        session = open_session(config, resume=args.resume, label=(task[:24] or "chat"))
-    except (OSError, HarnessError) as exc:
-        print("could not open the session: {}".format(exc), file=sys.stderr)
-        return 2
+    session = None
+    if not args.web or args.resume:
+        try:
+            session = open_session(config, resume=args.resume, label=(task[:24] or "chat"))
+        except (OSError, HarnessError) as exc:
+            print("could not open the session: {}".format(exc), file=sys.stderr)
+            return 2
 
     interactive_frontend = bool(args.web)
     prompter = None if config.yolo else (UIApprover() if interactive_frontend else TerminalApprover())
@@ -843,18 +845,26 @@ def main(argv: Optional[List[str]] = None) -> int:
             __version__,
             ios.platform_label(),
             workspace,
-            session.path,
+            session.path if session is not None else "selected in browser",
             approvals_line,
         )
     )
 
+    controller = None
     try:
         if args.web:
             from harness.web import WebController, run_web
 
+            session_factory = None
+            if session is None:
+                session_factory = lambda resume_path: open_session(
+                    config, resume=resume_path, label=(task[:24] or "chat")
+                )
             controller = WebController(
                 options_factory=factory,
                 session=session,
+                sessions_dir=config.sessions_dir if session is None else "",
+                session_factory=session_factory,
                 approver=prompter if isinstance(prompter, UIApprover) else None,
                 verbose=args.verbose,
                 initial_prompt=task,
@@ -887,7 +897,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     finally:
         # The interactive front end returns after its active work has drained, so the
         # session and client stay valid for every browser callback.
-        session.close()
+        active_session = controller.session if controller is not None else session
+        if active_session is not None:
+            active_session.close()
         factory.client.close()  # type: ignore[attr-defined]
 
 

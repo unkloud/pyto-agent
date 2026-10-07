@@ -21,6 +21,7 @@ from typing import Any, Dict, Mapping, Optional, Tuple
 from . import program_inputs, programs
 from .markdown import parse_markdown
 from .security import scrub_secrets, scrub_value
+from .session import find_session_summary, list_session_summaries, project, summarize_session
 from .ui import Printer, UIApprover, format_history_page, run_turn_sync
 
 WEB_EVENT_LIMIT = 500
@@ -29,6 +30,8 @@ WEB_MARKDOWN_EVENT_LIMIT = 24 * 1024
 WEB_BODY_LIMIT = 64 * 1024
 WEB_PROMPT_LIMIT = 8192
 WEB_HISTORY_PAGE_SIZE = 12
+WEB_TRANSCRIPT_MESSAGE_LIMIT = 32
+WEB_TRANSCRIPT_TEXT_LIMIT = 6000
 _ASSET_TYPES = {
     "index.html": "text/html; charset=utf-8",
     "app.js": "text/javascript; charset=utf-8",
@@ -148,13 +151,19 @@ class WebController:
         self,
         *,
         options_factory: Any,
-        session: Any,
+        session: Any = None,
+        sessions_dir: str = "",
+        session_factory: Any = None,
         approver: Optional[UIApprover] = None,
         verbose: bool = False,
         initial_prompt: str = "",
     ) -> None:
         self.options_factory = options_factory
         self.session = session
+        self.sessions_dir = str(sessions_dir or "")
+        self.session_factory = session_factory
+        if self.session is None and (not self.sessions_dir or not callable(self.session_factory)):
+            raise ValueError("session selection requires a session directory and factory")
         self.approver = approver
         self.verbose = bool(verbose)
         self.state = WebState(initial_prompt=initial_prompt)
@@ -197,10 +206,74 @@ class WebController:
             raise WebInterfaceError("program inputs are too large")
         return self._start("program", {"program_id": program_id.strip(), "values": values})
 
+    def session_payload(self) -> Dict[str, Any]:
+        """Return either the startup choices or the selected session and its transcript."""
+        with self._lock:
+            session = self.session
+        if session is None:
+            return {
+                "selected": False,
+                "sessions": [summary.public() for summary in list_session_summaries(self.sessions_dir)],
+            }
+
+        path = str(getattr(session, "path", "") or "")
+        events = session.events
+        summary = summarize_session(session.header, events, path)
+        messages = []
+        for message in project(events):
+            role = message.get("role")
+            if role not in ("user", "assistant"):
+                continue
+            content = message.get("content")
+            if isinstance(content, str):
+                text = content
+            elif isinstance(content, list):
+                text = " ".join(
+                    str(part.get("text") or "")
+                    for part in content
+                    if isinstance(part, Mapping) and part.get("type") == "text"
+                )
+            else:
+                text = ""
+            text = scrub_secrets(text).strip()
+            if text:
+                if len(text) > WEB_TRANSCRIPT_TEXT_LIMIT:
+                    text = text[:WEB_TRANSCRIPT_TEXT_LIMIT] + "\n… [message shortened]"
+                messages.append({"role": role, "text": text})
+        return {
+            "selected": True,
+            "session": summary.public(),
+            "messages": messages[-WEB_TRANSCRIPT_MESSAGE_LIMIT:],
+        }
+
+    def select_session(self, session_id: Any) -> Dict[str, Any]:
+        """Open a new or discovered session. The browser supplies only a session ID."""
+        if not isinstance(session_id, str) or not session_id or len(session_id) > 128:
+            raise WebInterfaceError("choose a valid session")
+        with self._lock:
+            if self._closing or self.state.stop_requested.is_set():
+                raise WebInterfaceError("the web session is stopping")
+            if self.session is not None:
+                raise WebInterfaceError("a session is already active")
+            if session_id == "new":
+                path = None
+            else:
+                summary = find_session_summary(self.sessions_dir, session_id)
+                if summary is None:
+                    raise WebInterfaceError("that session is no longer available; reload the session list")
+                path = summary.path
+            try:
+                self.session = self.session_factory(path)
+            except Exception as exc:  # noqa: BLE001 - do not return local file paths to the browser
+                raise WebInterfaceError("could not open the selected session") from exc
+        return self.session_payload()
+
     def _start(self, kind: str, payload: Any) -> bool:
         with self._lock:
             if self._closing or self.state.stop_requested.is_set():
                 raise WebInterfaceError("the web session is stopping")
+            if self.session is None:
+                raise WebInterfaceError("choose a session before starting work")
             if self._busy:
                 return False
             self._cancel_current.clear()
@@ -228,7 +301,11 @@ class WebController:
         try:
             if self.approver is not None:
                 self.approver.reset()
-            options = self.options_factory(self.session)
+            with self._lock:
+                session = self.session
+            if session is None:
+                raise WebInterfaceError("choose a session before starting work")
+            options = self.options_factory(session)
             if kind == "chat" and options.client is not None:
                 options.client.reset_cancel()
             if self._cancel_current.is_set():
@@ -299,6 +376,8 @@ class WebController:
         )
 
     def programs_payload(self) -> Dict[str, Any]:
+        if self.session is None:
+            raise WebInterfaceError("choose a session before opening saved programs")
         context = getattr(self.options_factory, "context", None)
         workspace = getattr(context, "workspace", None)
         if workspace is None:
@@ -324,6 +403,8 @@ class WebController:
 
     def history_payload(self, offset: int = 0) -> Dict[str, Any]:
         # Use a snapshot so a simultaneous append cannot mutate the list being rendered.
+        if self.session is None:
+            raise WebInterfaceError("choose a session to view its history")
         messages = self.session.project()
         body, older = format_history_page(
             messages,
@@ -454,6 +535,8 @@ class LocalWebServer:
                         query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
                         since = self._query_int(query, "since", default=0, maximum=2**53 - 1)
                         self._send_json(200, parent.controller.state.snapshot(since))
+                    elif route == "api/session":
+                        self._send_json(200, parent.controller.session_payload())
                     elif route == "api/history":
                         query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
                         offset = self._query_int(query, "offset", default=0, maximum=100000)
@@ -482,7 +565,10 @@ class LocalWebServer:
                     return
                 try:
                     payload = self._read_json()
-                    if route == "api/chat":
+                    if route == "api/session":
+                        result = parent.controller.select_session(payload.get("id"))
+                        self._send_json(200, result)
+                    elif route == "api/chat":
                         started = parent.controller.start_chat(payload.get("prompt"))
                         if not started:
                             self._send_json(409, {"error": "An operation is already running"})

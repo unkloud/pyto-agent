@@ -1,7 +1,8 @@
 # Pyto Shortcut bridge: manual validation kit
 
-**Status: device behavior is unverified.** No A1–A20 result is claimed until a person runs
-the script in a real Pyto installation and keeps the dated JSONL run log. Pyto's published
+**Status: partial device evidence.** A real Pyto run observed A20 on 2026-10-07; the other
+cases and the registered `shortcut_run_wait` handler remain unverified unless separately
+recorded below. Pyto's published
 [`xcallback.open_url` documentation](https://pyto.readthedocs.io/en/latest/library/xcallback.html)
 describes a return value, and [Apple documents the x-callback URL behavior](https://support.apple.com/en-euro/guide/shortcuts/apdcd7f20a6f/ios),
 but the harness wrapper currently discards the returned value. Documentation alone is not
@@ -144,6 +145,21 @@ the real Pyto run. Record the Pyto app version from the device's About/settings 
 a note alongside the JSONL report; Pyto does not expose a stable standard-library API for
 that version, so the script records it as unknown. Do not treat a desktop run, Pyto
 documentation, or an unreviewed JSONL file as device verification.
+
+### Reviewed device observation — 2026-10-07
+
+The user-provided A20 `RESULT` from kit `1.0.27` reports `status: observed`,
+`transport_state: ok`, `return_type: str`, and `semantic_marker_seen: true`. The echo
+fixture returned the 29-byte `PYTO_HARNESS_SEMANTIC_FAILURE` marker as text. The runtime
+reported iOS, Python `3.10.0`, system `macOS-26.6.2-iPhone15,2-64bit`, and Pyto app version
+unknown. The source report is
+`~/Documents/deviceagent/pyto-agent/shortcut-validation-20261007T211504Z.jsonl`.
+
+This verifies one direct `xcallback.open_url` return-path case on that installation. It
+does not verify that the registered `shortcut_run_wait` tool captures or returns the value;
+that handler still discards the return value. It also does not show that the Shortcut's
+semantic operation failed—the fixture deliberately returned a failure marker, which the
+test records separately from transport success.
 
 ## If the bridge is unreliable
 

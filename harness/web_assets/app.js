@@ -14,6 +14,7 @@
   let toastTimer = 0;
   let pollTimer = 0;
   let stopping = false;
+  let sessionReady = false;
 
   function schedulePoll(delay = 750) {
     window.clearTimeout(pollTimer);
@@ -372,6 +373,7 @@
   }
 
   async function loadHistory() {
+    if (!sessionReady) return;
     try {
       const response = await api(`history?offset=${historyOffset}`);
       el("history-text").textContent = response.text;
@@ -379,6 +381,97 @@
       el("older-history").hidden = !historyHasOlder;
       el("older-history").textContent = historyOffset ? "Load older messages" : "Older messages";
     } catch (error) { el("history-text").textContent = error.message; }
+  }
+
+  function sessionDate(value) {
+    const date = new Date(Number(value) || 0);
+    return Number.isNaN(date.getTime()) ? "Date unavailable" : date.toLocaleString();
+  }
+
+  function sessionMetadata(session) {
+    const pieces = [sessionDate(session.updated_at)];
+    if (session.model) pieces.push(session.model);
+    if (session.workspace) pieces.push(session.workspace);
+    pieces.push(`${session.message_count || 0} messages`);
+    return pieces.join(" · ");
+  }
+
+  function showSelectedSession(response) {
+    if (!response || !response.selected) return;
+    sessionReady = true;
+    el("session-start").hidden = true;
+    el("workspace-tabs").hidden = false;
+    const chat = el("view-chat");
+    chat.hidden = false;
+    chat.classList.add("active");
+    el("active-session").textContent = sessionMetadata(response.session || {});
+    transcript.replaceChildren();
+    for (const message of response.messages || []) {
+      const isUser = message.role === "user";
+      addBubble(isUser ? "You" : "Harness", message.text || "", isUser ? "user" : "assistant");
+    }
+    loadHistory();
+  }
+
+  function renderSessionChoices(sessions) {
+    const list = el("session-list");
+    const continueButton = el("continue-session");
+    const loading = el("session-loading");
+    list.replaceChildren();
+    loading.hidden = true;
+    continueButton.hidden = !sessions.length;
+    if (!sessions.length) {
+      const empty = document.createElement("p");
+      empty.className = "muted";
+      empty.textContent = "No previous sessions are available.";
+      list.append(empty);
+      return;
+    }
+
+    const mostRecent = sessions[0];
+    continueButton.textContent = `Continue most recent · ${mostRecent.preview || sessionDate(mostRecent.updated_at)}`;
+    continueButton.onclick = () => chooseSession(mostRecent.id);
+    for (const session of sessions) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "session-choice";
+      const title = document.createElement("span");
+      title.className = "session-choice-title";
+      title.textContent = session.preview || "Session with no messages yet";
+      const meta = document.createElement("span");
+      meta.className = "session-choice-meta";
+      meta.textContent = sessionMetadata(session);
+      button.append(title, meta);
+      button.addEventListener("click", () => chooseSession(session.id));
+      list.append(button);
+    }
+  }
+
+  async function chooseSession(id) {
+    const buttons = [el("continue-session"), el("new-session"), ...el("session-list").querySelectorAll("button")];
+    buttons.forEach((button) => { button.disabled = true; });
+    el("session-error").hidden = true;
+    try {
+      const response = await api("session", { method: "POST", body: JSON.stringify({ id }) });
+      showSelectedSession(response);
+    } catch (error) {
+      el("session-error").textContent = error.message;
+      el("session-error").hidden = false;
+      buttons.forEach((button) => { button.disabled = false; });
+    }
+  }
+
+  async function initializeSession() {
+    try {
+      const response = await api("session");
+      if (response.selected) showSelectedSession(response);
+      else renderSessionChoices(response.sessions || []);
+    } catch (error) {
+      el("session-loading").hidden = true;
+      el("session-error").textContent = error.message;
+      el("session-error").hidden = false;
+    }
+    poll();
   }
 
   document.querySelectorAll(".tab").forEach((tab) => tab.addEventListener("click", () => activateView(tab.dataset.view)));
@@ -411,7 +504,7 @@
   el("deny").addEventListener("click", () => answerApproval(false));
   el("refresh-programs").addEventListener("click", loadPrograms);
   el("older-history").addEventListener("click", () => { historyOffset += 12; loadHistory(); });
+  el("new-session").addEventListener("click", () => chooseSession("new"));
 
-  loadHistory();
-  poll();
+  initializeSession();
 })();

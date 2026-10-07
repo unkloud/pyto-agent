@@ -345,7 +345,7 @@ class TestExamplesAreStdlibOnly(unittest.TestCase):
         allowed = {
             "__future__", "argparse", "datetime", "fnmatch", "json", "os", "re", "runpy", "sys", "typing",
             "textwrap", "collections", "pathlib", "shutil", "hashlib", "math", "csv", "io", "time", "errno",
-            "threading", "urllib", "interactive_logic", "folder_organizer_logic",
+            "threading", "urllib", "tempfile", "harness", "interactive_logic", "folder_organizer_logic",
         }
         # Pyto bridges and Objective-C framework modules are imported only when their
         # device-specific functions run, so loading the examples remains safe off-device.

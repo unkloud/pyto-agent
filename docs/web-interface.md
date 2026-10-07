@@ -1,10 +1,23 @@
 # Browser interface
 
-Run `python run.py --web` in Pyto to start a local browser front end for the existing
-harness session. Pyto opens the generated URL in Safari when it can. If automatic opening
-fails, the URL is printed in the Pyto console; open it on the same device while the run is
-active. An optional task passed on the command line is placed in the message box and is
-not sent until you press **Send**.
+Run `python run.py --web` in Pyto to start a local browser front end for the harness. Pyto
+opens the generated URL in Safari when it can. If automatic opening fails, the URL is
+printed in the Pyto console; open it on the same device while the run is active. An optional
+task passed on the command line is placed in the message box and is not sent until you press
+**Send**.
+
+## Continue or choose a session
+
+Without `--resume`, the web page starts with a session chooser. **Continue most recent**
+resumes the newest valid local session. The list below it lets you choose another saved
+session, with its last message preview, date, model, and workspace. **Start a new session**
+creates a separate log and leaves the previous sessions unchanged.
+
+When a session is resumed, its saved conversation is restored as model context and the
+recent user and assistant messages appear in Chat. The History view remains available for
+the full projected conversation. To open a specific session directly and skip the chooser,
+pass its log path to `--resume`; passing a directory resumes its most recently modified
+`.jsonl` session.
 
 The page has three views:
 
@@ -84,17 +97,21 @@ These checks require a real Pyto/iOS device and have not been run from the deskt
 environment:
 
 1. Launch `run.py --web` and confirm Safari opens the tokenized `127.0.0.1` URL.
-2. Send a chat message and confirm the response appears without freezing Pyto.
-3. Trigger an approval-required action; verify Allow executes it and Deny blocks it.
-4. Start a slow request and confirm **Stop turn** returns the page to an idle state.
-5. Open Saved programs and run one without an input schema.
-6. Run a saved program with text, number, and choice fields; check required and optional
+2. Without `--resume`, continue a previous session and confirm recent messages appear in
+   Chat and the full conversation appears in History; start a fresh session and confirm its
+   history starts empty.
+3. Repeat with an explicit `--resume` path and confirm the session chooser is skipped.
+4. Send a chat message and confirm the response appears without freezing Pyto.
+5. Trigger an approval-required action; verify Allow executes it and Deny blocks it.
+6. Start a slow request and confirm **Stop turn** returns the page to an idle state.
+7. Open Saved programs and run one without an input schema.
+8. Run a saved program with text, number, and choice fields; check required and optional
    values.
-7. Enter an accessible file or folder path and verify it reaches the saved program.
-8. Open History and confirm messages from this session appear.
-9. Background Pyto while Safari is active, return to Pyto, and confirm the server is still
+9. Enter an accessible file or folder path and verify it reaches the saved program.
+10. Open History and confirm messages from this session appear.
+11. Background Pyto while Safari is active, return to Pyto, and confirm the server is still
    active and cleanup works after **Stop web session**.
-10. Close Safari without pressing Stop, then return and stop the session; separately stop
+12. Close Safari without pressing Stop, then return and stop the session; separately stop
     the script from Pyto and confirm the port is released.
 
 Desktop tests exercise the HTTP routes, authentication checks, chat loop, approvals,

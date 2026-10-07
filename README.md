@@ -16,7 +16,7 @@ file into a workspace on the device, runs it, and tells you what happened.
 * **Survives the app being killed.** Every turn is appended to a JSONL session log, so
   `--resume` picks up exactly where iOS interrupted you.
 
-**Latest published release: v1.0.27.** The Pyto Shortcut validation script reuses the echo fixture for A1 and A20, reducing the full suite's fixture count. See the [release notes](RELEASE-NOTES-v1.0.27.md), [Shortcut bridge guide](docs/shortcut-bridge.md), and [browser interface guide](docs/web-interface.md).
+**Latest published release: v1.0.28.** The browser interface can now resume a recent session, choose another saved session, or start a fresh one. See the [release notes](RELEASE-NOTES-v1.0.28.md), [Shortcut bridge guide](docs/shortcut-bridge.md), and [browser interface guide](docs/web-interface.md).
 
 ---
 
@@ -52,7 +52,7 @@ sys.argv = ["install.py", "--ref", tag]
 runpy.run_path("install.py", run_name="__main__")
 ```
 
-### Option B — Install v1.0.27 exactly
+### Option B — Install v1.0.28 exactly
 
 Use this if you want this specific release, even after a newer one is available.
 
@@ -61,7 +61,7 @@ import runpy
 import sys
 import urllib.request
 
-tag = "v1.0.27"
+tag = "v1.0.28"
 installer_url = "https://raw.githubusercontent.com/unkloud/pyto-agent/" + tag + "/install.py"
 with urllib.request.urlopen(installer_url, timeout=120) as response:
     with open("install.py", "wb") as installer:
@@ -71,12 +71,12 @@ sys.argv = ["install.py", "--ref", tag]
 runpy.run_path("install.py", run_name="__main__")
 ```
 
-### Option C — Install v1.0.27 from Files or AirDrop
+### Option C — Install v1.0.28 from Files or AirDrop
 
 Use this if you downloaded the files in Safari or received them from someone else. Download the installer and source ZIP to Files, then run the script below. Pyto will ask you to choose the installer first and the ZIP file second. You do not need to rename either file or type a path.
 
-- [Download the v1.0.27 installer](https://raw.githubusercontent.com/unkloud/pyto-agent/v1.0.27/install.py)
-- [Download the v1.0.27 source ZIP](https://github.com/unkloud/pyto-agent/archive/refs/tags/v1.0.27.zip)
+- [Download the v1.0.28 installer](https://raw.githubusercontent.com/unkloud/pyto-agent/v1.0.28/install.py)
+- [Download the v1.0.28 source ZIP](https://github.com/unkloud/pyto-agent/archive/refs/tags/v1.0.28.zip)
 - [Download the v1.0.17 device diagnostic](https://github.com/unkloud/pyto-agent/releases/download/v1.0.17/device_release_diagnostic_v1.0.17.py) (this does not test the web interface)
 
 ```python
@@ -88,7 +88,7 @@ installer_path = fs.import_file()
 archive_path = fs.import_file()
 sys.argv = [
     installer_path,
-    "--ref", "v1.0.27",
+    "--ref", "v1.0.28",
     "--zip", archive_path,
 ]
 runpy.run_path(installer_path, run_name="__main__")

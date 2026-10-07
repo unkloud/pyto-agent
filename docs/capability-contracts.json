@@ -3557,7 +3557,7 @@
         "max_input_bytes": "unknown until A13 is run on a real Pyto installation",
         "max_output_bytes": "unknown until A5 is run on a real Pyto installation",
         "name_resolution_and_encoding": "unknown until A14-A17 are run on a real Pyto installation",
-        "return_value_behavior": "source-verified: the wrapper discards the opener return value; the underlying xcallback result type and device behavior remain unknown until A1-A4 are run",
+        "return_value_behavior": "Source-verified: the registered wrapper discards the opener return value. A direct xcallback.open_url call returned str in device case A20 on 2026-10-07; other return, encoding, and size behaviors remain unknown.",
         "recovery": "unknown until A6-A8 are run on a real Pyto installation"
       },
       "idempotent": null,
@@ -3570,23 +3570,45 @@
       "examples": [
         {
           "arguments": {
-            "name": "pyto-harness-test-return",
-            "input_text": "",
+            "name": "pyto-harness-test-echo",
+            "input_text": "PYTO_HARNESS_OK",
             "callback": "pyto://"
           },
-          "note": "Use only a fixture the user created and explicitly confirmed; see docs/shortcut-bridge.md."
+          "note": "Illustrative only; use a fixture the user created and explicitly confirmed."
         }
       ],
       "evidence": {
         "status": "implemented",
         "source": "harness/tools_ios.py#L1391",
         "inspected_on": "2026-10-07",
-        "device_status": "unknown; not run on a real Pyto installation for this goal",
+        "device_status": "partial: direct xcallback A20 observed on a real Pyto installation; registered shortcut_run_wait handler not exercised end-to-end",
         "supporting_documentation": [
           "https://pyto.readthedocs.io/en/latest/library/xcallback.html",
           "https://support.apple.com/en-euro/guide/shortcuts/apdcd7f20a6f/ios"
         ],
-        "documentation_is_not_device_verification": true
+        "documentation_is_not_device_verification": true,
+        "device_observations": [
+          {
+            "case_id": "A20",
+            "recorded_at_utc": "2026-10-07T21:16:50.699498+00:00",
+            "kit_version": "1.0.27",
+            "fixture": "pyto-harness-test-echo",
+            "transport_state": "ok",
+            "return_type": "str",
+            "return_preview": "PYTO_HARNESS_SEMANTIC_FAILURE",
+            "return_utf8_bytes": 29,
+            "semantic_result": "fixture_failure_text",
+            "semantic_marker_seen": true,
+            "runtime": {
+              "platform": "ios",
+              "python_version": "3.10.0",
+              "pyto_app_version": "unknown; no stable stdlib API exposes it",
+              "system": "macOS-26.6.2-iPhone15,2-64bit"
+            },
+            "source": "User-provided RESULT; report ~/Documents/deviceagent/pyto-agent/shortcut-validation-20261007T211504Z.jsonl",
+            "scope_note": "Direct xcallback test only; does not test the registered handler, which discards the callback return value."
+          }
+        ]
       }
     },
     {

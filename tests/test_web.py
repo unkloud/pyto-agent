@@ -19,6 +19,13 @@ from typing import Any, Dict, Optional, Tuple
 import run as runner
 from harness import programs
 from harness.loop import make_policy
+from harness.session import (
+    SessionHeader,
+    SessionLog,
+    assistant_message_event,
+    new_session_path,
+    user_message_event,
+)
 from harness.tools import ToolDef
 from harness.ui import UIApprover
 from harness.web import LocalWebServer, WebController, WebState, _BackgroundKeepalive, run_web
@@ -156,6 +163,82 @@ class TestWebFrontEnd(TempDirTestCase):
         )
         self.assertEqual(status, 400)
         self.assertIn(b"65536 bytes", body)
+
+    def test_session_picker_lists_safe_metadata_and_resumes_by_server_resolved_id(self) -> None:
+        controller, _provider, _registry = self.make_controller()
+        controller.session.close()
+        controller.session = None
+        sessions_dir = self.path("session-choices")
+        saved_path = os.path.join(sessions_dir, "saved.jsonl")
+        saved = SessionLog.create(
+            saved_path,
+            header=SessionHeader(id="saved-session", workspace=self.workspace_dir, model="mock-model"),
+        )
+        saved.append("message.user", user_message_event("Please remember this request"))
+        saved.append(
+            "message.assistant",
+            assistant_message_event({"role": "assistant", "content": "I have restored it."}),
+        )
+        saved.close()
+        selected_paths = []
+
+        def session_factory(path):
+            selected_paths.append(path)
+            return SessionLog.resume(path) if path else SessionLog.create(
+                new_session_path(sessions_dir), workspace=self.workspace_dir
+            )
+
+        controller.sessions_dir = sessions_dir
+        controller.session_factory = session_factory
+        self.addCleanup(lambda: controller.session.close() if controller.session is not None else None)
+        server = self.start_server(controller)
+
+        status, _headers, body = self.request(server, "api/session")
+        self.assertEqual(status, 200)
+        available = json.loads(body.decode("utf-8"))
+        self.assertFalse(available["selected"])
+        self.assertEqual([row["id"] for row in available["sessions"]], ["saved-session"])
+        self.assertNotIn(saved_path, body.decode("utf-8"))
+
+        status, result = self.post_json(server, "api/session", {"id": "../saved.jsonl"})
+        self.assertEqual(status, 400)
+        self.assertEqual(selected_paths, [])
+
+        status, result = self.post_json(server, "api/session", {"id": "saved-session"})
+        self.assertEqual(status, 200, result)
+        self.assertTrue(result["selected"])
+        self.assertEqual(selected_paths, [saved_path])
+        self.assertEqual(
+            [(message["role"], message["text"]) for message in result["messages"]],
+            [("user", "Please remember this request"), ("assistant", "I have restored it.")],
+        )
+        self.assertNotIn(saved_path, json.dumps(result))
+
+    def test_session_picker_starts_an_independent_new_log(self) -> None:
+        controller, _provider, _registry = self.make_controller()
+        controller.session.close()
+        controller.session = None
+        sessions_dir = self.path("session-choices")
+        old_path = os.path.join(sessions_dir, "old.jsonl")
+        old = SessionLog.create(old_path, header=SessionHeader(id="old-session"))
+        old.append("message.user", user_message_event("Keep this session"))
+        old.close()
+        controller.sessions_dir = sessions_dir
+        controller.session_factory = lambda path: SessionLog.create(
+            new_session_path(sessions_dir), workspace=self.workspace_dir
+        )
+        self.addCleanup(lambda: controller.session.close() if controller.session is not None else None)
+        server = self.start_server(controller)
+
+        status, result = self.post_json(server, "api/session", {"id": "new"})
+        self.assertEqual(status, 200, result)
+        self.assertTrue(result["selected"])
+        self.assertNotEqual(controller.session.path, old_path)
+        self.assertEqual(controller.session.project(), [])
+        reopened = SessionLog.resume(old_path)
+        self.assertEqual(reopened.project()[0]["content"], "Keep this session")
+        reopened.close()
+        self.assertEqual(len([name for name in os.listdir(sessions_dir) if name.endswith(".jsonl")]), 2)
 
     def test_chat_runs_through_provider_and_outputs_events(self) -> None:
         controller, provider, _registry = self.make_controller([text_response("Hello from the mock")])

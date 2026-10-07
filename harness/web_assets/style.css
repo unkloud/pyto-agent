@@ -46,6 +46,16 @@ h3 { margin: 0 0 8px; font-size: 1rem; }
 .eyebrow { margin: 0 0 5px; color: var(--muted); font-weight: 750; font-size: .67rem; letter-spacing: .12em; }
 .connection { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: .82rem; }
 .pulse { width: 8px; height: 8px; border-radius: 50%; background: var(--good); box-shadow: 0 0 0 4px color-mix(in srgb, var(--good) 15%, transparent); }
+.session-start { max-width: 680px; margin: 7vh auto; padding: clamp(20px, 5vw, 34px); border: 1px solid var(--line); border-radius: 20px; background: var(--surface); box-shadow: var(--shadow); }
+.session-start h2 { margin-bottom: 8px; }
+.session-start > .lede { margin-bottom: 20px; }
+.session-start > .button { margin-top: 14px; }
+.session-list { display: grid; gap: 9px; margin-top: 13px; }
+.session-choice { display: grid; gap: 5px; width: 100%; padding: 12px 14px; text-align: left; color: var(--ink); background: var(--surface-soft); border: 1px solid var(--line); border-radius: 13px; }
+.session-choice:hover, .session-choice:focus-visible { border-color: var(--accent); outline: none; }
+.session-choice-title { font-weight: 700; overflow-wrap: anywhere; }
+.session-choice-meta { color: var(--muted); font-size: .76rem; line-height: 1.4; }
+.active-session { margin: -9px 0 13px; }
 .tabs { display: flex; gap: 5px; border-bottom: 1px solid var(--line); margin: 0 -2px 22px; }
 .tab { border: 0; color: var(--muted); background: transparent; padding: 11px 14px 12px; border-bottom: 2px solid transparent; font-weight: 650; }
 .tab.active { color: var(--accent-strong); border-color: var(--accent); }

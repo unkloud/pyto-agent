@@ -18,18 +18,30 @@
       <div class="connection"><span class="pulse" aria-hidden="true"></span><span id="connection">Connecting…</span></div>
     </header>
 
-    <nav class="tabs" aria-label="Workspace views">
+    <nav id="workspace-tabs" class="tabs" aria-label="Workspace views" hidden>
       <button class="tab active" data-view="chat" aria-selected="true">Chat</button>
       <button class="tab" data-view="programs" aria-selected="false">Saved programs</button>
       <button class="tab" data-view="history" aria-selected="false">History</button>
     </nav>
 
     <main>
-      <section id="view-chat" class="view active" aria-labelledby="chat-heading">
+      <section id="session-start" class="session-start" aria-labelledby="session-start-heading">
+        <p class="eyebrow">SAVED LOCALLY</p>
+        <h2 id="session-start-heading">Choose a session</h2>
+        <p class="lede">Continue a recent conversation or start fresh. Previous sessions remain saved on this device.</p>
+        <p id="session-loading" class="muted">Loading saved sessions…</p>
+        <p id="session-error" class="bubble error" hidden></p>
+        <button id="continue-session" class="button primary" type="button" hidden>Continue most recent</button>
+        <div id="session-list" class="session-list" aria-label="Previous sessions"></div>
+        <button id="new-session" class="button secondary" type="button">Start a new session</button>
+      </section>
+
+      <section id="view-chat" class="view active" aria-labelledby="chat-heading" hidden>
         <div class="section-heading">
           <div><p class="eyebrow">CONVERSATION</p><h2 id="chat-heading">Work with your harness</h2></div>
           <button id="stop-turn" class="button secondary" disabled>Stop turn</button>
         </div>
+        <p id="active-session" class="muted active-session"></p>
         <div id="transcript" class="transcript" aria-live="polite" aria-label="Conversation transcript"></div>
         <div id="approval" class="approval hidden" role="alertdialog" aria-labelledby="approval-title">
           <div class="approval-mark" aria-hidden="true">!</div>

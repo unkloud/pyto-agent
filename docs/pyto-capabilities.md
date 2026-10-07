@@ -413,12 +413,14 @@ transport state and semantic result must remain separate.
 
 The existing registry applies a 30-second timeout to this tool, but synchronous handlers
 run in worker threads and a timeout does not kill a blocked thread (`harness/tools.py`,
-`ToolRegistry` contract). Cancellation, callback behavior, input/output limits, name
-encoding, repeated-call stability and recovery still need the manual A1–A20 run documented
-in [`shortcut-bridge.md`](shortcut-bridge.md). Until a real Pyto run is reviewed and dated,
-all those device claims remain unknown. If return or recovery behavior proves unreliable,
-downstream integrations that need returned data must be scoped as unverified; this audit
-does not add a workaround.
+`ToolRegistry` contract). A user-provided Pyto run dated 2026-10-07 observed A20: the direct
+`xcallback.open_url` call returned a `str` containing the fixture's semantic-failure marker
+with `transport_state: ok`. This is one narrow device observation, not verification of the
+model-facing `shortcut_run_wait` handler, which still discards the callback return value.
+Cancellation, size limits, name handling, repeated-call stability and recovery remain
+unverified; see the dated record in [`shortcut-bridge.md`](shortcut-bridge.md). If return or
+recovery behavior proves unreliable, downstream integrations that need returned data must
+be scoped accordingly; this audit does not add a workaround.
 
 ### Data-flow prototype
 

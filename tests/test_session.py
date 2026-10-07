@@ -13,6 +13,7 @@ from harness.session import (
     SessionLog,
     assistant_message_event,
     completed_tool_event,
+    list_session_summaries,
     project,
     read_log,
     redact,
@@ -123,6 +124,48 @@ class TestAppendAndResume(TempDirTestCase):
         read_only = SessionLog.resume(log.path, writable=False)
         with self.assertRaises(SessionFormatError):
             read_only.append("message.user", user_message_event("x"))
+
+
+class TestSessionDiscovery(TempDirTestCase):
+    def test_lists_valid_sessions_newest_first_without_exposing_paths(self) -> None:
+        sessions_dir = self.path("sessions")
+        os.makedirs(sessions_dir)
+        records = [
+            ("older", 1000, "First request"),
+            ("newer", 2000, "Most recent request"),
+        ]
+        for name, created_at, message in records:
+            path = os.path.join(sessions_dir, name + ".jsonl")
+            log = SessionLog.create(
+                path,
+                header=SessionHeader(
+                    id=name,
+                    created_at=created_at,
+                    workspace=self.workspace_dir,
+                    model="mock-model",
+                ),
+            )
+            log.append("message.user", user_message_event(message))
+            log.close()
+            os.utime(path, (created_at / 1000, created_at / 1000))
+
+        with open(os.path.join(sessions_dir, "invalid.jsonl"), "w", encoding="utf-8") as handle:
+            handle.write("not a session log\n")
+
+        summaries = list_session_summaries(sessions_dir)
+        self.assertEqual([summary.id for summary in summaries], ["newer", "older"])
+        self.assertEqual(summaries[0].model, "mock-model")
+        self.assertEqual(summaries[0].preview, "Most recent request")
+        self.assertNotIn("path", summaries[0].public())
+        self.assertNotIn(summaries[0].path, str(summaries[0].public()))
+
+    def test_ignores_duplicate_session_ids(self) -> None:
+        sessions_dir = self.path("sessions")
+        os.makedirs(sessions_dir)
+        for name in ("one", "two"):
+            path = os.path.join(sessions_dir, name + ".jsonl")
+            SessionLog.create(path, header=SessionHeader(id="duplicate")).close()
+        self.assertEqual(list_session_summaries(sessions_dir), [])
 
 
 class TestProjection(TempDirTestCase):

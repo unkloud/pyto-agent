@@ -176,6 +176,128 @@ class SessionEvent:
         return cls(seq=seq, type=kind, time=int(wire.get("time") or now_ms()), data=data)
 
 
+@dataclass(frozen=True)
+class SessionSummary:
+    """Safe metadata for choosing a durable session in a front end."""
+
+    id: str
+    created_at: int
+    updated_at: int
+    workspace: str
+    model: str
+    preview: str
+    message_count: int
+    path: str
+
+    def public(self) -> Dict[str, Any]:
+        """Metadata suitable for the local browser API; never includes the file path."""
+        return {
+            "id": self.id,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+            "workspace": self.workspace,
+            "model": self.model,
+            "preview": self.preview,
+            "message_count": self.message_count,
+        }
+
+
+def summarize_session(
+    header: SessionHeader,
+    events: Sequence[SessionEvent],
+    path: str,
+    *,
+    modified_at: Optional[int] = None,
+) -> SessionSummary:
+    """Project a session log into bounded, non-secret selection metadata."""
+    messages = project(events)
+    preview = ""
+    for message in reversed(messages):
+        if message.get("role") != "user":
+            continue
+        content = message.get("content")
+        if isinstance(content, str):
+            preview = content
+        elif isinstance(content, list):
+            preview = " ".join(
+                str(part.get("text") or "")
+                for part in content
+                if isinstance(part, Mapping) and part.get("type") == "text"
+            )
+        break
+    preview = " ".join(scrub_value(preview).split())[:240]
+    newest_event = max((event.time for event in events), default=header.created_at)
+    updated_at = max(header.created_at, newest_event, int(modified_at or 0))
+    return SessionSummary(
+        id=header.id,
+        created_at=header.created_at,
+        updated_at=updated_at,
+        workspace=header.workspace,
+        model=header.model or str(header.config.get("model") or ""),
+        preview=preview,
+        message_count=len(messages),
+        path=path,
+    )
+
+
+def list_session_summaries(directory: str) -> List[SessionSummary]:
+    """Return valid, uniquely identified JSONL sessions from one directory.
+
+    Symlinks, directories, invalid logs, and ambiguous duplicate IDs are ignored. Paths
+    stay server-side; callers should expose :meth:`SessionSummary.public` to a client.
+    """
+    resolved = expand_user_path(directory, what="sessions directory")
+    try:
+        with os.scandir(resolved) as scan:
+            entries = list(scan)
+    except FileNotFoundError:
+        return []
+    except OSError:
+        return []
+
+    summaries: List[SessionSummary] = []
+    for entry in entries:
+        if not entry.name.endswith(".jsonl"):
+            continue
+        try:
+            if not entry.is_file(follow_symlinks=False):
+                continue
+            stat = entry.stat(follow_symlinks=False)
+            header, events, _warnings = read_log(entry.path)
+        except (OSError, ValueError, TypeError, SessionFormatError):
+            continue
+        if (
+            not header.id
+            or len(header.id) > 128
+            or any(not (char.isascii() and (char.isalnum() or char in "-_")) for char in header.id)
+        ):
+            continue
+        summaries.append(
+            summarize_session(
+                header,
+                events,
+                os.path.abspath(entry.path),
+                modified_at=int(stat.st_mtime * 1000),
+            )
+        )
+
+    counts: Dict[str, int] = {}
+    for summary in summaries:
+        counts[summary.id] = counts.get(summary.id, 0) + 1
+    unique = [summary for summary in summaries if counts[summary.id] == 1]
+    return sorted(unique, key=lambda item: (item.updated_at, item.created_at, item.id), reverse=True)
+
+
+def find_session_summary(directory: str, session_id: str) -> Optional[SessionSummary]:
+    """Resolve a browser-provided session ID only within the configured log directory."""
+    if not isinstance(session_id, str) or not session_id or len(session_id) > 128:
+        return None
+    for summary in list_session_summaries(directory):
+        if summary.id == session_id:
+            return summary
+    return None
+
+
 # --------------------------------------------------------------------------------------
 # Event payload helpers (the shapes the loop appends)
 # --------------------------------------------------------------------------------------
@@ -443,7 +565,8 @@ class SessionLog:
 
     def project(self, *, up_to: Optional[int] = None) -> List[Dict[str, Any]]:
         """Rebuild the provider message list.  Pure in the accepted event slice."""
-        accepted = self._events if up_to is None else [e for e in self._events if e.seq <= up_to]
+        events = list(self._events)
+        accepted = events if up_to is None else [e for e in events if e.seq <= up_to]
         return project(accepted)
 
     def reconcile_tool_calls(self) -> List[Dict[str, str]]:
