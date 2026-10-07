@@ -123,11 +123,11 @@ def _result(
 
 
 def _shortcut_url(name: str, input_text: Optional[str] = None) -> str:
-    # Pyto's xcallback.open_url manages the callback round trip and returns its result.
+    # Match Pyto's documented open_shortcut example: xcallback.open_url manages its own
+    # callback, so pass the Shortcut action URL without adding x-success ourselves.
     query: List[Tuple[str, str]] = [("name", name)]
     if input_text is not None:
         query.extend((("input", "text"), ("text", input_text)))
-    query.append(("x-success", "pyto://"))
     return "shortcuts://x-callback-url/run-shortcut?" + urllib.parse.urlencode(query)
 
 

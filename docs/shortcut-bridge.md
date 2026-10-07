@@ -9,7 +9,7 @@ evidence that this wrapper's round trip works on a particular device.
 
 ## Quick run from an installed release
 
-The v1.0.21 installer downloads and extracts the complete release source tree, including
+The release installer downloads and extracts the complete source tree, including
 `shortcut_validation.py` beside `run.py`. You do not need to download or copy a separate
 script. In Pyto, open `pyto-agent/shortcut_validation.py` from your installed folder and
 tap Run. If you installed to a custom directory, open the script beside that installation's
@@ -20,6 +20,10 @@ For the smallest check, create one harmless Shortcut named
 prompts, enter `A1`, then type `RUN` to confirm that exact fixture. A result with
 `transport_state: "ok"` and the expected preview confirms the direct `xcallback.open_url`
 return path on this device. The script writes a timestamped JSONL report beside itself.
+For A1, the script follows Pyto's documented example and does not add an `x-success`
+parameter; `xcallback.open_url` manages that callback. The registered
+`shortcut_run_wait` wrapper constructs its own `x-success` URL and is examined separately
+by the manual A7 check.
 
 ## What the kit does
 
@@ -84,7 +88,7 @@ error. If iOS prompts, cancel rather than granting unexpected access.
 
 | ID | Check | How to run / interpret |
 |---|---|---|
-| A1 | Successful return type | Run `--case A1`; records returned type, byte count, hash and a short synthetic fixture preview. |
+| A1 | Successful return type | Run `--case A1`; uses Pyto's documented xcallback URL shape and records returned type, byte count, hash and a short synthetic fixture preview. |
 | A2 | x-error | Run `--case A2` with the local missing-file fixture. Records exception class and elapsed time; exact error text is not logged. |
 | A3 | User cancellation | Run `--case A3`, then cancel Ask for Input. Records whether the call returns, raises `SystemExit`, or fails another way. |
 | A4 | Unicode and newlines | Echoes Chinese, emoji and two newline-delimited lines; records whether returned text matches. |
