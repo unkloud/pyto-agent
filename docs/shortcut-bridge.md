@@ -15,14 +15,10 @@ script. In Pyto, open `pyto-agent/shortcut_validation.py` from your installed fo
 tap Run. If you installed to a custom directory, open the script beside that installation's
 `run.py` instead.
 
-For the smallest check, [install the harmless `pyto-harness-test-return` fixture from
-iCloud](https://www.icloud.com/shortcuts/c3a68bc19a4c4efdae906603f5dc434b). It returns the
-fixed text `PYTO_HARNESS_OK`. Apple requires you to tap **Get Shortcut** to add it. When the
-script prompts, enter `A1`, then type `RUN` to confirm that exact fixture. A result with
-`transport_state: "ok"` and the expected preview confirms the direct `xcallback.open_url`
-return path on this device. The script writes a timestamped JSONL report beside itself.
-The one-time shortcut import uses iCloud; the validation script itself makes no network
-calls.
+For A1, use the existing `pyto-harness-test-echo` fixture. The script passes it the fixed
+marker `PYTO_HARNESS_OK`; no separate return fixture is needed. A result with
+`transport_state: "ok"` confirms the direct `xcallback.open_url` return path on this
+device. The script writes a timestamped JSONL report beside itself.
 For A1, the script follows Pyto's documented example and does not add an `x-success`
 parameter; `xcallback.open_url` manages that callback. The registered
 `shortcut_run_wait` wrapper constructs its own `x-success` URL and is examined separately
@@ -60,8 +56,8 @@ You can always skip a single case by pressing Return. Use
 `--setup` to print all fixture recipes in Pyto; when you run a specific case, the script
 prints only the setup instructions for the fixtures that case needs before it asks you to
 type `RUN`. In `all`, fixture setup recipes are available with `setup` before starting the
-batch. The A1 import link is included in both places. Pyto cannot create or import
-Shortcuts from Python, so each other fixture is a one-time setup in Apple's Shortcuts app.
+batch. Pyto cannot create or import Shortcuts from Python, so fixtures are a one-time setup
+in Apple's Shortcuts app.
 Before `RUN ALL`, make sure each listed name belongs to the harmless test fixture you
 created; the script cannot inspect Shortcut contents or distinguish a same-named personal
 Shortcut before launching it.
@@ -81,12 +77,10 @@ step-by-step recipes, including the exact return text or input variable to use.
 
 | Fixture name | Actions and expected behavior |
 |---|---|
-| `pyto-harness-test-return` | Install from the iCloud link above, or create manually. Returns the fixed text `PYTO_HARNESS_OK`. Used by A1. |
-| `pyto-harness-test-echo` | Return the received Shortcut Input unchanged. Used by A4, A5, A9–A13 and A15. |
+| `pyto-harness-test-echo` | Return the received Shortcut Input unchanged. Used by A1, A4, A5, A9–A13 and A20; duplicate it for A15's name variants. |
 | `pyto-harness-test-error` | In a dedicated empty test folder, attempt to get one known-missing file. Keep it local. If the action asks for a file or cannot be made to fail safely, cancel and mark A2 unknown. |
 | `pyto-harness-test-cancel` | Use Ask for Input and cancel it manually when prompted. Used by A3. |
 | `pyto-harness-test-wait` | Wait 60 seconds, then return `PYTO_HARNESS_WAIT_DONE`. Used by A6–A8. |
-| `pyto-harness-test-semantic-failure` | Return the fixed text `PYTO_HARNESS_SEMANTIC_FAILURE` without performing any other action. Used by A20. |
 | `pyto-harness-test-permission` | Show a local notification with fixed, non-personal text. Used by A18. |
 | `pyto-harness-test-path` | Receive a text path, try to read that exact file using a local Files action, and return its contents. Used by A12. |
 | `pyto-harness-test-space fixture` | Echo Shortcut Input. Used by A15. |
@@ -121,13 +115,13 @@ error. If iOS prompts, cancel rather than granting unexpected access.
 | A11 | Structured text input | Sends a JSON string with synthetic fields; checks exact text round trip. |
 | A12 | File path input | Creates and passes the harmless probe described above; checks for the marker response. |
 | A13 | Input-size limits | Opt-in stress case. Sends 1 KiB, 16 KiB, then 100 KiB, stopping at the first failure. |
-| A14 | Missing name | Opens a timestamped, prefixed name after you confirm it is absent. Skip if the name is present or you are unsure. |
+| A14 | Missing name | Opens a randomly generated, prefixed name and records the result. |
 | A15 | Name encoding | Calls the three explicitly listed echo fixtures with spaces, Chinese and emoji in their names. Create all three first. |
 | A16 | Duplicate names | Manual check: see whether Shortcuts permits duplicate names. If it does, only run them if their harmless outputs distinguish them. |
 | A17 | Shortcut enumeration | Manual documentation check. Do not probe undocumented URL schemes or inspect personal Shortcut names. Record whether this Pyto version offers a documented listing API. |
 | A18 | Permission prompt | Run the local-notification fixture. If notification permission was previously granted, record that fact; revoke it in iOS Settings only if you intentionally want to observe the initial prompt. |
 | A19 | Foreground/background | Manual check with the same harmless fixture while Pyto is foregrounded and through a user-created automation. Record prompts, suspension, return, or failure. |
-| A20 | Semantic failure text | Returns the fixed failure marker. A transport success with this marker is still a successful transport and a semantic failure string; the harness must not infer success from transport alone. |
+| A20 | Semantic failure text | Sends `PYTO_HARNESS_SEMANTIC_FAILURE` through the echo fixture. Transport success with this marker is still separate from its semantic meaning. |
 
 `basic` omits the stress and recovery cases. `stress` and `recovery` require explicit suite
 confirmation. `all` requires explicit confirmation because it includes large inputs and a

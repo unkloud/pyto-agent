@@ -16,7 +16,7 @@ file into a workspace on the device, runs it, and tells you what happened.
 * **Survives the app being killed.** Every turn is appended to a JSONL session log, so
   `--resume` picks up exactly where iOS interrupted you.
 
-**Latest published release: v1.0.26.** The Pyto Shortcut validation script can run the full A1–A20 batch after one `RUN ALL` confirmation, without per-case prompts. See the [release notes](RELEASE-NOTES-v1.0.26.md), [Shortcut bridge guide](docs/shortcut-bridge.md), and [browser interface guide](docs/web-interface.md).
+**Latest published release: v1.0.27.** The Pyto Shortcut validation script reuses the echo fixture for A1 and A20, reducing the full suite's fixture count. See the [release notes](RELEASE-NOTES-v1.0.27.md), [Shortcut bridge guide](docs/shortcut-bridge.md), and [browser interface guide](docs/web-interface.md).
 
 ---
 
@@ -52,7 +52,7 @@ sys.argv = ["install.py", "--ref", tag]
 runpy.run_path("install.py", run_name="__main__")
 ```
 
-### Option B — Install v1.0.26 exactly
+### Option B — Install v1.0.27 exactly
 
 Use this if you want this specific release, even after a newer one is available.
 
@@ -61,7 +61,7 @@ import runpy
 import sys
 import urllib.request
 
-tag = "v1.0.26"
+tag = "v1.0.27"
 installer_url = "https://raw.githubusercontent.com/unkloud/pyto-agent/" + tag + "/install.py"
 with urllib.request.urlopen(installer_url, timeout=120) as response:
     with open("install.py", "wb") as installer:
@@ -71,12 +71,12 @@ sys.argv = ["install.py", "--ref", tag]
 runpy.run_path("install.py", run_name="__main__")
 ```
 
-### Option C — Install v1.0.26 from Files or AirDrop
+### Option C — Install v1.0.27 from Files or AirDrop
 
 Use this if you downloaded the files in Safari or received them from someone else. Download the installer and source ZIP to Files, then run the script below. Pyto will ask you to choose the installer first and the ZIP file second. You do not need to rename either file or type a path.
 
-- [Download the v1.0.26 installer](https://raw.githubusercontent.com/unkloud/pyto-agent/v1.0.26/install.py)
-- [Download the v1.0.26 source ZIP](https://github.com/unkloud/pyto-agent/archive/refs/tags/v1.0.26.zip)
+- [Download the v1.0.27 installer](https://raw.githubusercontent.com/unkloud/pyto-agent/v1.0.27/install.py)
+- [Download the v1.0.27 source ZIP](https://github.com/unkloud/pyto-agent/archive/refs/tags/v1.0.27.zip)
 - [Download the v1.0.17 device diagnostic](https://github.com/unkloud/pyto-agent/releases/download/v1.0.17/device_release_diagnostic_v1.0.17.py) (this does not test the web interface)
 
 ```python
@@ -88,7 +88,7 @@ installer_path = fs.import_file()
 archive_path = fs.import_file()
 sys.argv = [
     installer_path,
-    "--ref", "v1.0.26",
+    "--ref", "v1.0.27",
     "--zip", archive_path,
 ]
 runpy.run_path(installer_path, run_name="__main__")
@@ -588,10 +588,8 @@ tap Run; no separate download or copy is needed. Choose `--setup` to print the f
 recipes in Pyto, or select a case and the script prints setup steps for only the fixtures
 that case needs. Choose `all` to run the full suite after one `RUN ALL` confirmation; some
 iOS dialogs still need a tap, and manual-only checks are logged as unknown without pausing
-the batch. For the quick A1 callback check, install
-the [`pyto-harness-test-return` fixture from iCloud](https://www.icloud.com/shortcuts/c3a68bc19a4c4efdae906603f5dc434b)
-and choose `A1`. The link requires a one-time network connection and tapping **Get Shortcut**;
-the validation script itself makes no network calls.
+the batch. For A1, the script uses your existing `pyto-harness-test-echo` fixture with a
+fixed marker input; you no longer need a separate return fixture.
 The [A1–A20 guide](docs/shortcut-bridge.md) covers additional fixtures and suites. The
 script writes JSONL observations with runtime information; until a person runs and reviews
 it on a real Pyto installation, device behavior remains `unknown`.

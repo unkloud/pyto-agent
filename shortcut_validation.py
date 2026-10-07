@@ -32,12 +32,9 @@ except Exception:
 
 PREFIX = "pyto-harness-test-"
 ECHO = PREFIX + "echo"
-STATIC_OK = PREFIX + "return"
-STATIC_OK_INSTALL_URL = "https://www.icloud.com/shortcuts/c3a68bc19a4c4efdae906603f5dc434b"
 ERROR = PREFIX + "error"
 CANCEL = PREFIX + "cancel"
 WAIT = PREFIX + "wait"
-SEMANTIC_FAILURE = PREFIX + "semantic-failure"
 PERMISSION = PREFIX + "permission"
 REPORT_PREFIX = "shortcut-validation-"
 
@@ -45,7 +42,7 @@ STRESS_CASES = frozenset(("A5", "A13"))
 RECOVERY_CASES = frozenset(("A6", "A7", "A8"))
 
 CASES: Dict[str, Dict[str, str]] = {
-    "A1": {"kind": "call", "title": "Successful x-callback return type", "fixture": STATIC_OK},
+    "A1": {"kind": "call", "title": "Successful x-callback return type", "fixture": ECHO},
     "A2": {"kind": "call", "title": "x-error behavior", "fixture": ERROR},
     "A3": {"kind": "call", "title": "User cancellation behavior", "fixture": CANCEL},
     "A4": {"kind": "unicode", "title": "Unicode, emoji, and newline round trip", "fixture": ECHO},
@@ -59,12 +56,12 @@ CASES: Dict[str, Dict[str, str]] = {
     "A12": {"kind": "path", "title": "File path passed as Shortcut input", "fixture": PREFIX + "path"},
     "A13": {"kind": "stress_input", "title": "Input size limits", "fixture": ECHO},
     "A14": {"kind": "missing", "title": "Nonexistent Shortcut name"},
-    "A15": {"kind": "names", "title": "Spaces, Chinese, and emoji in names", "fixture": ECHO},
+    "A15": {"kind": "names", "title": "Spaces, Chinese, and emoji in names"},
     "A16": {"kind": "manual", "title": "Duplicate Shortcut names"},
     "A17": {"kind": "manual", "title": "Shortcut enumeration"},
     "A18": {"kind": "permission", "title": "Permission prompt behavior", "fixture": PERMISSION},
     "A19": {"kind": "manual", "title": "Foreground versus background behavior"},
-    "A20": {"kind": "semantic", "title": "Semantic failure returned as text", "fixture": SEMANTIC_FAILURE},
+    "A20": {"kind": "semantic", "title": "Semantic failure returned as text", "fixture": ECHO},
 }
 
 MANUAL_INSTRUCTIONS = {
@@ -76,12 +73,9 @@ MANUAL_INSTRUCTIONS = {
 }
 
 # Printed in Pyto before a case asks permission to launch a fixture. These recipes use
-# only local, synthetic data. Shortcuts cannot be authored by this Python script; A1 is
-# available as a shared iCloud import, while other fixtures are created once in Shortcuts.
+# only local, synthetic data. Shortcuts cannot be authored by this Python script; fixtures
+# are created once in Shortcuts.
 FIXTURE_SETUP: Dict[str, str] = {
-    STATIC_OK: """1. If it is not installed, open the link below in Safari.
-2. Tap Get Shortcut and return to Pyto.
-3. This fixture returns the fixed text PYTO_HARNESS_OK.""",
     ECHO: """1. In Shortcuts, tap + and name the shortcut exactly pyto-harness-test-echo.
 2. Add a Text action.
 3. In the Text field, insert the Shortcut Input magic variable; do not type those words literally.
@@ -100,9 +94,6 @@ FIXTURE_SETUP: Dict[str, str] = {
 2. Add Wait and set it to 60 seconds.
 3. Add a final Text action containing PYTO_HARNESS_WAIT_DONE, then save.
 4. A6 can wait for the full minute; A7/A8 use this fixture in a separate disposable harness session.""",
-    SEMANTIC_FAILURE: """1. In Shortcuts, tap + and name the shortcut exactly pyto-harness-test-semantic-failure.
-2. Add a final Text action containing exactly PYTO_HARNESS_SEMANTIC_FAILURE.
-3. Save. It performs no other action; the text is a marker, not a real failure.""",
     PERMISSION: """1. In Shortcuts, tap + and name the shortcut exactly pyto-harness-test-permission.
 2. Add Show Notification with fixed text such as: Pyto harness permission check.
 3. Save. It contains no personal data. Run A18 only when ready to observe or accept the iOS notification permission prompt.""",
@@ -126,20 +117,16 @@ def _print_fixture_setup(fixtures: Sequence[str]) -> None:
     for fixture in fixtures:
         print("\nSETUP {}".format(fixture))
         print(_fixture_setup_text(fixture))
-        if fixture == STATIC_OK:
-            print("Install link: {}".format(STATIC_OK_INSTALL_URL))
 
 
 def _print_setup_guide() -> None:
     print("Shortcut fixture setup — do this once in Apple's Shortcuts app")
     print("The Python script cannot create or import Shortcuts. It prints these recipes locally; create only fixtures you plan to run.")
     print("Use synthetic data only. Never rename or run a personal Shortcut for these checks.")
-    print("\nA1: install the shared pyto-harness-test-return fixture, then tap Get Shortcut:")
-    print(STATIC_OK_INSTALL_URL)
-    print("\nShared recipe for echo fixtures (A4, A5, A9–A11, A13):")
+    print("\nShared recipe for pyto-harness-test-echo (A1, A4, A5, A9–A13, A20; duplicate it for A15):")
     print(FIXTURE_SETUP[ECHO])
     print("\nOther fixtures:")
-    for fixture in (ERROR, CANCEL, WAIT, PREFIX + "path", PERMISSION, SEMANTIC_FAILURE):
+    for fixture in (ERROR, CANCEL, WAIT, PREFIX + "path", PERMISSION):
         print("\n{}".format(fixture))
         print(FIXTURE_SETUP[fixture])
     print("\nA15 additionally needs these exact-name copies of the echo fixture:")
@@ -306,7 +293,7 @@ def _manual(case_id: str, report_path: str, *, automatic: bool = False) -> None:
     if not automatic and case_id in ("A7", "A8"):
         _print_fixture_setup((WAIT,))
     elif not automatic and case_id == "A19":
-        _print_fixture_setup((STATIC_OK,))
+        _print_fixture_setup((ECHO,))
     print("MANUAL {} — {}".format(case_id, MANUAL_INSTRUCTIONS[case_id]))
     if automatic:
         _result(
@@ -390,8 +377,13 @@ def _run_case(
             print("A6 can block for up to the fixture's configured wait. There is no enforced timeout here.")
         if case_id in ("A2", "A3", "A6"):
             print("Confirm the fixture is harmless and behaves as documented before running it.")
-        call = _run_call(case_id, fixture=fixture, automatic=automatic)
+        input_text = "PYTO_HARNESS_OK" if case_id == "A1" else None
+        call = _run_call(case_id, fixture=fixture, input_text=input_text, automatic=automatic)
         observation = "{} after {}s".format(call.get("transport_state", "not run"), call.get("elapsed_seconds", "n/a"))
+        if case_id == "A1" and call.get("status") == "observed":
+            marker_match = _matches_text(call.get("value"), "PYTO_HARNESS_OK")
+            call["expected_marker_match"] = marker_match
+            observation += "; expected marker {}".format("matched" if marker_match else "did not match")
         if call.get("error_type"):
             observation += " ({})".format(call["error_type"])
         _record_call(case_id, report_path, call, observation)
@@ -566,7 +558,12 @@ def _run_case(
         return
 
     if kind == "semantic":
-        call = _run_call(case_id, fixture=case["fixture"], automatic=automatic)
+        call = _run_call(
+            case_id,
+            fixture=case["fixture"],
+            input_text="PYTO_HARNESS_SEMANTIC_FAILURE",
+            automatic=automatic,
+        )
         returned = call.get("value")
         semantic_failure = _matches_text(returned, "PYTO_HARNESS_SEMANTIC_FAILURE")
         public_fields = {key: value for key, value in call.items() if key not in ("value", "status")}
