@@ -141,6 +141,15 @@ body.chat-active .shell { height: 100vh; height: 100dvh; min-height: 0; overflow
 body.chat-active main { display: flex; flex-direction: column; overflow: hidden; }
 body.chat-active .topbar, body.chat-active .tabs, body.chat-active .footer { flex: 0 0 auto; }
 body.chat-active #view-chat .section-heading { margin-bottom: 10px; }
+body.chat-active #view-programs.active:not([hidden]) {
+  display: block;
+  flex: 1 1 0;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+}
 body.chat-active .active-session { flex: 0 0 auto; }
 body.chat-active #approval { flex: 0 0 auto; }
 body.chat-active .composer { flex: 0 0 auto; }
