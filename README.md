@@ -16,7 +16,7 @@ file into a workspace on the device, runs it, and tells you what happened.
 * **Survives the app being killed.** Every turn is appended to a JSONL session log, so
   `--resume` picks up exactly where iOS interrupted you.
 
-**Latest stable release: v1.0.29.** The browser interface can restore saved sessions, keep long conversations inside the chat panel, return to **All chats** from a chat header, and remove saved chats with confirmation. See the [v1.0.29 release notes](RELEASE-NOTES-v1.0.29.md), [Shortcut bridge guide](docs/shortcut-bridge.md), and [browser interface guide](docs/web-interface.md).
+**Latest stable release: v1.0.30.** The browser interface can restore saved sessions, keep long conversations inside the chat panel, return to **All chats** from a chat header, remove saved chats with confirmation, and keep long session titles and workspace paths inside their cards on narrow screens. See the [v1.0.30 release notes](RELEASE-NOTES-v1.0.30.md), [Shortcut bridge guide](docs/shortcut-bridge.md), and [browser interface guide](docs/web-interface.md).
 
 ---
 
