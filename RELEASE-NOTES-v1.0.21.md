@@ -14,6 +14,11 @@ fixtures, structured observations and optional stress/recovery checks. It makes 
 API calls. Shortcut callback behavior remains unverified until someone runs the script on
 a real Pyto installation and records the results.
 
+The installer extracts `shortcut_validation.py` into the installed `pyto-agent` folder
+beside `run.py`. Open that script in Pyto and tap Run; a separate script download or copy
+is not required. For the quickest check, create `pyto-harness-test-return`, choose `A1`,
+and confirm the named fixture when prompted.
+
 ## Local handle pipeline prototype
 
 An example demonstrates a workspace-file flow through local transformation and output.

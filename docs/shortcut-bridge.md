@@ -7,6 +7,20 @@ describes a return value, and [Apple documents the x-callback URL behavior](http
 but the harness wrapper currently discards the returned value. Documentation alone is not
 evidence that this wrapper's round trip works on a particular device.
 
+## Quick run from an installed release
+
+The v1.0.21 installer downloads and extracts the complete release source tree, including
+`shortcut_validation.py` beside `run.py`. You do not need to download or copy a separate
+script. In Pyto, open `pyto-agent/shortcut_validation.py` from your installed folder and
+tap Run. If you installed to a custom directory, open the script beside that installation's
+`run.py` instead.
+
+For the smallest check, create one harmless Shortcut named
+`pyto-harness-test-return` that returns the fixed text `PYTO_HARNESS_OK`. When the script
+prompts, enter `A1`, then type `RUN` to confirm that exact fixture. A result with
+`transport_state: "ok"` and the expected preview confirms the direct `xcallback.open_url`
+return path on this device. The script writes a timestamped JSONL report beside itself.
+
 ## What the kit does
 
 [`shortcut_validation.py`](../shortcut_validation.py) is a standard-library script that
@@ -17,9 +31,8 @@ JSON `RESULT` line per test case and appends the same record to a timestamped
 status, observation, UTC time, Python/platform runtime details, and
 `evidence_status: requires_manual_device_review`.
 
-Copy the script into a writable Pyto Documents/workspace folder and run it in the Pyto
-foreground. With no arguments it presents a prompt. If the launch method accepts script
-arguments, these are also available:
+Run the script in the Pyto foreground. With no arguments it presents a prompt. If the
+launch method accepts script arguments, these are also available:
 
 ```text
 --list

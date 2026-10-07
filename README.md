@@ -582,10 +582,13 @@ enforce policy or prevent generated Python from importing Pyto modules directly.
 
 `shortcut_run_wait` remains device-unverified. The wrapper currently ignores the value
 returned by `xcallback.open_url`, and Shortcut output is semantically opaque to the model.
-Run the manual, no-LLM [A1–A20 validation kit](docs/shortcut-bridge.md) in Pyto before
-relying on return values, cancellation, size limits, or recovery behavior. It writes
-JSONL observations with runtime information; until a person runs and reviews it on a real
-Pyto installation, device behavior remains `unknown`.
+The v1.0.21 installer downloads the complete source tree, including
+`shortcut_validation.py` beside `run.py`. To start the no-LLM device check, open that
+installed script in Pyto and tap Run; no separate download or copy is needed. Create the
+single `pyto-harness-test-return` fixture and choose `A1` for the quick callback check.
+The [A1–A20 guide](docs/shortcut-bridge.md) covers additional fixtures and suites. The
+script writes JSONL observations with runtime information; until a person runs and reviews
+it on a real Pyto installation, device behavior remains `unknown`.
 
 The local handle prototype demonstrates a workspace-file flow without expanding file
 contents into model context. It uses the same `Workspace` path boundary as the existing
