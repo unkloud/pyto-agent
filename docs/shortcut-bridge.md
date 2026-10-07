@@ -88,7 +88,7 @@ error. If iOS prompts, cancel rather than granting unexpected access.
 
 | ID | Check | How to run / interpret |
 |---|---|---|
-| A1 | Successful return type | Run `--case A1`; uses Pyto's documented xcallback URL shape and records returned type, byte count, hash and a short synthetic fixture preview. |
+| A1 | Successful return type | Run `--case A1`; uses Pyto's documented xcallback URL shape and records returned type, byte count, hash and a short synthetic fixture preview. On failure, records a short URL-redacted exception message. |
 | A2 | x-error | Run `--case A2` with the local missing-file fixture. Records exception class and elapsed time; exact error text is not logged. |
 | A3 | User cancellation | Run `--case A3`, then cancel Ask for Input. Records whether the call returns, raises `SystemExit`, or fails another way. |
 | A4 | Unicode and newlines | Echoes Chinese, emoji and two newline-delimited lines; records whether returned text matches. |
@@ -119,9 +119,11 @@ hard kill mechanism for an x-callback call blocked inside Pyto.
 Each `RESULT` line is JSON. The top-level `status` is the test harness status (`observed`,
 `unknown`, `not_run`, or `failed`); `transport_state` records `ok`, `failed`, `cancelled`,
 or `indeterminate` where a Shortcut call was made. A returned semantic-failure marker is
-recorded separately. The script stores no raw error message, and it previews up to the
-first 80 characters of successful return values. Use only the synthetic fixtures above;
-review and redact a report before sharing it if a fixture returned anything unexpected.
+recorded separately. Records include `kit_version`. A1 also includes a short
+`error_message` on failure, capped at 240 characters with URL contents redacted; other cases
+record only the exception class. Successful return values are previewed up to 80 characters.
+Use only the synthetic fixtures above; review and redact a report before sharing it if a
+fixture returned anything unexpected.
 
 Before updating a contract to `device-tested`, review the log and add a dated reference to
 the real Pyto run. Record the Pyto app version from the device's About/settings screen as

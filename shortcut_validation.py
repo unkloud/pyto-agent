@@ -15,11 +15,17 @@ import hashlib
 import json
 import os
 import platform
+import re
 import sys
 import time
 import urllib.parse
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Sequence, Tuple
+
+try:
+    from harness import __version__ as KIT_VERSION
+except Exception:
+    KIT_VERSION = "unknown"
 
 
 PREFIX = "pyto-harness-test-"
@@ -115,6 +121,7 @@ def _result(
         "status": status,
         "observation": observation,
         "recorded_at_utc": datetime.now(timezone.utc).isoformat(),
+        "kit_version": KIT_VERSION,
         "runtime": _runtime(),
         "evidence_status": "requires_manual_device_review",
     }
@@ -164,24 +171,41 @@ def _matches_text(value: Any, expected: str) -> bool:
     return isinstance(value, str) and value in accepted
 
 
-def _call(name: str, input_text: Optional[str]) -> Tuple[str, Any, str, float]:
-    """Return transport state, value, error class, elapsed seconds."""
+def _safe_error_message(exc: Exception) -> str:
+    """Return a short diagnostic with URL contents removed."""
+    message = str(exc).strip()
+    message = re.sub(
+        r"\b[A-Za-z][A-Za-z0-9+.-]*://[^\s\"'<>]+",
+        "<redacted-url>",
+        message,
+    )
+    return (message or "<empty>")[:240]
+
+
+def _call(
+    name: str,
+    input_text: Optional[str],
+    *,
+    include_error_message: bool = False,
+) -> Tuple[str, Any, str, float, str]:
+    """Return transport state, value, error class, elapsed time, and optional detail."""
     try:
         import xcallback
     except Exception as exc:
-        return "failed", None, "xcallback_import_{}".format(type(exc).__name__), 0.0
+        detail = _safe_error_message(exc) if include_error_message else ""
+        return "failed", None, "xcallback_import_{}".format(type(exc).__name__), 0.0, detail
 
     started = time.monotonic()
     try:
         value = xcallback.open_url(_shortcut_url(name, input_text))
-        return "ok", value, "", time.monotonic() - started
+        return "ok", value, "", time.monotonic() - started, ""
     except SystemExit:
-        return "cancelled", None, "SystemExit", time.monotonic() - started
+        return "cancelled", None, "SystemExit", time.monotonic() - started, ""
     except TimeoutError:
-        return "indeterminate", None, "TimeoutError", time.monotonic() - started
+        return "indeterminate", None, "TimeoutError", time.monotonic() - started, ""
     except Exception as exc:
-        # The class is stable enough to compare; the message can contain URL details.
-        return "failed", None, type(exc).__name__, time.monotonic() - started
+        detail = _safe_error_message(exc) if include_error_message else ""
+        return "failed", None, type(exc).__name__, time.monotonic() - started, detail
 
 
 def _confirm_fixture(case_id: str, fixture: str) -> bool:
@@ -210,7 +234,11 @@ def _run_call(case_id: str, *, fixture: str, input_text: Optional[str] = None) -
     if not _confirm_fixture(case_id, fixture):
         return {"status": "not_run", "state": None, "shortcut": fixture, "value": None}
     print("CALLING {} at {} UTC".format(fixture, datetime.now(timezone.utc).isoformat()))
-    state, value, error_type, elapsed = _call(fixture, input_text)
+    state, value, error_type, elapsed, error_message = _call(
+        fixture,
+        input_text,
+        include_error_message=case_id == "A1",
+    )
     summary = _safe_value_summary(value) if state == "ok" else None
     return {
         "status": "observed",
@@ -220,6 +248,7 @@ def _run_call(case_id: str, *, fixture: str, input_text: Optional[str] = None) -
         "returned": summary,
         "return_type": type(value).__name__ if state == "ok" else None,
         "error_type": error_type or None,
+        "error_message": error_message or None,
         "elapsed_seconds": round(elapsed, 3),
         "value": value,
     }
@@ -331,7 +360,7 @@ def _run_case(case_id: str, report_path: str, *, stress: bool, recovery: bool) -
         samples = []
         for size in (1024, 100 * 1024, 1024 * 1024):
             payload = "x" * size
-            state, returned, error_type, elapsed = _call(fixture, payload)
+            state, returned, error_type, elapsed, _error_message = _call(fixture, payload)
             if state != "ok":
                 samples.append({"requested_input_bytes": size, "transport_state": state, "error_type": error_type, "elapsed_seconds": round(elapsed, 3)})
                 break
@@ -354,7 +383,7 @@ def _run_case(case_id: str, report_path: str, *, stress: bool, recovery: bool) -
         samples = []
         for size in (1024, 16 * 1024, 100 * 1024):
             payload = "i" * size
-            state, returned, error_type, elapsed = _call(fixture, payload)
+            state, returned, error_type, elapsed, _error_message = _call(fixture, payload)
             if state != "ok":
                 samples.append({"requested_input_bytes": size, "transport_state": state, "error_type": error_type, "elapsed_seconds": round(elapsed, 3)})
                 break
@@ -377,7 +406,7 @@ def _run_case(case_id: str, report_path: str, *, stress: bool, recovery: bool) -
             return
         started = time.monotonic()
         for index in range(10):
-            state, value, error_type, _elapsed = _call(fixture, "repeat-{}".format(index + 1))
+            state, value, error_type, _elapsed, _error_message = _call(fixture, "repeat-{}".format(index + 1))
             if state == "ok" and _matches_text(value, "repeat-{}".format(index + 1)):
                 successes += 1
             else:
@@ -409,7 +438,7 @@ def _run_case(case_id: str, report_path: str, *, stress: bool, recovery: bool) -
             return
         observations = []
         for name in names:
-            state, value, error_type, elapsed = _call(name, "name-check")
+            state, value, error_type, elapsed, _error_message = _call(name, "name-check")
             observations.append({"shortcut": name, "transport_state": state, "return_type": type(value).__name__ if state == "ok" else None, "error_type": error_type or None, "elapsed_seconds": round(elapsed, 3)})
         _result(case_id, "observed", "Name variants attempted; compare returned values and error shapes.", report_path, variants=observations)
         return
