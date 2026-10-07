@@ -31,6 +31,7 @@ except Exception:
 PREFIX = "pyto-harness-test-"
 ECHO = PREFIX + "echo"
 STATIC_OK = PREFIX + "return"
+STATIC_OK_INSTALL_URL = "https://www.icloud.com/shortcuts/c3a68bc19a4c4efdae906603f5dc434b"
 ERROR = PREFIX + "error"
 CANCEL = PREFIX + "cancel"
 WAIT = PREFIX + "wait"
@@ -219,6 +220,8 @@ def _confirm_fixtures(case_id: str, fixtures: Sequence[str]) -> bool:
     print("This case will call only these explicitly named test fixtures:")
     for fixture in fixtures:
         print("  - {}".format(fixture))
+        if fixture == STATIC_OK:
+            print("    Install URL (tap Get Shortcut): {}".format(STATIC_OK_INSTALL_URL))
     answer = input("Type RUN to continue, or press Return to skip: ").strip()
     return answer == "RUN"
 

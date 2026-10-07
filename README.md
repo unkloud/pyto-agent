@@ -16,7 +16,7 @@ file into a workspace on the device, runs it, and tells you what happened.
 * **Survives the app being killed.** Every turn is appended to a JSONL session log, so
   `--resume` picks up exactly where iOS interrupted you.
 
-**Latest published release: v1.0.23.** Adds an evidence-based capability inventory, a manual Shortcut validation kit, and a local handle pipeline prototype. A1 results now include the kit version and a short, URL-redacted exception detail when the call fails. See the [release notes](RELEASE-NOTES-v1.0.23.md), [Shortcut bridge guide](docs/shortcut-bridge.md), and [browser interface guide](docs/web-interface.md).
+**Latest published release: v1.0.24.** Includes a one-tap iCloud install link for the A1 return fixture. A1 results also include the kit version and a short, URL-redacted exception detail when the call fails. See the [release notes](RELEASE-NOTES-v1.0.24.md), [Shortcut bridge guide](docs/shortcut-bridge.md), and [browser interface guide](docs/web-interface.md).
 
 ---
 
@@ -26,7 +26,7 @@ Choose one option. Each Python block is a complete script: copy the whole block 
 
 ### Option A — Install the latest release (recommended)
 
-This automatically finds the newest stable release on GitHub. It installs v1.0.23, including the optional `--web` interface and capability-foundation materials.
+This automatically finds the newest stable release on GitHub. It installs v1.0.24, including the optional `--web` interface and capability-foundation materials.
 
 ```python
 import json
@@ -52,7 +52,7 @@ sys.argv = ["install.py", "--ref", tag]
 runpy.run_path("install.py", run_name="__main__")
 ```
 
-### Option B — Install v1.0.23 exactly
+### Option B — Install v1.0.24 exactly
 
 Use this if you want this specific release, even after a newer one is available.
 
@@ -61,7 +61,7 @@ import runpy
 import sys
 import urllib.request
 
-tag = "v1.0.23"
+tag = "v1.0.24"
 installer_url = "https://raw.githubusercontent.com/unkloud/pyto-agent/" + tag + "/install.py"
 with urllib.request.urlopen(installer_url, timeout=120) as response:
     with open("install.py", "wb") as installer:
@@ -71,12 +71,12 @@ sys.argv = ["install.py", "--ref", tag]
 runpy.run_path("install.py", run_name="__main__")
 ```
 
-### Option C — Install v1.0.23 from Files or AirDrop
+### Option C — Install v1.0.24 from Files or AirDrop
 
 Use this if you downloaded the files in Safari or received them from someone else. Download the installer and source ZIP to Files, then run the script below. Pyto will ask you to choose the installer first and the ZIP file second. You do not need to rename either file or type a path.
 
-- [Download the v1.0.23 installer](https://raw.githubusercontent.com/unkloud/pyto-agent/v1.0.23/install.py)
-- [Download the v1.0.23 source ZIP](https://github.com/unkloud/pyto-agent/archive/refs/tags/v1.0.23.zip)
+- [Download the v1.0.24 installer](https://raw.githubusercontent.com/unkloud/pyto-agent/v1.0.24/install.py)
+- [Download the v1.0.24 source ZIP](https://github.com/unkloud/pyto-agent/archive/refs/tags/v1.0.24.zip)
 - [Download the v1.0.17 device diagnostic](https://github.com/unkloud/pyto-agent/releases/download/v1.0.17/device_release_diagnostic_v1.0.17.py) (this does not test the web interface)
 
 ```python
@@ -88,7 +88,7 @@ installer_path = fs.import_file()
 archive_path = fs.import_file()
 sys.argv = [
     installer_path,
-    "--ref", "v1.0.23",
+    "--ref", "v1.0.24",
     "--zip", archive_path,
 ]
 runpy.run_path(installer_path, run_name="__main__")
@@ -582,10 +582,12 @@ enforce policy or prevent generated Python from importing Pyto modules directly.
 
 `shortcut_run_wait` remains device-unverified. The wrapper currently ignores the value
 returned by `xcallback.open_url`, and Shortcut output is semantically opaque to the model.
-The v1.0.21 installer downloads the complete source tree, including
-`shortcut_validation.py` beside `run.py`. To start the no-LLM device check, open that
-installed script in Pyto and tap Run; no separate download or copy is needed. Create the
-single `pyto-harness-test-return` fixture and choose `A1` for the quick callback check.
+The installer downloads the complete source tree, including `shortcut_validation.py`
+beside `run.py`. To start the no-LLM device check, open that installed script in Pyto and
+tap Run; no separate download or copy is needed. For the quick A1 callback check, install
+the [`pyto-harness-test-return` fixture from iCloud](https://www.icloud.com/shortcuts/c3a68bc19a4c4efdae906603f5dc434b)
+and choose `A1`. The link requires a one-time network connection and tapping **Get Shortcut**;
+the validation script itself makes no network calls.
 The [A1–A20 guide](docs/shortcut-bridge.md) covers additional fixtures and suites. The
 script writes JSONL observations with runtime information; until a person runs and reviews
 it on a real Pyto installation, device behavior remains `unknown`.

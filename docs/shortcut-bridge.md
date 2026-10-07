@@ -15,11 +15,14 @@ script. In Pyto, open `pyto-agent/shortcut_validation.py` from your installed fo
 tap Run. If you installed to a custom directory, open the script beside that installation's
 `run.py` instead.
 
-For the smallest check, create one harmless Shortcut named
-`pyto-harness-test-return` that returns the fixed text `PYTO_HARNESS_OK`. When the script
-prompts, enter `A1`, then type `RUN` to confirm that exact fixture. A result with
+For the smallest check, [install the harmless `pyto-harness-test-return` fixture from
+iCloud](https://www.icloud.com/shortcuts/c3a68bc19a4c4efdae906603f5dc434b). It returns the
+fixed text `PYTO_HARNESS_OK`. Apple requires you to tap **Get Shortcut** to add it. When the
+script prompts, enter `A1`, then type `RUN` to confirm that exact fixture. A result with
 `transport_state: "ok"` and the expected preview confirms the direct `xcallback.open_url`
 return path on this device. The script writes a timestamped JSONL report beside itself.
+The one-time shortcut import uses iCloud; the validation script itself makes no network
+calls.
 For A1, the script follows Pyto's documented example and does not add an `x-success`
 parameter; `xcallback.open_url` manages that callback. The registered
 `shortcut_run_wait` wrapper constructs its own `x-success` URL and is examined separately
@@ -61,7 +64,7 @@ output (or use its output action if your iOS version presents one).
 
 | Fixture name | Actions and expected behavior |
 |---|---|
-| `pyto-harness-test-return` | Return the fixed text `PYTO_HARNESS_OK`. Used by A1. |
+| `pyto-harness-test-return` | Install from the iCloud link above, or create manually. Returns the fixed text `PYTO_HARNESS_OK`. Used by A1. |
 | `pyto-harness-test-echo` | Return the received Shortcut Input unchanged. Used by A4, A5, A9–A13 and A15. |
 | `pyto-harness-test-error` | In a dedicated empty test folder, attempt to get one known-missing file. Keep it local. If the action asks for a file or cannot be made to fail safely, cancel and mark A2 unknown. |
 | `pyto-harness-test-cancel` | Use Ask for Input and cancel it manually when prompted. Used by A3. |
