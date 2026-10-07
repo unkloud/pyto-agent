@@ -551,11 +551,13 @@ shortcuts://run-shortcut?name=<name>&input=text&text=<urlencoded input>
 shortcuts://x-callback-url/run-shortcut?name=<name>&input=text&text=<input>&x-success=pyto%3A%2F%2F
 ```
 
-* `shortcut_run(name, input_text)` — fire and forget. Returns the exact URL used.
-* `shortcut_run_wait(name, input_text)` — same, plus an `x-success` callback. iOS reopens
-  Pyto with `result=<the Shortcut's output>` as a URL parameter. Nothing in the app can
-  *block* waiting for that round trip, so the tool reports the URL and where the answer
-  will arrive rather than pretending it already has it.
+* `shortcut_run(name, input_text)` — asks iOS to open the named Shortcut and returns the
+  exact URL used.
+* `shortcut_run_wait(name, input_text)` — asks for an `x-success` callback through Pyto's
+  `xcallback.open_url` bridge. The current harness handler discards the bridge's return
+  value and reports the handoff URL; a successful tool result does not prove that the
+  Shortcut ran or that its result reached the harness. See the device validation kit
+  below before relying on a return path.
 
 ### (d) Other URL schemes the harness uses
 
@@ -568,6 +570,34 @@ shortcuts://x-callback-url/run-shortcut?name=<name>&input=text&text=<input>&x-su
 | Run a Shortcut, get output | `shortcuts://x-callback-url/run-shortcut?name=...&x-success=pyto://` |
 
 Everything the agent can reach from these is listed by `python run.py --capabilities`.
+
+### (e) Capability contracts and local handles
+
+The checked-in [capability contract inventory](docs/capability-contracts.json) records
+the 46 fixed tools registered by `build_registry`, their JSON input schemas, model-visible
+output shape, effects, prerequisites and evidence source. User-authored tools are loaded
+from the active workspace at runtime; use `custom_tool_list` to see those instance-specific
+schemas. Contract `effects` and `data_egress` fields describe behavior only. They do not
+enforce policy or prevent generated Python from importing Pyto modules directly.
+
+`shortcut_run_wait` remains device-unverified. The wrapper currently ignores the value
+returned by `xcallback.open_url`, and Shortcut output is semantically opaque to the model.
+Run the manual, no-LLM [A1–A20 validation kit](docs/shortcut-bridge.md) in Pyto before
+relying on return values, cancellation, size limits, or recovery behavior. It writes
+JSONL observations with runtime information; until a person runs and reviews it on a real
+Pyto installation, device behavior remains `unknown`.
+
+The local handle prototype demonstrates a workspace-file flow without expanding file
+contents into model context. It uses the same `Workspace` path boundary as the existing
+file tools, stores opaque session-scoped text or binary artifact handles, transforms text
+locally, and writes the result back to the workspace:
+
+```sh
+python3 examples/handle_pipeline.py
+```
+
+The example prints handle metadata and an output hash check only. It is a local prototype,
+not a registered model-facing capability, a sandbox, or an egress-enforcement mechanism.
 
 ---
 

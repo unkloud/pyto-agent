@@ -377,3 +377,64 @@ What Pyto *does* give you for API calls is generic and sufficient: `urllib`/`htt
 ## 13. One-paragraph design recommendation
 
 Build the harness as a **single long-lived in-process Python program inside Pyto** that (a) is started either manually or by a **Shortcuts Personal Automation → `Run Script` with `Show Console` off**, (b) immediately acquires `background.BackgroundTask(id="…")` so it survives backgrounding and screen lock, (c) owns its own cooperative scheduler on threads (never `subprocess`, never `multiprocessing`, never a killable timer), (d) keeps all state in `~/Documents/agent/` as JSONL with rotation and hard size caps because a hidden watchdog will `MemoryError`-stop every script when free memory falls to ~500 MB, (e) treats `sys.stdin` (Shortcuts) and `~/Documents` queue files as its input channels and stdout/`console.txt`/notifications as its output channels, (f) uses `xcallback.open_url("shortcuts://x-callback-url/run-shortcut?…")` as the escape hatch for any iOS capability Pyto lacks (Reminders, Health, anything not in `Info.plist`), (g) stays stdlib-only and degrades gracefully when numpy/pandas are unavailable, and (h) instruments `os_proc_available_memory()` itself so the agent can compact context before Pyto's watchdog does it for you.
+
+---
+
+## 14. pyto-harness capability audit (2026-10-07)
+
+The repository registers **46 fixed model-facing tools** in `harness/tools_ios.py`. Their
+stable IDs, input JSON Schemas, model-visible output shape, effects, prerequisites,
+retry metadata and source evidence are recorded in
+[`capability-contracts.json`](capability-contracts.json). Every fixed entry is marked
+`implemented` with a source line; none is marked device-tested. The active Pyto workspace
+can also load user-authored custom tools dynamically. Their names and schemas are
+instance-specific and must be inspected with `custom_tool_list` in that installation; the
+manifest includes a family-level contract template, while no user-specific custom source
+is part of this repository snapshot.
+
+The proposed capability names from the extension roadmap mostly already map to registered
+tools: clipboard get/set, workspace file read/write/list, notifications, URL opening,
+Shortcut calls, and calendar read/add. There is no model-facing location read, contacts,
+image OCR, language detection, general scheduler, Shortcut enumeration, or generic App
+Intent call. `device_capabilities` reports feature availability; it does not return a
+location. `keepalive_start` keeps a task running temporarily; it is not a general
+scheduler. These distinctions prevent the next capability work from duplicating an
+existing tool or assuming an integration that is not registered.
+
+### Shortcut handoff versus Shortcut result
+
+Pyto's published xcallback API and sample describe `xcallback.open_url(url)` as returning
+Shortcut output (§6.3 above). The repository's current `shortcut_run_wait` adapter calls
+that function but discards its return value; it reports the handoff URL and a callback
+description instead. Therefore, a successful harness tool result currently means that an
+opener accepted the handoff, not that the Shortcut completed or its semantic result was
+received. A Shortcut may return ordinary text that means its own operation failed, so
+transport state and semantic result must remain separate.
+
+The existing registry applies a 30-second timeout to this tool, but synchronous handlers
+run in worker threads and a timeout does not kill a blocked thread (`harness/tools.py`,
+`ToolRegistry` contract). Cancellation, callback behavior, input/output limits, name
+encoding, repeated-call stability and recovery still need the manual A1–A20 run documented
+in [`shortcut-bridge.md`](shortcut-bridge.md). Until a real Pyto run is reviewed and dated,
+all those device claims remain unknown. If return or recovery behavior proves unreliable,
+downstream integrations that need returned data must be scoped as unverified; this audit
+does not add a workaround.
+
+### Data-flow prototype
+
+[`harness/handles.py`](../harness/handles.py) and
+[`examples/handle_pipeline.py`](../examples/handle_pipeline.py) demonstrate a local
+workspace-file pipeline. Handles expose an opaque ID, media type, shape, byte size,
+preview policy, workspace-session scope and lifetime. Text and binary content stays in a
+private temporary store; binary files are typed as media artifacts. The prototype caps
+an individual handle at 8 MiB and text transforms at 1 MiB. Operation outcomes are
+separate from the handle metadata. The example uses the same `Workspace` path jail as
+the registered file tools, transforms text locally, writes the output, and prints only
+handle metadata plus an output hash comparison. This is a prototype, not a new registered
+capability, a security sandbox, or an enforcement mechanism that prevents direct Pyto API
+use.
+
+The contract's `effects` and `data_egress` fields are declarative metadata. They neither
+enforce policy nor stop generated Python from importing Pyto modules or using other
+available APIs. The current LLM provider, prompt construction, Web UI and session-log
+format are outside this audit.
