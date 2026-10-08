@@ -4,7 +4,7 @@ Source: [audit](../../../AUDIT-2026-10-05.md). These prompts turn every audit fi
 
 ## How to use
 
-Give an agent one entire goal file as its task, or say “Implement the goal in `<path>`.” Each file includes scope, prerequisites, starting points and acceptance criteria. The original rollout sequence is 01/02, 03/04, 08, 05, 06/07, 09–12, then the Goal 13 release gate. Goal 14 retires the native harness chat after the browser interface is available; it preserves PytoUI support for generated apps. Device checks remain attached to each relevant goal, not only the final gate.
+Give an agent one entire goal file as its task, or say “Implement the goal in `<path>`.” Each file includes scope, prerequisites, starting points and acceptance criteria. The original rollout sequence is 01/02, 03/04, 08, 05, 06/07, 09–12, then the Goal 13 release gate. Goal 14 retires the native harness chat after the browser interface is available; it preserves PytoUI support for generated apps. Goal 15 adds a device capability inventory, evidence-backed overrides, and persistent typed handles. Device checks remain attached to each relevant goal, not only the final gate.
 
 Readable output comes first because it improves the current default terminal experience immediately. A working GUI, predictable execution and accessible approvals follow because they unblock basic use. Preview, saved programs and friendly inputs create the reusable-tool experience. Recovery, memory and phone polish sustain it. Prompt consolidation, Shortcut handoff and the final acceptance pack complete the workflow. Device acceptance checks also belong to each relevant goal, not only the last one.
 
@@ -26,6 +26,7 @@ Readable output comes first because it improves the current default terminal exp
 | 12 | [Make saved tools available through Shortcuts](goals/12-shortcut-handoff.md) | Users can invoke suitable saved automations from familiar iOS entry points. | 06 saved-program-library; 07 simple-program-inputs; 08 interruption-recovery; 11 agent-workflow |
 | 13 | [Verify the complete novice workflow](goals/13-usability-release-gate.md) | A release should prove that people can create and reuse useful device tools with little manual work. | 01–12; Shortcut checks apply only where supported |
 | 14 | [Retire the native harness chat window](goals/14-remove-native-pyto-ui.md) | Keep one supported graphical chat interface while preserving Pyto's native app capabilities. | Browser interface available and accepted |
+| 15 | [Build a device capability inventory with evidence-backed overrides](goals/15-device-capability-inventory.md) | The LLM can plan from documented capability directions and dated evidence from the target Pyto installation. | Saved-program and custom-tool creation paths |
 
 ## Audit coverage
 
@@ -42,6 +43,7 @@ Readable output comes first because it improves the current default terminal exp
 | Prompt/platform alignment | 05, 11 |
 | Shortcuts | 12 |
 | Contract tests, real-device checks and usability measures | Per-goal acceptance criteria and 13 |
+| Device capability evidence and persistent typed artifacts | 15 |
 
 ## Completion tracking
 

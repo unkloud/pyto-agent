@@ -13,7 +13,8 @@ import uuid
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 from .errors import ToolError
-from . import program_inputs
+from . import capability_inventory, program_inputs
+from .config import default_state_dir
 from .security import chmod_private, mkdir_private, open_private
 
 METADATA_FILE = "pyto-programs.json"
@@ -171,6 +172,7 @@ def _read_payload(workspace: Any) -> Dict[str, Any]:
             record.setdefault("project_brief", _empty_project_brief())
         elif "input_schema" not in record:
             raise ProgramLibraryError("{} record {} is missing input_schema; the index was left untouched.".format(METADATA_FILE, index + 1))
+        record.setdefault("capability_dependencies", [])
         if source_version == SCHEMA_VERSION and "project_brief" not in record:
             raise ProgramLibraryError("{} record {} is missing project_brief; the index was left untouched.".format(METADATA_FILE, index + 1))
         for field in ("id", "title", "purpose", "entry_file", "mode"):
@@ -185,6 +187,12 @@ def _read_payload(workspace: Any) -> Dict[str, Any]:
         verification = record.get("last_verification_result")
         if not isinstance(capabilities, list) or not all(isinstance(item, str) for item in capabilities):
             raise ProgramLibraryError("{} record {} has invalid required_capabilities.".format(METADATA_FILE, index + 1))
+        try:
+            record["capability_dependencies"] = capability_inventory.normalize_dependencies(
+                record.get("capability_dependencies", [])
+            )
+        except capability_inventory.CapabilityInventoryError as exc:
+            raise ProgramLibraryError("{} record {} has invalid capability_dependencies: {}".format(METADATA_FILE, index + 1, exc)) from exc
         if not isinstance(verification, dict) or not isinstance(verification.get("status"), str):
             raise ProgramLibraryError("{} record {} has invalid last_verification_result.".format(METADATA_FILE, index + 1))
         try:
@@ -260,6 +268,7 @@ def register(
     entry_file: str,
     mode: str = "batch",
     required_capabilities: Optional[Sequence[str]] = None,
+    capability_dependencies: Optional[Sequence[str]] = None,
     input_schema: Optional[Sequence[Mapping[str, Any]]] = None,
     program_id: str = "",
 ) -> Dict[str, Any]:
@@ -279,6 +288,10 @@ def register(
         raise ProgramLibraryError("entry_file must name an existing workspace Python file")
     relative = workspace.relative(target)
     capabilities = _clean_capabilities(required_capabilities)
+    try:
+        dependencies = capability_inventory.normalize_dependencies(capability_dependencies) if capability_dependencies is not None else None
+    except capability_inventory.CapabilityInventoryError as exc:
+        raise ProgramLibraryError(str(exc)) from exc
     try:
         normalized_input_schema = program_inputs.normalize_schema(list(input_schema or [])) if input_schema is not None else None
     except program_inputs.ProgramInputError as exc:
@@ -307,6 +320,7 @@ def register(
             "entry_file": relative,
             "mode": mode,
             "required_capabilities": capabilities,
+            "capability_dependencies": dependencies or [],
             "input_schema": normalized_input_schema or [],
             "project_brief": _empty_project_brief(),
             "last_verification_result": {"status": "not_run", "summary": "Not run yet.", "checked_at": None},
@@ -325,6 +339,9 @@ def register(
                 "entry_file": relative,
                 "mode": mode,
                 "required_capabilities": capabilities,
+                "capability_dependencies": (
+                    dependencies if dependencies is not None else record.get("capability_dependencies", [])
+                ),
                 "input_schema": next_schema,
                 "updated_at": now,
             }
@@ -525,6 +542,9 @@ def render_listing(workspace: Any) -> str:
             purpose=item["purpose"] or "No purpose recorded.",
             inputs=inputs,
         ))
+        dependencies = item.get("capability_dependencies", [])
+        if dependencies:
+            rows.append("    Capability dependencies: {}".format(", ".join(dependencies)))
     rows.append("Run: /run ID (inputs are requested each time)  •  Edit: /edit ID <requested change>")
     return "\n".join(rows)
 
@@ -540,6 +560,7 @@ def build_edit_prompt(record: Mapping[str, Any], request: str, *, workspace: Any
             "entry_file",
             "mode",
             "required_capabilities",
+            "capability_dependencies",
             "input_schema",
             "last_verification_result",
             "project_brief",
@@ -608,6 +629,15 @@ def execute_saved(
         raise ProgramLibraryError(
             "the entry file {} is missing. Restore it or call register_program with this id and its new workspace-relative path.".format(
                 record.get("entry_file")
+            )
+        )
+    unavailable = capability_inventory.unavailable_dependencies(
+        default_state_dir(), record.get("capability_dependencies", [])
+    )
+    if unavailable:
+        raise ProgramLibraryError(
+            "saved program requires capability point(s) currently unavailable on this device: {}".format(
+                ", ".join(unavailable)
             )
         )
     schema = record.get("input_schema") or []

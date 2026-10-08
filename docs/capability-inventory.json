@@ -1,0 +1,133 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "id": "clipboard.read",
+      "description": "Read text or other supported data from the system pasteboard.",
+      "documentation_links": ["https://pyto.readthedocs.io/en/latest/library/pasteboard.html"],
+      "status": "unverified",
+      "evidence": {"kind": "documentation", "summary": "Pyto documents pasteboard string, URL, image, and item-provider access; target-device behavior has not been checked."},
+      "date": "2026-10-08"
+    },
+    {
+      "id": "clipboard.write",
+      "description": "Write text or other supported data to the system pasteboard.",
+      "documentation_links": ["https://pyto.readthedocs.io/en/latest/library/pasteboard.html"],
+      "status": "unverified",
+      "evidence": {"kind": "documentation", "summary": "Pyto documents pasteboard setters; target-device behavior has not been checked."},
+      "date": "2026-10-08"
+    },
+    {
+      "id": "file.import",
+      "description": "Import a user-selected file into a Pyto script or workspace.",
+      "documentation_links": ["https://pyto.readthedocs.io/en/latest/library/file_system.html", "https://pyto.readthedocs.io/en/latest/external.html"],
+      "status": "unverified",
+      "evidence": {"kind": "documentation", "summary": "Pyto documents file importing and the app-scoped access model; picker behavior depends on the installed runtime."},
+      "date": "2026-10-08"
+    },
+    {
+      "id": "file.share",
+      "description": "Present a user-selected file through the iOS share sheet.",
+      "documentation_links": ["https://pyto.readthedocs.io/en/latest/library/file_system.html"],
+      "status": "unverified",
+      "evidence": {"kind": "documentation", "summary": "Pyto documents the file-system share sheet; target-device presentation has not been checked."},
+      "date": "2026-10-08"
+    },
+    {
+      "id": "url.open",
+      "description": "Ask the operating system to open a URL or supported application scheme.",
+      "documentation_links": ["https://developer.apple.com/documentation/uikit/uiapplication/open(_:options:completionhandler:)", "https://github.com/ColdGrub1384/Pyto/blob/main/Lib/pyto.py"],
+      "status": "unverified",
+      "evidence": {"kind": "documentation", "summary": "Apple documents UIApplication URL opening; scheme availability and runtime behavior are device-specific."},
+      "date": "2026-10-08"
+    },
+    {
+      "id": "notification.send",
+      "description": "Send a local notification through Pyto's notification interface.",
+      "documentation_links": ["https://pyto.readthedocs.io/en/latest/library/notifications.html", "https://developer.apple.com/documentation/usernotifications"],
+      "status": "unverified",
+      "evidence": {"kind": "documentation", "summary": "Pyto and Apple document local notification APIs; delivery permission and presentation have not been checked."},
+      "date": "2026-10-08"
+    },
+    {
+      "id": "speech.speak",
+      "description": "Speak text using an available system voice.",
+      "documentation_links": ["https://pyto.readthedocs.io/en/latest/library/speech.html"],
+      "status": "unverified",
+      "evidence": {"kind": "documentation", "summary": "Pyto documents system text-to-speech; audible output has not been checked on the target device."},
+      "date": "2026-10-08"
+    },
+    {
+      "id": "photo.pick",
+      "description": "Let the user select a photo from the photo library.",
+      "documentation_links": ["https://pyto.readthedocs.io/en/latest/library/photos.html", "https://developer.apple.com/documentation/photokit"],
+      "status": "unverified",
+      "evidence": {"kind": "documentation", "summary": "Pyto documents photo picking; permission and picker behavior have not been checked."},
+      "date": "2026-10-08"
+    },
+    {
+      "id": "photo.capture",
+      "description": "Capture a photo through Pyto's camera interface.",
+      "documentation_links": ["https://pyto.readthedocs.io/en/latest/library/photos.html", "https://developer.apple.com/documentation/avfoundation/cameras_and_media_capture"],
+      "status": "unverified",
+      "evidence": {"kind": "documentation", "summary": "Pyto documents camera capture; permission and camera availability have not been checked."},
+      "date": "2026-10-08"
+    },
+    {
+      "id": "photo.write",
+      "description": "Save an image to the photo library.",
+      "documentation_links": ["https://pyto.readthedocs.io/en/latest/library/photos.html", "https://developer.apple.com/documentation/photokit"],
+      "status": "unverified",
+      "evidence": {"kind": "documentation", "summary": "Pyto documents saving an image to Photos; permission and a successful device write have not been checked."},
+      "date": "2026-10-08"
+    },
+    {
+      "id": "calendar.read",
+      "description": "Read calendar events through a documented calendar integration.",
+      "documentation_links": ["https://developer.apple.com/documentation/eventkit", "https://github.com/ColdGrub1384/Pyto/blob/main/Lib/calendar_events.py"],
+      "status": "unverified",
+      "evidence": {"kind": "documentation", "summary": "Apple documents EventKit calendar access; this inventory entry does not implement EventKit or establish Pyto access."},
+      "date": "2026-10-08"
+    },
+    {
+      "id": "calendar.write",
+      "description": "Create or change calendar events through a documented calendar integration.",
+      "documentation_links": ["https://developer.apple.com/documentation/eventkit", "https://github.com/ColdGrub1384/Pyto/blob/main/Lib/calendar_events.py"],
+      "status": "unverified",
+      "evidence": {"kind": "documentation", "summary": "Apple documents EventKit event changes; this inventory entry does not implement EventKit or establish Pyto access."},
+      "date": "2026-10-08"
+    },
+    {
+      "id": "location.read",
+      "description": "Read the device's current location when the user and platform allow it.",
+      "documentation_links": ["https://pyto.readthedocs.io/en/latest/library/location.html", "https://developer.apple.com/documentation/corelocation"],
+      "status": "unverified",
+      "evidence": {"kind": "documentation", "summary": "Pyto and Apple document location access; permission and location results have not been checked."},
+      "date": "2026-10-08"
+    },
+    {
+      "id": "shortcut.run",
+      "description": "Open a named Shortcut through Pyto's x-callback interface and receive its result.",
+      "documentation_links": ["https://pyto.readthedocs.io/en/latest/library/xcallback.html", "https://pyto.readthedocs.io/en/latest/automation.html", "https://support.apple.com/guide/shortcuts/apdcd7f20a6f/ios"],
+      "status": "unverified",
+      "evidence": {"kind": "documentation", "summary": "Pyto documents x-callback interaction with Shortcuts; no personal Shortcut is enumerated or invoked by this inventory."},
+      "date": "2026-10-08"
+    },
+    {
+      "id": "background.keepalive",
+      "description": "Request a bounded background task while a Pyto script continues work.",
+      "documentation_links": ["https://pyto.readthedocs.io/en/latest/library/background.html"],
+      "status": "unverified",
+      "evidence": {"kind": "documentation", "summary": "Pyto documents its background task module; iOS suspension and duration remain device-dependent."},
+      "date": "2026-10-08"
+    },
+    {
+      "id": "workspace.persist",
+      "description": "Persist a harness-managed typed artifact in its private workspace across sessions.",
+      "documentation_links": ["https://pyto.readthedocs.io/en/latest/external.html"],
+      "status": "unverified",
+      "evidence": {"kind": "documentation", "summary": "Pyto documents script and container file access; this point concerns the harness's private workspace persistence, which requires a target-device check."},
+      "date": "2026-10-08"
+    }
+  ]
+}

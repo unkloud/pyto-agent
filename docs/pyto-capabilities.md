@@ -426,17 +426,42 @@ be scoped accordingly; this audit does not add a workaround.
 
 [`harness/handles.py`](../harness/handles.py) and
 [`examples/handle_pipeline.py`](../examples/handle_pipeline.py) demonstrate a local
-workspace-file pipeline. Handles expose an opaque ID, media type, shape, byte size,
-preview policy, workspace-session scope and lifetime. Text and binary content stays in a
-private temporary store; binary files are typed as media artifacts. The prototype caps
-an individual handle at 8 MiB and text transforms at 1 MiB. Operation outcomes are
-separate from the handle metadata. The example uses the same `Workspace` path jail as
-the registered file tools, transforms text locally, writes the output, and prints only
-handle metadata plus an output hash comparison. This is a prototype, not a new registered
-capability, a security sandbox, or an enforcement mechanism that prevents direct Pyto API
-use.
+workspace-file pipeline. Handles expose a stable opaque ID, media type, shape, byte size,
+preview policy, workspace scope and explicit-delete lifetime. Typed metadata lives in a
+private manifest separate from artifact bytes. Closing a store releases its caches but
+keeps artifacts for a later session; the example reopens the store and retrieves both the
+input and transformed handle. The prototype caps an individual handle at 8 MiB and text
+transforms at 1 MiB. Operation outcomes remain separate from handle metadata. The example
+uses the same `Workspace` path jail as the registered file tools, transforms text locally,
+writes the output, and prints only handle metadata plus an output hash comparison. This is
+not a security sandbox or an enforcement mechanism that prevents direct Pyto API use.
 
 The contract's `effects` and `data_egress` fields are declarative metadata. They neither
 enforce policy nor stop generated Python from importing Pyto modules or using other
-available APIs. The current LLM provider, prompt construction, Web UI and session-log
-format are outside this audit.
+available APIs. The LLM provider integration, Web UI and session-log format are outside
+this audit.
+
+## 15. Evidence-backed capability inventory — 2026-10-08
+
+[`capability-inventory.json`](capability-inventory.json) is the immutable, versioned
+documentation inventory shipped with the software. Its basic `<resource>.<action>` points
+are all `unverified`: official API documentation establishes a possible direction, not
+behavior on a specific installation. Each point links directly to official Pyto or Apple
+documentation/source. No API signatures are copied into the inventory.
+
+On Pyto, the harness keeps a separate versioned `capability-overrides.json` under its
+configured state directory. Entries record only deterministic failures or automated
+end-to-end successes, with the failed step/result, date, device model, iOS version, and
+Pyto version/build. Runtime mismatches make evidence stale without deleting it. Desktop
+checks and documentation do not write device evidence. `capability_record_evidence` is the
+tool-created-test path for recording substantive failures or successful end-to-end tests;
+the no-LLM [`device_capability_checks.py`](../device_capability_checks.py) launcher handles
+the ordinary target-Pyto checks and opt-in interactive checks. See
+[`device-capability-checks.md`](device-capability-checks.md) for the run steps.
+
+New saved programs and custom tools store capability dependencies separately from the
+older human-readable `required_capabilities` labels. The system prompt exposes point
+descriptions, current status and official documentation links so the model can consult
+actual API references before writing code. The inventory does not predeclare routes or
+fallbacks. Calendar points link to official API references, but Goal 15 does not implement
+EventKit or claim its target-device availability.

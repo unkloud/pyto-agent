@@ -574,11 +574,17 @@ Everything the agent can reach from these is listed by `python run.py --capabili
 ### (e) Capability contracts and local handles
 
 The checked-in [capability contract inventory](docs/capability-contracts.json) records
-the 46 fixed tools registered by `build_registry`, their JSON input schemas, model-visible
+the 47 fixed tools registered by `build_registry`, their JSON input schemas, model-visible
 output shape, effects, prerequisites and evidence source. User-authored tools are loaded
 from the active workspace at runtime; use `custom_tool_list` to see those instance-specific
 schemas. Contract `effects` and `data_egress` fields describe behavior only. They do not
 enforce policy or prevent generated Python from importing Pyto modules directly.
+
+The separate [device capability inventory](docs/capability-inventory.json) records
+documentation-backed `<resource>.<action>` directions. Device-specific evidence is kept in
+`capability-overrides.json` under the harness state directory, and stale evidence becomes
+`unverified` when the device or runtime fingerprint changes. The [Pyto check instructions](docs/device-capability-checks.md)
+explain how to run its no-LLM verification script.
 
 `shortcut_run_wait` remains device-unverified. The wrapper currently ignores the value
 returned by `xcallback.open_url`, and Shortcut output is semantically opaque to the model.
@@ -594,17 +600,17 @@ The [A1–A20 guide](docs/shortcut-bridge.md) covers additional fixtures and sui
 script writes JSONL observations with runtime information; until a person runs and reviews
 it on a real Pyto installation, device behavior remains `unknown`.
 
-The local handle prototype demonstrates a workspace-file flow without expanding file
+The local handle pipeline demonstrates a workspace-file flow without expanding file
 contents into model context. It uses the same `Workspace` path boundary as the existing
-file tools, stores opaque session-scoped text or binary artifact handles, transforms text
+file tools, stores opaque typed artifacts across store/session restarts, transforms text
 locally, and writes the result back to the workspace:
 
 ```sh
 python3 examples/handle_pipeline.py
 ```
 
-The example prints handle metadata and an output hash check only. It is a local prototype,
-not a registered model-facing capability, a sandbox, or an egress-enforcement mechanism.
+The example prints handle metadata and an output hash check only. It is not a registered
+model-facing capability, a sandbox, or an egress-enforcement mechanism.
 
 ---
 

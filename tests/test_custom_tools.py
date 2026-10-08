@@ -6,8 +6,9 @@ import hashlib
 import json
 import os
 import unittest
+from unittest import mock
 
-from harness import custom_tools
+from harness import capability_inventory, custom_tools
 from harness.errors import ToolError
 from harness.tools import ToolRegistry, ToolResult
 from harness.tools_ios import Workspace, build_registry, default_context
@@ -41,7 +42,7 @@ class TestCustomTools(TempDirTestCase):
     def source():
         return "def run(inputs):\n    return {'length': len(inputs['text'])}\n"
 
-    def create_and_register(self):
+    def create_and_register(self, capability_dependencies=None):
         manifest = custom_tools.create_custom_tool(
             self.workspace,
             name="summarize_text",
@@ -49,6 +50,7 @@ class TestCustomTools(TempDirTestCase):
             parameters=self.schema(),
             source=self.source(),
             required_modules=["re"],
+            capability_dependencies=capability_dependencies,
         )
         custom_tools.register_custom_tool(self.workspace, self.registry, self.run_program, manifest)
         return manifest
@@ -62,6 +64,73 @@ class TestCustomTools(TempDirTestCase):
         self.assertEqual(hashlib.sha256(source.encode("utf-8")).hexdigest(), manifest["source_sha256"])
         listed = custom_tools.list_custom_tools(self.workspace)
         self.assertEqual(listed["enabled"][0]["tool"], "custom_summarize_text")
+
+    def test_custom_tool_persists_capability_dependency_ids(self) -> None:
+        manifest = self.create_and_register(["clipboard.read"])
+        self.assertEqual(manifest["capability_dependencies"], ["clipboard.read"])
+        listed = custom_tools.list_custom_tools(self.workspace)
+        self.assertEqual(listed["enabled"][0]["capability_dependencies"], ["clipboard.read"])
+        self.assertNotIn("alternatives", manifest)
+
+    def test_unavailable_point_does_not_block_tool_using_another_documented_point(self) -> None:
+        runtime = {
+            "device_model": "iPhone17,3",
+            "ios_version": "26.1",
+            "pyto_version": "19.1",
+            "pyto_build": "500",
+        }
+        context = default_context(self.workspace_dir, self.path("spill"))
+        context.state_dir = self.path("state")
+        registry = build_registry(context)
+        with mock.patch.object(capability_inventory.ios, "is_pyto", return_value=True):
+            recorded = capability_inventory.record_unavailable(
+                context.state_dir,
+                "location.read",
+                failed_step="import location",
+                error_type="ImportError",
+                detail="location module unavailable",
+                test_id="minimal-location.py",
+                runtime=runtime,
+            )
+        self.assertTrue(recorded)
+        with mock.patch.object(capability_inventory, "runtime_fingerprint", return_value=runtime):
+            with self.assertRaisesRegex(ToolError, "currently unavailable"):
+                registry.get("custom_tool_create").handler(
+                    name="blocked_location_reader",
+                    purpose="Read the device location directly.",
+                    parameters={
+                        "type": "object",
+                        "properties": {},
+                        "additionalProperties": False,
+                    },
+                    source="def run(inputs):\n    return None\n",
+                    capability_dependencies=["location.read"],
+                )
+            manifest = registry.get("custom_tool_create").handler(
+                name="shortcut_location_reader",
+                purpose="Read a location result supplied by a named Shortcut.",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"},
+                        "input_text": {"type": "string"},
+                    },
+                    "required": ["name", "input_text"],
+                    "additionalProperties": False,
+                },
+                source=(
+                    "from urllib.parse import quote\nimport xcallback\n\n"
+                    "def run(inputs):\n"
+                    "    url = 'shortcuts://x-callback-url/run-shortcut?name={}&input=text&text={}'.format("
+                    "quote(inputs['name']), quote(inputs['input_text']))\n"
+                    "    return xcallback.open_url(url)\n"
+                ),
+                capability_dependencies=["shortcut.run"],
+            )
+        self.assertFalse(manifest.is_error, manifest.content)
+        listed = custom_tools.list_custom_tools(self.workspace)["enabled"][0]
+        self.assertEqual(listed["capability_dependencies"], ["shortcut.run"])
+        self.assertNotIn("alternatives", listed)
 
     def test_custom_tool_runs_through_the_program_runner_with_json_inputs(self) -> None:
         self.create_and_register()

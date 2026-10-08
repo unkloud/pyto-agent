@@ -29,8 +29,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
-from . import budget, custom_tools, doctor, ios, module_tools, previews, program_inputs, programs, pyto_api, repair, unix_tools
-from .config import Config, ConfigError, load_config
+from . import budget, capability_inventory, custom_tools, doctor, ios, module_tools, previews, program_inputs, programs, pyto_api, repair, unix_tools
+from .config import Config, ConfigError, default_state_dir, load_config
 from .errors import ToolError
 from .home import expand_user_path
 from .security import (
@@ -314,6 +314,7 @@ def build_registry(context: ToolContext) -> ToolRegistry:
                 "entry_file": {"type": "string", "description": "Existing workspace-relative .py file."},
                 "mode": {"type": "string", "enum": ["batch", "app"], "description": "Use batch for a short script or app for a PytoUI preview."},
                 "required_capabilities": {"type": "array", "items": {"type": "string"}, "description": "Human-readable Pyto modules, permissions or inputs the program needs."},
+                "capability_dependencies": {"type": "array", "items": {"type": "string", "pattern": "^[a-z][a-z0-9]*(?:\\.[a-z][a-z0-9]*)+$"}, "maxItems": 40, "description": "Capability inventory IDs this new or updated program uses, such as clipboard.read. Consult the documentation links in the system context first."},
                 "input_schema": {"type": "array", "items": {"type": "object", "additionalProperties": True}, "description": "Optional form fields: name, label, type (text/number/choice/file/folder), required and type-specific validation. Only a stable, non-sensitive choice default may be stored; text, number and path values are requested each run. Input-enabled programs implement def main(inputs)."},
                 "program_id": {"type": "string", "description": "Existing id when updating a registered program; omit for a new entry."},
             },
@@ -328,10 +329,19 @@ def build_registry(context: ToolContext) -> ToolRegistry:
         entry_file: str,
         mode: str,
         required_capabilities: Optional[Sequence[str]] = None,
+        capability_dependencies: Optional[Sequence[str]] = None,
         input_schema: Optional[Sequence[Mapping[str, Any]]] = None,
         program_id: str = "",
     ) -> ToolResult:
         try:
+            try:
+                unavailable = capability_inventory.unavailable_dependencies(
+                    context.state_dir or default_state_dir(), capability_dependencies or []
+                )
+            except capability_inventory.CapabilityInventoryError as exc:
+                raise ToolError(str(exc)) from exc
+            if unavailable:
+                raise ToolError("cannot register a program that depends on currently unavailable point(s): {}".format(", ".join(unavailable)))
             record = programs.register(
                 workspace,
                 title=title,
@@ -339,6 +349,7 @@ def build_registry(context: ToolContext) -> ToolRegistry:
                 entry_file=entry_file,
                 mode=mode,
                 required_capabilities=required_capabilities,
+                capability_dependencies=capability_dependencies,
                 input_schema=input_schema,
                 program_id=program_id,
             )
@@ -891,6 +902,7 @@ def build_registry(context: ToolContext) -> ToolRegistry:
                 },
                 "required_commands": {"type": "array", "items": {"type": "string"}, "maxItems": 32},
                 "required_modules": {"type": "array", "items": {"type": "string"}, "maxItems": 32},
+                "capability_dependencies": {"type": "array", "items": {"type": "string", "pattern": "^[a-z][a-z0-9]*(?:\\.[a-z][a-z0-9]*)+$"}, "maxItems": 40, "description": "Capability inventory IDs used by this new custom tool. Check their status and linked documentation in the system context."},
             },
             "required": ["name", "purpose", "parameters", "source"],
             "additionalProperties": False,
@@ -905,9 +917,18 @@ def build_registry(context: ToolContext) -> ToolRegistry:
         source: str,
         required_commands: Optional[Sequence[str]] = None,
         required_modules: Optional[Sequence[str]] = None,
+        capability_dependencies: Optional[Sequence[str]] = None,
     ) -> ToolResult:
         if context.registry is None:
             raise ToolError("the live tool registry is unavailable")
+        try:
+            unavailable = capability_inventory.unavailable_dependencies(
+                context.state_dir, capability_dependencies or []
+            )
+        except capability_inventory.CapabilityInventoryError as exc:
+            raise ToolError(str(exc)) from exc
+        if unavailable:
+            raise ToolError("cannot create a tool that depends on currently unavailable point(s): {}".format(", ".join(unavailable)))
         manifest = custom_tools.create_custom_tool(
             workspace,
             name=name,
@@ -916,6 +937,7 @@ def build_registry(context: ToolContext) -> ToolRegistry:
             source=source,
             required_commands=required_commands,
             required_modules=required_modules,
+            capability_dependencies=capability_dependencies,
         )
         custom_tools.register_custom_tool(workspace, context.registry, run_program, manifest)
         return ToolResult.ok(
@@ -1523,6 +1545,79 @@ def build_registry(context: ToolContext) -> ToolRegistry:
         if result.supported and (result.data.get("available_mb") or 0) < 600:
             detail += "\nMemory is critically low: write small files and avoid loading anything large."
         return ToolResult.ok(detail, **{k: v for k, v in result.data.items()})
+
+    @registry.tool(
+        "capability_record_evidence",
+        "Record a deterministic minimal-path failure or an automated end-to-end success for a capability point. Use only after running the named check; incidental failures leave the override unchanged.",
+        {
+            "type": "object",
+            "properties": {
+                "capability_id": {"type": "string", "pattern": "^[a-z][a-z0-9]*(?:\\.[a-z][a-z0-9]*)+$"},
+                "status": {"type": "string", "enum": ["unavailable", "verified"]},
+                "test_kind": {"type": "string", "enum": ["minimal_path", "end_to_end"]},
+                "test_id": {"type": "string", "minLength": 1, "maxLength": 200, "description": "Workspace-relative test path or stable check name."},
+                "failed_step": {"type": "string", "maxLength": 300},
+                "error_type": {"type": "string", "enum": ["ImportError", "ModuleNotFoundError", "PermissionError", "AttributeError", "RuntimeError", "OSError"]},
+                "detail": {"type": "string", "maxLength": capability_inventory.MAX_EVIDENCE_CHARS},
+                "deterministic_platform_failure": {"type": "boolean", "description": "Set only for a known deterministic platform limitation expressed as RuntimeError or OSError."},
+                "result": {"type": "string", "maxLength": capability_inventory.MAX_EVIDENCE_CHARS, "description": "Meaningful automated end-to-end success result; never use an import-only pass."},
+            },
+            "required": ["capability_id", "status", "test_kind", "test_id"],
+            "additionalProperties": False,
+        },
+        timeout=15.0,
+        resource_writes=("harness_state",),
+    )
+    def capability_record_evidence(
+        capability_id: str,
+        status: str,
+        test_kind: str,
+        test_id: str,
+        failed_step: str = "",
+        error_type: str = "",
+        detail: str = "",
+        deterministic_platform_failure: bool = False,
+        result: str = "",
+    ) -> ToolResult:
+        try:
+            if status == "unavailable":
+                if test_kind != "minimal_path":
+                    raise ToolError("unavailable evidence must identify the minimal_path test")
+                recorded = capability_inventory.record_unavailable(
+                    context.state_dir or default_state_dir(),
+                    capability_id,
+                    failed_step=failed_step,
+                    error_type=error_type,
+                    detail=detail,
+                    test_id=test_id,
+                    deterministic_platform_failure=deterministic_platform_failure,
+                )
+            elif status == "verified":
+                if test_kind != "end_to_end":
+                    raise ToolError("verified evidence requires an automated end_to_end check")
+                recorded = capability_inventory.record_verified(
+                    context.state_dir or default_state_dir(),
+                    capability_id,
+                    test_id=test_id,
+                    result=result,
+                )
+            else:
+                raise ToolError("status must be unavailable or verified")
+        except capability_inventory.CapabilityInventoryError as exc:
+            raise ToolError(str(exc)) from exc
+        if not recorded:
+            return ToolResult.ok(
+                "No device override was changed. The check was incidental, not deterministic, or this is not a target Pyto runtime with a complete device fingerprint.",
+                recorded=False,
+                capability_id=capability_id,
+            )
+        return ToolResult.ok(
+            "Recorded {} evidence for {} on this Pyto installation.".format(status, capability_id),
+            recorded=True,
+            capability_id=capability_id,
+            status=status,
+            test_id=test_id,
+        )
 
     @registry.tool(
         "device_capabilities",
@@ -2542,7 +2637,7 @@ def default_context(workspace_dir: str, spill_dir: str = "", *, config: Any = No
 
     workspace = Workspace(workspace_dir)
     resolved_config_path = expand_user_path(config_module.default_config_path(), what="config file path")
-    return ToolContext(
+    context = ToolContext(
         workspace=workspace,
         spill_dir=spill_dir or os.path.join(workspace.root, "tool-output"),
         memory_path=os.path.join(workspace.root, "memory.json"),
@@ -2551,6 +2646,9 @@ def default_context(workspace_dir: str, spill_dir: str = "", *, config: Any = No
         state_dir=expand_user_path(config_module.default_state_dir(), what="state directory"),
         harness_root=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
     )
+    if ios.is_pyto():
+        capability_inventory.initialize_override(context.state_dir)
+    return context
 
 
 def tool_summary(registry: ToolRegistry) -> List[Tuple[str, str]]:

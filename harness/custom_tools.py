@@ -18,6 +18,8 @@ import time
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from .errors import ToolError
+from . import capability_inventory
+from .config import default_state_dir
 from .schema import validate as validate_values
 from .security import mkdir_private, open_private
 from .tools import ToolDef, ToolRegistry, ToolResult
@@ -229,6 +231,7 @@ def create_custom_tool(
     source: str,
     required_commands: Optional[Sequence[str]] = None,
     required_modules: Optional[Sequence[str]] = None,
+    capability_dependencies: Optional[Sequence[str]] = None,
 ) -> Dict[str, Any]:
     """Persist an approved custom tool and return its verified manifest."""
     slug = _slug(name)
@@ -237,6 +240,10 @@ def create_custom_tool(
     program = _source_program(source)
     commands = _requirement_list(required_commands or [], "required command")
     modules = _requirement_list(required_modules or [], "required module")
+    try:
+        dependencies = capability_inventory.normalize_dependencies(capability_dependencies)
+    except capability_inventory.CapabilityInventoryError as exc:
+        raise ToolError(str(exc)) from exc
     source_path, manifest_path = _tool_paths(workspace, slug)
     if os.path.exists(source_path) or os.path.exists(manifest_path):
         raise ToolError("custom tool {!r} already exists; choose a new name".format(slug))
@@ -250,6 +257,7 @@ def create_custom_tool(
         "parameters": schema,
         "required_commands": commands,
         "required_modules": modules,
+        "capability_dependencies": dependencies,
         "source": STORE_DIR + "/" + slug + ".py",
         "source_sha256": source_hash,
         "created_at": int(time.time()),
@@ -329,6 +337,12 @@ def _read_manifest(workspace: Any, manifest_path: str) -> Dict[str, Any]:
         raise ToolError("custom tool source changed after approval; create and review a new tool")
     manifest["required_commands"] = _requirement_list(manifest.get("required_commands", []), "required command")
     manifest["required_modules"] = _requirement_list(manifest.get("required_modules", []), "required module")
+    try:
+        manifest["capability_dependencies"] = capability_inventory.normalize_dependencies(
+            manifest.get("capability_dependencies", [])
+        )
+    except capability_inventory.CapabilityInventoryError as exc:
+        raise ToolError("invalid capability_dependencies: {}".format(exc)) from exc
     manifest["parameters"] = schema
     return manifest
 
@@ -349,6 +363,11 @@ def _tool_definition(workspace: Any, manifest: Mapping[str, Any], run_program: C
             or current.get("parameters") != manifest.get("parameters")
         ):
             raise ToolError("custom tool source or inputs changed after it was loaded; review it before using it")
+        unavailable = capability_inventory.unavailable_dependencies(
+            default_state_dir(), current.get("capability_dependencies", [])
+        )
+        if unavailable:
+            raise ToolError("custom tool requires capability point(s) currently unavailable on this device: {}".format(", ".join(unavailable)))
         encoded = json.dumps(arguments, ensure_ascii=False, separators=(",", ":"))
         relative = str(manifest["source"])
         return run_program(relative, args=[encoded])
@@ -433,6 +452,7 @@ def list_custom_tools(workspace: Any) -> Dict[str, Any]:
                         "inputs": manifest["parameters"],
                         "required_commands": manifest.get("required_commands", []),
                         "required_modules": manifest.get("required_modules", []),
+                        "capability_dependencies": manifest.get("capability_dependencies", []),
                         "source": manifest["source"],
                         "source_sha256": manifest["source_sha256"],
                         "status": "disabled" if is_disabled else "enabled",

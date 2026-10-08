@@ -47,6 +47,29 @@ class TestProgramLibrary(TempDirTestCase):
         self.assertTrue(loaded["entry_exists"])
         self.assertEqual(loaded["last_verification_result"]["status"], "not_run")
 
+    def test_capability_dependency_ids_persist_and_existing_labels_keep_their_meaning(self) -> None:
+        self.write_program("needs_clipboard.py")
+        record = self.register(
+            entry_file="needs_clipboard.py",
+            required_capabilities=["pasteboard", "calendar"],
+            capability_dependencies=["clipboard.read"],
+        )
+        loaded = programs.find_program(self.workspace, record["id"])
+        self.assertEqual(loaded["required_capabilities"], ["pasteboard", "calendar"])
+        self.assertEqual(loaded["capability_dependencies"], ["clipboard.read"])
+        updated = self.register(
+            title=record["title"],
+            entry_file="needs_clipboard.py",
+            program_id=record["id"],
+        )
+        self.assertEqual(updated["capability_dependencies"], ["clipboard.read"])
+        with self.assertRaises(programs.ProgramLibraryError):
+            self.register(
+                title="Unknown capability",
+                entry_file="needs_clipboard.py",
+                capability_dependencies=["clipboard.read.everything"],
+            )
+
     def test_schema_three_persists_input_contract_and_versioned_project_brief(self) -> None:
         self.write_program("input_demo.py", "def main(inputs):\n    print(inputs['count'])\n")
         record = self.register(

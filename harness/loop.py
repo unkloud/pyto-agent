@@ -31,8 +31,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
-from . import budget, ios, pyto_api, request_context
-from .config import Config, ConfigError
+from . import budget, capability_inventory, ios, pyto_api, request_context
+from .config import Config, ConfigError, default_state_dir
 from .errors import CancelledError, HarnessError
 from .home import expand_user_path
 from .llm import AssistantStream, LLMClient, LLMConfig, RetryPolicy, ToolCall, Usage
@@ -75,6 +75,7 @@ AUTO_APPROVED_TOOLS = frozenset(
         "memory_read",
         "memory_write",
         "memory_status",
+        "capability_record_evidence",
         "calendar_list_events",
         "device_capabilities",
         "pyto_api",
@@ -381,6 +382,13 @@ How this environment works
 - Desktop checks cannot verify iOS permissions, framework calls, PytoUI presentation, keyboard
   layout, or behavior after iOS suspends the app. Say which part you checked and leave native
   behavior unverified until it has actually run on a Pyto device.
+- For a newly written tool or saved program, declare capability_dependencies with the
+  <resource>.<action> IDs below. Read the linked official docs before writing code for a point.
+  If it is unverified, run the smallest relevant inline test during creation. Record only a
+  deterministic platform failure with capability_record_evidence; timeouts, cancellations,
+  network errors, and test-code bugs do not change device evidence. Mark verified only after an
+  automated end-to-end success on this Pyto installation. Choose approaches from the task and
+  evidence; the inventory does not prescribe routes.
 
 Choosing the workflow
 - Infer whether the user wants a one-time action, a reusable batch program, or an interactive
@@ -501,6 +509,13 @@ def build_system_prompt(config: Config, workspace: str, *, extra: str = "") -> s
                 ", ".join(missing)
             )
         )
+    try:
+        state_dir = default_state_dir()
+        if ios.is_pyto():
+            capability_inventory.initialize_override(state_dir)
+        rendered += "\n\n" + capability_inventory.render_prompt_context(state_dir)
+    except capability_inventory.CapabilityInventoryError as exc:
+        rendered += "\n\nCapability inventory could not be loaded: {}".format(exc)
     if extra:
         rendered += "\n" + extra.strip() + "\n"
     return rendered

@@ -105,6 +105,14 @@ class TestSystemPrompt(TempDirTestCase):
             prompt = " ".join(build_system_prompt(self.make_config(), self.workspace_dir).split())
         self.assertIn("runtime features were not detected here: speech", prompt)
 
+    def test_prompt_surfaces_capability_docs_and_creation_test_instructions(self) -> None:
+        prompt = build_system_prompt(self.make_config(), self.workspace_dir)
+        self.assertIn("clipboard.read — unverified", prompt)
+        self.assertIn("https://pyto.readthedocs.io/en/latest/library/pasteboard.html", prompt)
+        self.assertIn("capability_dependencies", prompt)
+        self.assertIn("smallest relevant inline test", prompt)
+        self.assertIn("capability_record_evidence", prompt)
+
     def test_extra_text_is_appended(self) -> None:
         prompt = build_system_prompt(self.make_config(), self.workspace_dir, extra="Remember: be brief.")
         self.assertIn("be brief", prompt)
