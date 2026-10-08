@@ -183,6 +183,7 @@
     el("send").disabled = blocked;
     el("prompt").disabled = blocked;
     el("stop-turn").disabled = !busy || stopping;
+    el("stop-turn").hidden = !busy || stopping;
     el("all-chats-link").setAttribute("aria-disabled", String(blocked));
     document.querySelectorAll(".run-program").forEach((button) => { button.disabled = blocked; });
     document.querySelectorAll("#session-start button").forEach((button) => { button.disabled = blocked; });
@@ -274,6 +275,7 @@
   }
 
   function activateView(name) {
+    document.body.classList.toggle("chat-view-active", name === "chat");
     document.querySelectorAll(".tab").forEach((tab) => {
       const active = tab.dataset.view === name;
       tab.classList.toggle("active", active);
@@ -417,10 +419,10 @@
     el("workspace-tabs").hidden = false;
     el("all-chats-link").hidden = false;
     document.body.classList.add("chat-active");
+    document.body.classList.add("chat-view-active");
     const chat = el("view-chat");
     chat.hidden = false;
     chat.classList.add("active");
-    el("active-session").textContent = sessionMetadata(response.session || {});
     historyOffset = 0;
     transcript.replaceChildren();
     for (const message of response.messages || []) {
@@ -530,6 +532,7 @@
     document.querySelectorAll(".view").forEach((view) => { view.hidden = true; view.classList.remove("active"); });
     el("all-chats-link").hidden = true;
     document.body.classList.remove("chat-active");
+    document.body.classList.remove("chat-view-active");
     await loadSessionChoices();
   }
 

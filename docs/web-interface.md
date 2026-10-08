@@ -42,7 +42,8 @@ The page has three workspace views:
 
 Approvals appear in Chat with **Allow** and **Deny** controls. The `--yolo` option keeps
 its existing behavior and bypasses approvals. Use **Stop web session** to cancel pending
-approvals, stop the web server, and end the foreground run. Stopping the Pyto script also
+approvals, stop the web server, and end the foreground run. In Chat, the control is in the
+compact toolbar above the workspace tabs. Stopping the Pyto script also
 closes the server through normal cleanup.
 
 ## Formatted assistant replies
